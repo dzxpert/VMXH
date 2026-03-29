@@ -1,0 +1,43 @@
+TARGETNAME=VMXToolboxDrv
+TARGETTYPE=DRIVER
+
+MSC_WARNING_LEVEL=/W3 /WX /wd4819
+
+INCLUDES=..\common
+
+C_DEFINES=$(C_DEFINES) -D_KERNEL_MODE
+
+#
+# Need makefile.inc for custom ASM build rules
+#
+NTTARGETFILE1=$(OBJ_PATH)\$O\vmx_asm.obj $(OBJ_PATH)\$O\svm_asm.obj $(OBJ_PATH)\$O\hv_hook_asm.obj
+
+#
+# C source files
+#
+SOURCES=\
+    vmxdrv.c            \
+    vmx_init.c          \
+    vmx_exit.c          \
+    ept.c               \
+    msr.c               \
+    process.c           \
+    anti_anti_debug.c   \
+    log.c               \
+    hv_detect.c         \
+    hv_mem.c            \
+    hv_hook.c           \
+    svm_init.c          \
+    svm_exit.c          \
+    npt.c
+
+#
+# Link libraries
+#
+TARGETLIBS=\
+    $(OBJ_PATH)\$O\vmx_asm.obj      \
+    $(OBJ_PATH)\$O\svm_asm.obj      \
+    $(OBJ_PATH)\$O\hv_hook_asm.obj  \
+    $(DDK_LIB_PATH)\ntstrsafe.lib   \
+    $(DDK_LIB_PATH)\ntoskrnl.lib    \
+    $(DDK_LIB_PATH)\hal.lib

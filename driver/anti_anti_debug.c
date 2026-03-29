@@ -1,0 +1,708 @@
+/*
+ * anti_anti_debug.c - VMX Anti-Anti-Debug Hypervisor
+ * Core anti-anti-debug engine: DR spoofing, TSC compensation,
+ * CPUID hiding, EPT hooks on Nt* APIs, exception normalization
+ */
+
+#include "anti_anti_debug.h"
+#include "ept.h"
+#include "hv_ops.h"
+#include "log.h"
+#include "../common/shared.h"
+#include <ntstrsafe.h>
+
+/* ========================================================================= */
+/*  Global State                                                             */
+/* ========================================================================= */
+
+AAD_STATE g_AadState = { 0 };
+
+/* ========================================================================= */
+/*  Kernel Address Resolution                                                */
+/* ========================================================================= */
+
+/*
+ * Resolve ntoskrnl export by name using MmGetSystemRoutineAddress
+ */
+static ULONG64 ResolveKernelExport(const WCHAR *FunctionName)
+{
+    UNICODE_STRING Name;
+    PVOID Addr;
+    RtlInitUnicodeString(&Name, FunctionName);
+    Addr = MmGetSystemRoutineAddress(&Name);
+    return (ULONG64)Addr;
+}
+
+/* ========================================================================= */
+/*  EPT Hook Handlers (replacement functions)                                */
+/* ========================================================================= */
+
+/*
+ * Hooked NtQueryInformationProcess
+ * Spoofs debug-related information classes for target processes
+ */
+static NTSTATUS NTAPI HookNtQueryInformationProcess(
+    HANDLE  ProcessHandle,
+    ULONG   ProcessInformationClass,
+    PVOID   ProcessInformation,
+    ULONG   ProcessInformationLength,
+    PULONG  ReturnLength
+)
+{
+    NTSTATUS Status;
+    PEPROCESS CurrentProcess;
+    ULONG CurrentPid;
+    ULONG64 CurrentCr3;
+    PTARGET_PROCESS Target;
+
+    /* Call original function first */
+    Status = g_AadState.OrigNtQueryInformationProcess(
+        ProcessHandle,
+        ProcessInformationClass,
+        ProcessInformation,
+        ProcessInformationLength,
+        ReturnLength
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        return Status;
+    }
+
+    /* Check if current process is a target */
+    CurrentProcess = PsGetCurrentProcess();
+    CurrentPid = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+
+    /*
+     * We check by PID here since we're in the context of the calling process.
+     * For a more robust check, we could look up CR3.
+     */
+    CurrentCr3 = __readcr3();
+    Target = ProcessFindByCr3(CurrentCr3);
+
+    if (!Target || !(Target->Flags & AAD_HIDE_DEBUGGER)) {
+        return Status;
+    }
+
+    /* Spoof debug information */
+    __try {
+        switch (ProcessInformationClass) {
+        case ProcessDebugPort:
+            /*
+             * ProcessDebugPort (7): Returns debug port.
+             * Non-zero means being debugged.
+             * Spoof: set to 0 (not being debugged)
+             */
+            if (ProcessInformation && ProcessInformationLength >= sizeof(ULONG_PTR)) {
+                *(PULONG_PTR)ProcessInformation = 0;
+                LOG_DEBUG_PID(CurrentPid, "Spoofed ProcessDebugPort = 0");
+            }
+            break;
+
+        case ProcessDebugObjectHandle:
+            /*
+             * ProcessDebugObjectHandle (0x1E): Returns debug object handle.
+             * Success means being debugged.
+             * Spoof: return STATUS_PORT_NOT_SET
+             */
+            if (ProcessInformation && ProcessInformationLength >= sizeof(HANDLE)) {
+                *(PHANDLE)ProcessInformation = NULL;
+                Status = (NTSTATUS)0xC0000353L;  /* STATUS_PORT_NOT_SET */
+                LOG_DEBUG_PID(CurrentPid, "Spoofed ProcessDebugObjectHandle = STATUS_PORT_NOT_SET");
+            }
+            break;
+
+        case ProcessDebugFlags:
+            /*
+             * ProcessDebugFlags (0x1F): Returns NoDebugInherit flag.
+             * 0 means being debugged, 1 means not.
+             * Spoof: set to 1 (not being debugged)
+             */
+            if (ProcessInformation && ProcessInformationLength >= sizeof(ULONG)) {
+                *(PULONG)ProcessInformation = 1;
+                LOG_DEBUG_PID(CurrentPid, "Spoofed ProcessDebugFlags = 1");
+            }
+            break;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        /* Invalid user buffer - just return original status */
+    }
+
+    return Status;
+}
+
+/*
+ * Hooked NtQuerySystemInformation
+ * Spoofs SystemKernelDebuggerInformation
+ */
+static NTSTATUS NTAPI HookNtQuerySystemInformation(
+    ULONG   SystemInformationClass,
+    PVOID   SystemInformation,
+    ULONG   SystemInformationLength,
+    PULONG  ReturnLength
+)
+{
+    NTSTATUS Status;
+    ULONG64 CurrentCr3;
+
+    /* Call original */
+    Status = g_AadState.OrigNtQuerySystemInformation(
+        SystemInformationClass,
+        SystemInformation,
+        SystemInformationLength,
+        ReturnLength
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        return Status;
+    }
+
+    /* Check if caller is a target process */
+    CurrentCr3 = __readcr3();
+    if (!IsFeatureEnabled(CurrentCr3, AAD_HIDE_SYSINFO)) {
+        return Status;
+    }
+
+    __try {
+        if (SystemInformationClass == SystemKernelDebuggerInformation) {
+            PSYSTEM_KERNEL_DEBUGGER_INFORMATION Info =
+                (PSYSTEM_KERNEL_DEBUGGER_INFORMATION)SystemInformation;
+
+            if (SystemInformationLength >= sizeof(SYSTEM_KERNEL_DEBUGGER_INFORMATION)) {
+                Info->KernelDebuggerEnabled = FALSE;
+                Info->KernelDebuggerNotPresent = TRUE;
+                LOG_DEBUG("Spoofed SystemKernelDebuggerInformation");
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        /* Invalid buffer */
+    }
+
+    return Status;
+}
+
+/*
+ * Hooked NtSetInformationThread
+ * Blocks ThreadHideFromDebugger (0x11)
+ */
+static NTSTATUS NTAPI HookNtSetInformationThread(
+    HANDLE  ThreadHandle,
+    ULONG   ThreadInformationClass,
+    PVOID   ThreadInformation,
+    ULONG   ThreadInformationLength
+)
+{
+    ULONG64 CurrentCr3 = __readcr3();
+
+    /*
+     * ThreadHideFromDebugger (0x11): Hides thread from debugger.
+     * If target process calls this, we block it by returning success
+     * without actually calling the original function.
+     */
+    if (ThreadInformationClass == 0x11 &&
+        IsFeatureEnabled(CurrentCr3, AAD_HIDE_THREADINFO)) {
+        LOG_DEBUG("Blocked NtSetInformationThread(ThreadHideFromDebugger)");
+        return STATUS_SUCCESS;  /* Pretend it succeeded */
+    }
+
+    return g_AadState.OrigNtSetInformationThread(
+        ThreadHandle,
+        ThreadInformationClass,
+        ThreadInformation,
+        ThreadInformationLength
+    );
+}
+
+/*
+ * Hooked NtClose
+ * Prevents NtClose with invalid handle from triggering exception
+ * (anti-debug trick: debugger catches the exception, non-debugged app doesn't)
+ */
+static NTSTATUS NTAPI HookNtClose(HANDLE Handle)
+{
+    ULONG64 CurrentCr3 = __readcr3();
+
+    if (IsFeatureEnabled(CurrentCr3, AAD_HIDE_NTCLOSE)) {
+        /*
+         * Instead of letting NtClose potentially raise an exception
+         * (STATUS_HANDLE_NOT_CLOSABLE or STATUS_INVALID_HANDLE),
+         * we wrap the call and suppress exceptions.
+         */
+        NTSTATUS Status;
+
+        __try {
+            Status = g_AadState.OrigNtClose(Handle);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            Status = GetExceptionCode();
+            LOG_DEBUG("Suppressed NtClose exception: 0x%08X", Status);
+        }
+
+        return Status;
+    }
+
+    return g_AadState.OrigNtClose(Handle);
+}
+
+/* ========================================================================= */
+/*  Initialization                                                           */
+/* ========================================================================= */
+
+NTSTATUS AadInitialize(VOID)
+{
+    RtlZeroMemory(&g_AadState, sizeof(AAD_STATE));
+
+    /* Resolve kernel function addresses */
+    g_AadState.NtQueryInformationProcessAddr =
+        ResolveKernelExport(L"NtQueryInformationProcess");
+    g_AadState.NtQuerySystemInformationAddr =
+        ResolveKernelExport(L"NtQuerySystemInformation");
+    g_AadState.NtSetInformationThreadAddr =
+        ResolveKernelExport(L"NtSetInformationThread");
+    g_AadState.NtCloseAddr =
+        ResolveKernelExport(L"NtClose");
+
+    if (!g_AadState.NtQueryInformationProcessAddr) {
+        LOG_ERROR("Failed to resolve NtQueryInformationProcess");
+        return STATUS_NOT_FOUND;
+    }
+
+    LOG_INFO("Resolved NtQueryInformationProcess: 0x%llX", g_AadState.NtQueryInformationProcessAddr);
+    LOG_INFO("Resolved NtQuerySystemInformation:  0x%llX", g_AadState.NtQuerySystemInformationAddr);
+    LOG_INFO("Resolved NtSetInformationThread:    0x%llX", g_AadState.NtSetInformationThreadAddr);
+    LOG_INFO("Resolved NtClose:                   0x%llX", g_AadState.NtCloseAddr);
+
+    g_AadState.Initialized = TRUE;
+    return STATUS_SUCCESS;
+}
+
+VOID AadCleanup(VOID)
+{
+    AadRemoveHooks();
+    g_AadState.Initialized = FALSE;
+}
+
+/* ========================================================================= */
+/*  EPT Hook Installation                                                    */
+/* ========================================================================= */
+
+NTSTATUS AadInstallHooks(VOID)
+{
+    NTSTATUS Status;
+
+    if (!g_AadState.Initialized) {
+        Status = AadInitialize();
+        if (!NT_SUCCESS(Status)) {
+            return Status;
+        }
+    }
+
+    /* Hook NtQueryInformationProcess */
+    if (g_AadState.NtQueryInformationProcessAddr) {
+        Status = HvHookFunction(
+            g_AadState.NtQueryInformationProcessAddr,
+            (PVOID)HookNtQueryInformationProcess,
+            (PVOID *)&g_AadState.OrigNtQueryInformationProcess
+        );
+        if (NT_SUCCESS(Status)) {
+            LOG_INFO("Hook installed: NtQueryInformationProcess");
+        } else {
+            LOG_WARN("Failed to hook NtQueryInformationProcess: 0x%08X", Status);
+        }
+    }
+
+    /* Hook NtQuerySystemInformation */
+    if (g_AadState.NtQuerySystemInformationAddr) {
+        Status = HvHookFunction(
+            g_AadState.NtQuerySystemInformationAddr,
+            (PVOID)HookNtQuerySystemInformation,
+            (PVOID *)&g_AadState.OrigNtQuerySystemInformation
+        );
+        if (NT_SUCCESS(Status)) {
+            LOG_INFO("Hook installed: NtQuerySystemInformation");
+        } else {
+            LOG_WARN("Failed to hook NtQuerySystemInformation: 0x%08X", Status);
+        }
+    }
+
+    /* Hook NtSetInformationThread */
+    if (g_AadState.NtSetInformationThreadAddr) {
+        Status = HvHookFunction(
+            g_AadState.NtSetInformationThreadAddr,
+            (PVOID)HookNtSetInformationThread,
+            (PVOID *)&g_AadState.OrigNtSetInformationThread
+        );
+        if (NT_SUCCESS(Status)) {
+            LOG_INFO("Hook installed: NtSetInformationThread");
+        } else {
+            LOG_WARN("Failed to hook NtSetInformationThread: 0x%08X", Status);
+        }
+    }
+
+    /* Hook NtClose */
+    if (g_AadState.NtCloseAddr) {
+        Status = HvHookFunction(
+            g_AadState.NtCloseAddr,
+            (PVOID)HookNtClose,
+            (PVOID *)&g_AadState.OrigNtClose
+        );
+        if (NT_SUCCESS(Status)) {
+            LOG_INFO("Hook installed: NtClose");
+        } else {
+            LOG_WARN("Failed to hook NtClose: 0x%08X", Status);
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+VOID AadRemoveHooks(VOID)
+{
+    if (g_AadState.NtQueryInformationProcessAddr)
+        HvUnhookFunction(g_AadState.NtQueryInformationProcessAddr);
+    if (g_AadState.NtQuerySystemInformationAddr)
+        HvUnhookFunction(g_AadState.NtQuerySystemInformationAddr);
+    if (g_AadState.NtSetInformationThreadAddr)
+        HvUnhookFunction(g_AadState.NtSetInformationThreadAddr);
+    if (g_AadState.NtCloseAddr)
+        HvUnhookFunction(g_AadState.NtCloseAddr);
+
+    LOG_INFO("All anti-anti-debug hooks removed");
+}
+
+/* ========================================================================= */
+/*  Debug Register Access Handler                                            */
+/* ========================================================================= */
+
+/*
+ * Handle MOV-DR exit for target processes.
+ * Spoofs DR0-DR7 to hide hardware breakpoints.
+ */
+BOOLEAN AadHandleDrAccess(PGUEST_CONTEXT GuestContext)
+{
+    ULONG64     ExitQual;
+    ULONG       DrNumber;
+    ULONG       Direction;
+    ULONG       GpReg;
+    ULONG64     GuestCr3;
+    PULONG64    RegPtr;
+    ULONG64     *GpRegs;
+
+    ExitQual = HvReadExitQualification();
+    DrNumber  = (ULONG)(ExitQual & DR_ACCESS_REG_MASK);
+    Direction = (ULONG)((ExitQual >> DR_ACCESS_DIRECTION_BIT) & 1);
+    GpReg     = (ULONG)((ExitQual >> DR_ACCESS_GP_REG_SHIFT) & DR_ACCESS_GP_REG_MASK);
+
+    GuestCr3 = HvReadGuestCr3();
+
+    /* Map GP register number to GUEST_CONTEXT field */
+    GpRegs = (ULONG64 *)GuestContext;  /* RAX=0, RCX=1, RDX=2, ... */
+    if (GpReg > 15) {
+        /* Invalid register - shouldn't happen */
+        HvAdvanceGuestRip();
+        return TRUE;
+    }
+    RegPtr = &GpRegs[GpReg];
+
+    if (!IsFeatureEnabled(GuestCr3, AAD_HIDE_HWBP)) {
+        /* Not a target - execute the instruction normally */
+        if (Direction == DR_ACCESS_DIRECTION_READ) {
+            /* MOV from DR to GP - read real DR value */
+            ULONG64 DrValue = 0;
+            switch (DrNumber) {
+                case 0: DrValue = __readdr(0); break;
+                case 1: DrValue = __readdr(1); break;
+                case 2: DrValue = __readdr(2); break;
+                case 3: DrValue = __readdr(3); break;
+                case 6: DrValue = __readdr(6); break;
+                case 7: DrValue = __readdr(7); break;
+            }
+            *RegPtr = DrValue;
+        } else {
+            /* MOV to DR from GP - write real DR value */
+            ULONG64 Value = *RegPtr;
+            switch (DrNumber) {
+                case 0: __writedr(0, Value); break;
+                case 1: __writedr(1, Value); break;
+                case 2: __writedr(2, Value); break;
+                case 3: __writedr(3, Value); break;
+                case 6: __writedr(6, Value); break;
+                case 7: __writedr(7, Value); break;
+            }
+        }
+        HvAdvanceGuestRip();
+        return TRUE;
+    }
+
+    /* === Target process: spoof DR values === */
+
+    if (Direction == DR_ACCESS_DIRECTION_READ) {
+        /* Reading DR - return fake values */
+        ULONG64 FakeValue = 0;
+
+        switch (DrNumber) {
+        case 0: case 1: case 2: case 3:
+            /* DR0-DR3: Hardware breakpoint addresses - return 0 */
+            FakeValue = 0;
+            break;
+
+        case 6:
+            /* DR6: Debug status - return clean value */
+            FakeValue = DR6_DEFAULT_VALUE;
+            break;
+
+        case 7:
+            /* DR7: Debug control - return default (no BPs active) */
+            FakeValue = DR7_DEFAULT_VALUE;
+            break;
+
+        default:
+            FakeValue = 0;
+            break;
+        }
+
+        *RegPtr = FakeValue;
+        LOG_DEBUG("DR%u read spoofed: returned 0x%llX", DrNumber, FakeValue);
+
+    } else {
+        /* Writing DR - allow but silently consume for DR0-3 visibility */
+        ULONG64 Value = *RegPtr;
+
+        /*
+         * We still write the real DR values so hardware breakpoints work,
+         * but we hide them from reads.
+         */
+        switch (DrNumber) {
+            case 0: __writedr(0, Value); break;
+            case 1: __writedr(1, Value); break;
+            case 2: __writedr(2, Value); break;
+            case 3: __writedr(3, Value); break;
+            case 6: __writedr(6, Value); break;
+            case 7: __writedr(7, Value); break;
+        }
+    }
+
+    HvAdvanceGuestRip();
+    return TRUE;
+}
+
+/* ========================================================================= */
+/*  RDTSC/RDTSCP Handler                                                     */
+/* ========================================================================= */
+
+/*
+ * Compensate TSC to hide time spent in debug pauses.
+ */
+BOOLEAN AadHandleRdtsc(PGUEST_CONTEXT GuestContext)
+{
+    ULONG64     GuestCr3;
+    ULONG64     RealTsc;
+    ULONG       CpuIndex;
+
+    GuestCr3 = HvReadGuestCr3();
+
+    /* Read the real TSC */
+    RealTsc = __rdtsc();
+
+    /* For target processes with timing hide, subtract accumulated offset */
+    if (IsFeatureEnabled(GuestCr3, AAD_HIDE_TIMING)) {
+        CpuIndex = KeGetCurrentProcessorNumber();
+        if (CpuIndex < MAX_PROCESSORS) {
+            PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
+            if (HvCtx) {
+                LONG64 Offset = HvCtx->TscOffset;
+                RealTsc -= (ULONG64)Offset;
+            }
+        }
+    }
+
+    /* Return TSC in EDX:EAX */
+    GuestContext->Rax = (RealTsc & 0xFFFFFFFF);
+    GuestContext->Rdx = (RealTsc >> 32);
+
+    HvAdvanceGuestRip();
+    return TRUE;
+}
+
+/*
+ * Notify that debugging has paused execution (e.g., breakpoint hit)
+ * Called when we detect the debugger has taken control
+ */
+VOID AadNotifyDebugPause(ULONG CpuIndex)
+{
+    if (CpuIndex < MAX_PROCESSORS && g_HvOps) {
+        PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
+        if (HvCtx && !HvCtx->InDebugPause) {
+            HvCtx->LastDebugPauseTsc = __rdtsc();
+            HvCtx->InDebugPause = TRUE;
+        }
+    }
+}
+
+/*
+ * Notify that debugging has resumed execution
+ * Accumulate the paused time into TscOffset
+ */
+VOID AadNotifyDebugResume(ULONG CpuIndex)
+{
+    if (CpuIndex < MAX_PROCESSORS && g_HvOps) {
+        PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
+        if (HvCtx && HvCtx->InDebugPause) {
+            ULONG64 Now = __rdtsc();
+            ULONG64 PauseDuration = Now - HvCtx->LastDebugPauseTsc;
+            HvCtx->TscOffset += (LONG64)PauseDuration;
+            HvCtx->InDebugPause = FALSE;
+        }
+    }
+}
+
+/* ========================================================================= */
+/*  CPUID Handler                                                            */
+/* ========================================================================= */
+
+/*
+ * Handle CPUID to hide hypervisor presence from target processes.
+ */
+BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
+{
+    int         CpuInfo[4] = { 0 };
+    ULONG       Leaf = (ULONG)GuestContext->Rax;
+    ULONG       SubLeaf = (ULONG)GuestContext->Rcx;
+    ULONG64     GuestCr3;
+
+    GuestCr3 = HvReadGuestCr3();
+
+    /* Execute real CPUID */
+    __cpuidex(CpuInfo, Leaf, SubLeaf);
+
+    /* Spoof for target processes */
+    if (IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
+        switch (Leaf) {
+        case 1:
+            /*
+             * CPUID leaf 1, ECX bit 31: Hypervisor Present
+             * Clear this bit to hide our hypervisor
+             */
+            CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);
+            break;
+
+        case 0x40000000:
+        case 0x40000001:
+        case 0x40000002:
+        case 0x40000003:
+        case 0x40000004:
+        case 0x40000005:
+        case 0x40000006:
+            /*
+             * Hypervisor-specific leaves (0x40000000-0x400000FF)
+             * Return all zeros to appear as bare metal
+             */
+            CpuInfo[0] = 0;
+            CpuInfo[1] = 0;
+            CpuInfo[2] = 0;
+            CpuInfo[3] = 0;
+            break;
+        }
+    }
+
+    /* Return CPUID results */
+    GuestContext->Rax = (ULONG64)(ULONG)CpuInfo[0];
+    GuestContext->Rbx = (ULONG64)(ULONG)CpuInfo[1];
+    GuestContext->Rcx = (ULONG64)(ULONG)CpuInfo[2];
+    GuestContext->Rdx = (ULONG64)(ULONG)CpuInfo[3];
+
+    HvAdvanceGuestRip();
+    return TRUE;
+}
+
+/* ========================================================================= */
+/*  Exception Handler                                                        */
+/* ========================================================================= */
+
+/*
+ * Handle intercepted exceptions (#DB, #BP) for anti-anti-debug.
+ *
+ * Anti-debug tricks using exceptions:
+ * - INT 2D: Debugger skips the byte after INT 2D, non-debugged app doesn't
+ * - INT 3: Debugger catches it, non-debugged app's SEH handles it
+ * - Single step (#DB): Debugger intercepts, behavior differs
+ */
+BOOLEAN AadHandleException(PGUEST_CONTEXT GuestContext)
+{
+    ULONG64     IntInfo;
+    ULONG       Vector;
+    ULONG       IntType;
+    ULONG64     GuestCr3;
+    ULONG64     ErrorCode;
+    BOOLEAN     HasErrorCode;
+    ULONG       InjectInfo;
+
+    UNREFERENCED_PARAMETER(GuestContext);
+
+    IntInfo = HvReadExitInterruptionInfo();
+
+    if (!(IntInfo & INTERRUPT_INFO_VALID)) {
+        return FALSE;
+    }
+
+    Vector = (ULONG)(IntInfo & INTERRUPT_INFO_VECTOR_MASK);
+    IntType = (ULONG)((IntInfo & INTERRUPT_INFO_TYPE_MASK) >> INTERRUPT_INFO_TYPE_SHIFT);
+    HasErrorCode = (IntInfo & INTERRUPT_INFO_DELIVER_ERR_CODE) != 0;
+    ErrorCode = HasErrorCode ? HvReadExitInterruptionErrorCode() : 0;
+
+    GuestCr3 = HvReadGuestCr3();
+
+    /*
+     * For target processes with exception hiding enabled:
+     * Re-inject the exception to the guest OS so that the application's
+     * SEH handler processes it, just like on a non-debugged system.
+     *
+     * For non-target processes or non-hidden exceptions:
+     * Re-inject normally.
+     */
+    if (IsFeatureEnabled(GuestCr3, AAD_HIDE_EXCEPTIONS)) {
+        switch (Vector) {
+        case 1: /* #DB - Debug Exception */
+            /*
+             * Clear single-step flag in RFLAGS to prevent the debugger
+             * from seeing repeated single-step events.
+             * The guest's SEH will handle it naturally.
+             */
+            LOG_DEBUG("Re-injecting #DB to guest SEH");
+            break;
+
+        case 3: /* #BP - Breakpoint */
+            /*
+             * Re-inject INT 3 to guest.
+             * The guest's VEH/SEH handler will process it.
+             */
+            LOG_DEBUG("Re-injecting #BP to guest SEH");
+            break;
+        }
+    }
+
+    /*
+     * Re-inject the exception into the guest.
+     * Use VM-Entry interruption-information field.
+     */
+    InjectInfo = INTERRUPT_INFO_VALID;
+    InjectInfo |= (Vector & INTERRUPT_INFO_VECTOR_MASK);
+    InjectInfo |= (IntType << INTERRUPT_INFO_TYPE_SHIFT);
+
+    if (HasErrorCode) {
+        InjectInfo |= INTERRUPT_INFO_DELIVER_ERR_CODE;
+        HvSetEntryExceptionErrorCode((ULONG)ErrorCode);
+    }
+
+    HvSetEntryInterruptionInfo(InjectInfo);
+
+    /* For software exceptions/interrupts, set instruction length */
+    if (IntType == INTERRUPT_TYPE_SOFTWARE_EXCEPTION ||
+        IntType == INTERRUPT_TYPE_SOFTWARE_INT) {
+        HvSetEntryInstructionLength(HvReadExitInstructionLength());
+    }
+
+    /* Don't advance RIP - the exception handler will take care of it */
+    return TRUE;
+}

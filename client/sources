@@ -1,0 +1,19 @@
+TARGETNAME=VMXToolbox
+TARGETTYPE=PROGRAM
+
+UMTYPE=console
+USE_MSVCRT=1
+
+MSC_WARNING_LEVEL=/W1
+
+INCLUDES=..\common
+
+USER_C_FLAGS=/WX-
+
+SOURCES=\
+    main.c              \
+    driver_comm.c
+
+TARGETLIBS=\
+    $(SDK_LIB_PATH)\kernel32.lib    \
+    $(SDK_LIB_PATH)\advapi32.lib
