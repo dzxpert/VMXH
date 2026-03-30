@@ -259,4 +259,241 @@ typedef struct _VMX_HOOK_EVENT_BUFFER {
 #define VMX_LOG_INFO    2
 #define VMX_LOG_DEBUG   3
 
+/* ========================================================================= */
+/*  SSDT Monitoring & Hook Framework                                         */
+/* ========================================================================= */
+
+/*
+ * IOCTL codes for SSDT operations (0x80D–0x813)
+ */
+#define IOCTL_VMX_SSDT_INIT         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SSDT_DUMP         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SSDT_HOOK         CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80F, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SSDT_UNHOOK       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SSDT_UNHOOK_ALL   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x811, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SSDT_LIST_HOOKS   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x812, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SSDT_MONITOR      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x813, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/*
+ * SSDT constants
+ */
+#define SSDT_MAX_SERVICES       512
+#define SSDT_MAX_NAME_LEN       128
+#define SSDT_MONITOR_OFF        0
+#define SSDT_MONITOR_ALL        1
+#define SSDT_MONITOR_FILTERED   2
+
+/*
+ * SSDT_ENTRY_INFO — single SSDT entry information
+ */
+typedef struct _SSDT_ENTRY_INFO {
+    ULONG       SyscallIndex;                   /* Syscall number */
+    ULONG       ArgCount;                       /* Number of arguments (entry & 0xF) */
+    LONG        RawOffset;                      /* Raw SSDT table entry (before >> 4) */
+    ULONG64     FunctionVa;                     /* Resolved virtual address */
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN]; /* Resolved name (may be empty) */
+} SSDT_ENTRY_INFO, *PSSDT_ENTRY_INFO;
+
+/*
+ * IOCTL_VMX_SSDT_INIT output
+ */
+typedef struct _VMX_SSDT_INIT_RESPONSE {
+    BOOLEAN     Success;
+    ULONG       ServiceCount;                   /* Number of SSDT entries discovered */
+    ULONG64     KiServiceTableVa;               /* VA of nt!KiServiceTable */
+    ULONG64     KiSystemCall64Va;               /* VA of nt!KiSystemCall64 */
+} VMX_SSDT_INIT_RESPONSE, *PVMX_SSDT_INIT_RESPONSE;
+
+/*
+ * IOCTL_VMX_SSDT_DUMP input
+ */
+typedef struct _VMX_SSDT_DUMP_REQUEST {
+    ULONG       StartIndex;                     /* First syscall index to dump */
+    ULONG       Count;                          /* Number of entries requested (0 = all) */
+} VMX_SSDT_DUMP_REQUEST, *PVMX_SSDT_DUMP_REQUEST;
+
+/*
+ * IOCTL_VMX_SSDT_DUMP output
+ */
+typedef struct _VMX_SSDT_DUMP_RESPONSE {
+    ULONG           TotalServices;              /* Total syscalls in SSDT */
+    ULONG           ReturnedCount;              /* Entries actually returned */
+    SSDT_ENTRY_INFO Entries[1];                 /* Variable length */
+} VMX_SSDT_DUMP_RESPONSE, *PVMX_SSDT_DUMP_RESPONSE;
+
+/*
+ * IOCTL_VMX_SSDT_HOOK input
+ */
+typedef struct _VMX_SSDT_HOOK_REQUEST {
+    BOOLEAN     ByName;                         /* TRUE = resolve FunctionName */
+    ULONG       SyscallIndex;                   /* Used when ByName=FALSE */
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN]; /* Nt* function name (ByName=TRUE) */
+    HOOK_RULE   Rule;                           /* Reuse existing HOOK_RULE */
+} VMX_SSDT_HOOK_REQUEST, *PVMX_SSDT_HOOK_REQUEST;
+
+/*
+ * IOCTL_VMX_SSDT_HOOK output
+ */
+typedef struct _VMX_SSDT_HOOK_RESPONSE {
+    ULONG       HookId;                         /* Generic hook framework ID */
+    ULONG       SyscallIndex;                   /* Resolved syscall index */
+    ULONG64     FunctionVa;                     /* Hooked function VA */
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN]; /* Resolved name */
+} VMX_SSDT_HOOK_RESPONSE, *PVMX_SSDT_HOOK_RESPONSE;
+
+/*
+ * IOCTL_VMX_SSDT_UNHOOK input
+ */
+typedef struct _VMX_SSDT_UNHOOK_REQUEST {
+    BOOLEAN     ByHookId;                       /* TRUE = use HookId, FALSE = use SyscallIndex */
+    ULONG       HookId;
+    ULONG       SyscallIndex;
+} VMX_SSDT_UNHOOK_REQUEST, *PVMX_SSDT_UNHOOK_REQUEST;
+
+/*
+ * SSDT hook info entry (for SSDT_LIST_HOOKS)
+ */
+typedef struct _SSDT_HOOK_INFO {
+    ULONG       HookId;                         /* Generic hook framework ID */
+    ULONG       SyscallIndex;
+    ULONG64     FunctionVa;
+    HOOK_RULE   Rule;
+    ULONG64     HitCount;
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN];
+} SSDT_HOOK_INFO, *PSSDT_HOOK_INFO;
+
+/*
+ * IOCTL_VMX_SSDT_LIST_HOOKS output
+ */
+typedef struct _VMX_SSDT_HOOK_LIST {
+    ULONG           Count;
+    SSDT_HOOK_INFO  Hooks[1];                   /* Variable length */
+} VMX_SSDT_HOOK_LIST, *PVMX_SSDT_HOOK_LIST;
+
+/*
+ * IOCTL_VMX_SSDT_MONITOR input
+ */
+#define SSDT_MONITOR_MAX_FILTER 64
+
+typedef struct _VMX_SSDT_MONITOR_REQUEST {
+    ULONG       Mode;                           /* SSDT_MONITOR_OFF/ALL/FILTERED */
+    ULONG       TargetPid;                      /* 0 = all processes */
+    ULONG       FilterCount;                    /* Number of entries in FilterIndices[] */
+    ULONG       FilterIndices[SSDT_MONITOR_MAX_FILTER]; /* Syscall indices for FILTERED mode */
+} VMX_SSDT_MONITOR_REQUEST, *PVMX_SSDT_MONITOR_REQUEST;
+
+/* ========================================================================= */
+/*  Shadow SSDT (Win32k) Monitoring & Hook Framework                         */
+/* ========================================================================= */
+
+/*
+ * IOCTL codes for Shadow SSDT operations (0x814–0x81A)
+ *
+ * The Shadow SSDT (KeServiceDescriptorTableShadow) is the second service
+ * table containing win32k NtUser/NtGdi syscalls.  These IOCTLs mirror
+ * the regular SSDT IOCTLs but target the Shadow table.
+ */
+#define IOCTL_VMX_SHADOW_SSDT_INIT          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x814, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SHADOW_SSDT_DUMP          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SHADOW_SSDT_HOOK          CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SHADOW_SSDT_UNHOOK        CTL_CODE(FILE_DEVICE_UNKNOWN, 0x817, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SHADOW_SSDT_UNHOOK_ALL    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x818, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x819, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_VMX_SHADOW_SSDT_MONITOR       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x81A, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/*
+ * Shadow SSDT constants
+ */
+#define SHADOW_SSDT_MAX_SERVICES    2048    /* Win11 has ~1400, leave headroom */
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_INIT output
+ */
+typedef struct _VMX_SHADOW_SSDT_INIT_RESPONSE {
+    BOOLEAN     Success;
+    ULONG       ServiceCount;                   /* Number of Shadow SSDT entries */
+    ULONG64     W32pServiceTableVa;             /* VA of win32k!W32pServiceTable */
+    ULONG64     Win32kBase;                     /* win32k.sys base address */
+} VMX_SHADOW_SSDT_INIT_RESPONSE, *PVMX_SHADOW_SSDT_INIT_RESPONSE;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_DUMP input
+ */
+typedef struct _VMX_SHADOW_SSDT_DUMP_REQUEST {
+    ULONG       StartIndex;                     /* First syscall index to dump */
+    ULONG       Count;                          /* Number of entries (0 = all) */
+} VMX_SHADOW_SSDT_DUMP_REQUEST, *PVMX_SHADOW_SSDT_DUMP_REQUEST;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_DUMP output
+ * Reuses SSDT_ENTRY_INFO for individual entries.
+ */
+typedef struct _VMX_SHADOW_SSDT_DUMP_RESPONSE {
+    ULONG           TotalServices;
+    ULONG           ReturnedCount;
+    SSDT_ENTRY_INFO Entries[1];                 /* Variable length */
+} VMX_SHADOW_SSDT_DUMP_RESPONSE, *PVMX_SHADOW_SSDT_DUMP_RESPONSE;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_HOOK input
+ */
+typedef struct _VMX_SHADOW_SSDT_HOOK_REQUEST {
+    BOOLEAN     ByName;                         /* TRUE = resolve FunctionName */
+    ULONG       SyscallIndex;                   /* Used when ByName=FALSE */
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN]; /* NtUser/NtGdi function name (ByName=TRUE) */
+    HOOK_RULE   Rule;                           /* Reuse existing HOOK_RULE */
+} VMX_SHADOW_SSDT_HOOK_REQUEST, *PVMX_SHADOW_SSDT_HOOK_REQUEST;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_HOOK output
+ */
+typedef struct _VMX_SHADOW_SSDT_HOOK_RESPONSE {
+    ULONG       HookId;                         /* Generic hook framework ID */
+    ULONG       SyscallIndex;                   /* Resolved syscall index */
+    ULONG64     FunctionVa;                     /* Hooked function VA */
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN]; /* Resolved name */
+} VMX_SHADOW_SSDT_HOOK_RESPONSE, *PVMX_SHADOW_SSDT_HOOK_RESPONSE;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_UNHOOK input
+ */
+typedef struct _VMX_SHADOW_SSDT_UNHOOK_REQUEST {
+    BOOLEAN     ByHookId;                       /* TRUE = use HookId, FALSE = use SyscallIndex */
+    ULONG       HookId;
+    ULONG       SyscallIndex;
+} VMX_SHADOW_SSDT_UNHOOK_REQUEST, *PVMX_SHADOW_SSDT_UNHOOK_REQUEST;
+
+/*
+ * Shadow SSDT hook info (for LIST_HOOKS)
+ * Reuses SSDT_HOOK_INFO structure layout.
+ */
+typedef struct _SHADOW_SSDT_HOOK_INFO {
+    ULONG       HookId;
+    ULONG       SyscallIndex;
+    ULONG64     FunctionVa;
+    HOOK_RULE   Rule;
+    ULONG64     HitCount;
+    WCHAR       FunctionName[SSDT_MAX_NAME_LEN];
+} SHADOW_SSDT_HOOK_INFO, *PSHADOW_SSDT_HOOK_INFO;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS output
+ */
+typedef struct _VMX_SHADOW_SSDT_HOOK_LIST {
+    ULONG                   Count;
+    SHADOW_SSDT_HOOK_INFO   Hooks[1];           /* Variable length */
+} VMX_SHADOW_SSDT_HOOK_LIST, *PVMX_SHADOW_SSDT_HOOK_LIST;
+
+/*
+ * IOCTL_VMX_SHADOW_SSDT_MONITOR input
+ */
+#define SHADOW_SSDT_MONITOR_MAX_FILTER 64
+
+typedef struct _VMX_SHADOW_SSDT_MONITOR_REQUEST {
+    ULONG       Mode;                           /* SSDT_MONITOR_OFF/ALL/FILTERED */
+    ULONG       TargetPid;                      /* 0 = all processes */
+    ULONG       FilterCount;
+    ULONG       FilterIndices[SHADOW_SSDT_MONITOR_MAX_FILTER];
+} VMX_SHADOW_SSDT_MONITOR_REQUEST, *PVMX_SHADOW_SSDT_MONITOR_REQUEST;
+
 #endif /* _VMX_SHARED_H_ */

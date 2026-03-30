@@ -29,7 +29,9 @@ SOURCES=\
     hv_hook.c           \
     svm_init.c          \
     svm_exit.c          \
-    npt.c
+    npt.c               \
+    ssdt.c              \
+    shadow_ssdt.c
 
 #
 # Link libraries

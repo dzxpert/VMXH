@@ -308,3 +308,273 @@ BOOL DriverGetHookEvents(HANDLE DeviceHandle,
         NULL
     );
 }
+
+/* ========================================================================= */
+/*  SSDT Framework IOCTL Wrappers                                            */
+/* ========================================================================= */
+
+BOOL DriverSsdtInit(HANDLE DeviceHandle,
+                    VMX_SSDT_INIT_RESPONSE *OutResponse)
+{
+    DWORD BytesReturned = 0;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_INIT,
+        NULL, 0,
+        OutResponse, sizeof(VMX_SSDT_INIT_RESPONSE),
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverSsdtDump(HANDLE DeviceHandle,
+                    DWORD StartIndex, DWORD Count,
+                    VMX_SSDT_DUMP_RESPONSE *Buffer,
+                    DWORD BufferSize,
+                    DWORD *BytesReturned)
+{
+    VMX_SSDT_DUMP_REQUEST Input = { 0 };
+
+    Input.StartIndex = StartIndex;
+    Input.Count = Count;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_DUMP,
+        &Input, sizeof(Input),
+        Buffer, BufferSize,
+        BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverSsdtHook(HANDLE DeviceHandle,
+                    BOOL ByName,
+                    DWORD SyscallIndex,
+                    const WCHAR *FunctionName,
+                    const HOOK_RULE *Rule,
+                    VMX_SSDT_HOOK_RESPONSE *OutResponse)
+{
+    VMX_SSDT_HOOK_REQUEST Input = { 0 };
+    DWORD BytesReturned = 0;
+
+    Input.ByName = (BOOLEAN)ByName;
+    Input.SyscallIndex = SyscallIndex;
+    Input.Rule = *Rule;
+
+    if (ByName && FunctionName) {
+        wcsncpy(Input.FunctionName, FunctionName, SSDT_MAX_NAME_LEN - 1);
+        Input.FunctionName[SSDT_MAX_NAME_LEN - 1] = L'\0';
+    }
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_HOOK,
+        &Input, sizeof(Input),
+        OutResponse, sizeof(VMX_SSDT_HOOK_RESPONSE),
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverSsdtUnhook(HANDLE DeviceHandle,
+                      BOOL ByHookId,
+                      DWORD HookId,
+                      DWORD SyscallIndex)
+{
+    VMX_SSDT_UNHOOK_REQUEST Input = { 0 };
+    DWORD BytesReturned = 0;
+
+    Input.ByHookId = (BOOLEAN)ByHookId;
+    Input.HookId = HookId;
+    Input.SyscallIndex = SyscallIndex;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_UNHOOK,
+        &Input, sizeof(Input),
+        NULL, 0,
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverSsdtUnhookAll(HANDLE DeviceHandle)
+{
+    DWORD BytesReturned = 0;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_UNHOOK_ALL,
+        NULL, 0,
+        NULL, 0,
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverSsdtListHooks(HANDLE DeviceHandle,
+                         VMX_SSDT_HOOK_LIST *Buffer,
+                         DWORD BufferSize,
+                         DWORD *BytesReturned)
+{
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_LIST_HOOKS,
+        NULL, 0,
+        Buffer, BufferSize,
+        BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverSsdtMonitor(HANDLE DeviceHandle,
+                       const VMX_SSDT_MONITOR_REQUEST *Request)
+{
+    DWORD BytesReturned = 0;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SSDT_MONITOR,
+        (LPVOID)Request, sizeof(VMX_SSDT_MONITOR_REQUEST),
+        NULL, 0,
+        &BytesReturned,
+        NULL
+    );
+}
+
+/* ========================================================================= */
+/*  Shadow SSDT (Win32k) Framework IOCTL Wrappers                            */
+/* ========================================================================= */
+
+BOOL DriverShadowSsdtInit(HANDLE DeviceHandle,
+                           VMX_SHADOW_SSDT_INIT_RESPONSE *OutResponse)
+{
+    DWORD BytesReturned = 0;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_INIT,
+        NULL, 0,
+        OutResponse, sizeof(VMX_SHADOW_SSDT_INIT_RESPONSE),
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverShadowSsdtDump(HANDLE DeviceHandle,
+                           DWORD StartIndex, DWORD Count,
+                           VMX_SHADOW_SSDT_DUMP_RESPONSE *Buffer,
+                           DWORD BufferSize,
+                           DWORD *BytesReturned)
+{
+    VMX_SHADOW_SSDT_DUMP_REQUEST Input = { 0 };
+
+    Input.StartIndex = StartIndex;
+    Input.Count = Count;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_DUMP,
+        &Input, sizeof(Input),
+        Buffer, BufferSize,
+        BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverShadowSsdtHook(HANDLE DeviceHandle,
+                           BOOL ByName,
+                           DWORD SyscallIndex,
+                           const WCHAR *FunctionName,
+                           const HOOK_RULE *Rule,
+                           VMX_SHADOW_SSDT_HOOK_RESPONSE *OutResponse)
+{
+    VMX_SHADOW_SSDT_HOOK_REQUEST Input = { 0 };
+    DWORD BytesReturned = 0;
+
+    Input.ByName = (BOOLEAN)ByName;
+    Input.SyscallIndex = SyscallIndex;
+    Input.Rule = *Rule;
+
+    if (ByName && FunctionName) {
+        wcsncpy(Input.FunctionName, FunctionName, SSDT_MAX_NAME_LEN - 1);
+        Input.FunctionName[SSDT_MAX_NAME_LEN - 1] = L'\0';
+    }
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_HOOK,
+        &Input, sizeof(Input),
+        OutResponse, sizeof(VMX_SHADOW_SSDT_HOOK_RESPONSE),
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverShadowSsdtUnhook(HANDLE DeviceHandle,
+                             BOOL ByHookId,
+                             DWORD HookId,
+                             DWORD SyscallIndex)
+{
+    VMX_SHADOW_SSDT_UNHOOK_REQUEST Input = { 0 };
+    DWORD BytesReturned = 0;
+
+    Input.ByHookId = (BOOLEAN)ByHookId;
+    Input.HookId = HookId;
+    Input.SyscallIndex = SyscallIndex;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_UNHOOK,
+        &Input, sizeof(Input),
+        NULL, 0,
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverShadowSsdtUnhookAll(HANDLE DeviceHandle)
+{
+    DWORD BytesReturned = 0;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_UNHOOK_ALL,
+        NULL, 0,
+        NULL, 0,
+        &BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverShadowSsdtListHooks(HANDLE DeviceHandle,
+                                VMX_SHADOW_SSDT_HOOK_LIST *Buffer,
+                                DWORD BufferSize,
+                                DWORD *BytesReturned)
+{
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS,
+        NULL, 0,
+        Buffer, BufferSize,
+        BytesReturned,
+        NULL
+    );
+}
+
+BOOL DriverShadowSsdtMonitor(HANDLE DeviceHandle,
+                              const VMX_SHADOW_SSDT_MONITOR_REQUEST *Request)
+{
+    DWORD BytesReturned = 0;
+
+    return DeviceIoControl(
+        DeviceHandle,
+        IOCTL_VMX_SHADOW_SSDT_MONITOR,
+        (LPVOID)Request, sizeof(VMX_SHADOW_SSDT_MONITOR_REQUEST),
+        NULL, 0,
+        &BytesReturned,
+        NULL
+    );
+}

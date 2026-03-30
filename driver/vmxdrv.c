@@ -9,9 +9,12 @@
 #include "hv_detect.h"
 #include "hv_mem.h"
 #include "hv_hook.h"
+#include "ssdt.h"
+#include "shadow_ssdt.h"
 #include "log.h"
 #include "process.h"
 #include "../common/shared.h"
+#include <ntstrsafe.h>
 
 /* ========================================================================= */
 /*  Globals                                                                  */
@@ -48,6 +51,24 @@ static NTSTATUS HandleIoctlInstallHook(PIRP Irp, PIO_STACK_LOCATION IoStack);
 static NTSTATUS HandleIoctlRemoveHook(PIRP Irp, PIO_STACK_LOCATION IoStack);
 static NTSTATUS HandleIoctlListHooks(PIRP Irp, PIO_STACK_LOCATION IoStack);
 static NTSTATUS HandleIoctlGetHookEvents(PIRP Irp, PIO_STACK_LOCATION IoStack);
+
+/* SSDT framework handlers */
+static NTSTATUS HandleIoctlSsdtInit(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlSsdtDump(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlSsdtHook(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlSsdtUnhook(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlSsdtUnhookAll(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlSsdtListHooks(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlSsdtMonitor(PIRP Irp, PIO_STACK_LOCATION IoStack);
+
+/* Shadow SSDT framework handlers */
+static NTSTATUS HandleIoctlShadowSsdtInit(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlShadowSsdtDump(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlShadowSsdtHook(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlShadowSsdtUnhook(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlShadowSsdtUnhookAll(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlShadowSsdtListHooks(PIRP Irp, PIO_STACK_LOCATION IoStack);
+static NTSTATUS HandleIoctlShadowSsdtMonitor(PIRP Irp, PIO_STACK_LOCATION IoStack);
 
 /* ========================================================================= */
 /*  Driver Entry / Unload                                                    */
@@ -154,6 +175,12 @@ VOID DriverUnload(
     UNREFERENCED_PARAMETER(DriverObject);
 
     LOG_INFO("Driver unloading...");
+
+    /* Cleanup Shadow SSDT hooks before regular SSDT hooks */
+    ShadowSsdtCleanup();
+
+    /* Cleanup SSDT hooks before generic hooks */
+    SsdtCleanup();
 
     /* Cleanup generic hooks before terminating hypervisor */
     GenericHookCleanup();
@@ -270,6 +297,63 @@ NTSTATUS DispatchDeviceControl(
 
     case IOCTL_VMX_GET_HOOK_EVENTS:
         Status = HandleIoctlGetHookEvents(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_INIT:
+        Status = HandleIoctlSsdtInit(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_DUMP:
+        Status = HandleIoctlSsdtDump(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_HOOK:
+        Status = HandleIoctlSsdtHook(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_UNHOOK:
+        Status = HandleIoctlSsdtUnhook(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_UNHOOK_ALL:
+        Status = HandleIoctlSsdtUnhookAll(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_LIST_HOOKS:
+        Status = HandleIoctlSsdtListHooks(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SSDT_MONITOR:
+        Status = HandleIoctlSsdtMonitor(Irp, IoStack);
+        break;
+
+    /* Shadow SSDT (Win32k) framework */
+    case IOCTL_VMX_SHADOW_SSDT_INIT:
+        Status = HandleIoctlShadowSsdtInit(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SHADOW_SSDT_DUMP:
+        Status = HandleIoctlShadowSsdtDump(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SHADOW_SSDT_HOOK:
+        Status = HandleIoctlShadowSsdtHook(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SHADOW_SSDT_UNHOOK:
+        Status = HandleIoctlShadowSsdtUnhook(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SHADOW_SSDT_UNHOOK_ALL:
+        Status = HandleIoctlShadowSsdtUnhookAll(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS:
+        Status = HandleIoctlShadowSsdtListHooks(Irp, IoStack);
+        break;
+
+    case IOCTL_VMX_SHADOW_SSDT_MONITOR:
+        Status = HandleIoctlShadowSsdtMonitor(Irp, IoStack);
         break;
 
     default:
@@ -912,4 +996,389 @@ static NTSTATUS HandleIoctlGetHookEvents(PIRP Irp, PIO_STACK_LOCATION IoStack)
     Irp->IoStatus.Information = FIELD_OFFSET(VMX_HOOK_EVENT_BUFFER, Events) +
                                  Copied * sizeof(HOOK_EVENT);
     return STATUS_SUCCESS;
+}
+
+/* ========================================================================= */
+/*  SSDT Framework IOCTL Handlers                                            */
+/* ========================================================================= */
+
+static NTSTATUS HandleIoctlSsdtInit(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SSDT_INIT_RESPONSE Output;
+    NTSTATUS Status;
+
+    if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(VMX_SSDT_INIT_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Output = (PVMX_SSDT_INIT_RESPONSE)Irp->AssociatedIrp.SystemBuffer;
+    if (!Output) return STATUS_INVALID_PARAMETER;
+
+    Status = SsdtInitialize();
+
+    RtlZeroMemory(Output, sizeof(VMX_SSDT_INIT_RESPONSE));
+    Output->Success = NT_SUCCESS(Status);
+    Output->ServiceCount = g_SsdtState.ServiceCount;
+    Output->KiServiceTableVa = g_SsdtState.KiServiceTableVa;
+    Output->KiSystemCall64Va = g_SsdtState.KiSystemCall64Va;
+
+    Irp->IoStatus.Information = sizeof(VMX_SSDT_INIT_RESPONSE);
+    return Status;
+}
+
+static NTSTATUS HandleIoctlSsdtDump(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SSDT_DUMP_REQUEST  Input;
+    PVMX_SSDT_DUMP_RESPONSE Output;
+    ULONG                   OutputSize, MaxEntries, ReturnedCount = 0;
+    NTSTATUS                Status;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SSDT_DUMP_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    OutputSize = IoStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (OutputSize < sizeof(VMX_SSDT_DUMP_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SSDT_DUMP_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    Output = (PVMX_SSDT_DUMP_RESPONSE)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    MaxEntries = (OutputSize - FIELD_OFFSET(VMX_SSDT_DUMP_RESPONSE, Entries)) / sizeof(SSDT_ENTRY_INFO);
+    if (MaxEntries == 0) return STATUS_BUFFER_TOO_SMALL;
+
+    {
+        ULONG Start = Input->StartIndex;
+        ULONG Count = Input->Count;
+
+        /* Limit to buffer capacity */
+        if (Count == 0 || Count > MaxEntries) Count = MaxEntries;
+
+        Status = SsdtDumpTable(Start, Count, Output->Entries, &ReturnedCount);
+    }
+
+    Output->TotalServices = g_SsdtState.ServiceCount;
+    Output->ReturnedCount = ReturnedCount;
+
+    Irp->IoStatus.Information = FIELD_OFFSET(VMX_SSDT_DUMP_RESPONSE, Entries) +
+                                 ReturnedCount * sizeof(SSDT_ENTRY_INFO);
+    return Status;
+}
+
+static NTSTATUS HandleIoctlSsdtHook(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SSDT_HOOK_REQUEST  Input;
+    PVMX_SSDT_HOOK_RESPONSE Output;
+    ULONG                   HookId = 0, SyscallIndex = 0;
+    NTSTATUS                Status;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SSDT_HOOK_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+    if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(VMX_SSDT_HOOK_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SSDT_HOOK_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    Output = (PVMX_SSDT_HOOK_RESPONSE)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    if (Input->ByName) {
+        Input->FunctionName[SSDT_MAX_NAME_LEN - 1] = L'\0';
+        Status = SsdtHookByName(Input->FunctionName, &Input->Rule,
+                                &SyscallIndex, &HookId);
+    } else {
+        SyscallIndex = Input->SyscallIndex;
+        Status = SsdtHookByIndex(SyscallIndex, &Input->Rule, &HookId);
+    }
+
+    if (NT_SUCCESS(Status)) {
+        RtlZeroMemory(Output, sizeof(VMX_SSDT_HOOK_RESPONSE));
+        Output->HookId = HookId;
+        Output->SyscallIndex = SyscallIndex;
+        Output->FunctionVa = g_SsdtState.ResolvedAddresses[SyscallIndex];
+
+        if (g_SsdtState.NamesPopulated &&
+            g_SsdtState.NameCache[SyscallIndex][0] != L'\0') {
+            RtlStringCchCopyW(Output->FunctionName, SSDT_MAX_NAME_LEN,
+                              g_SsdtState.NameCache[SyscallIndex]);
+        }
+
+        Irp->IoStatus.Information = sizeof(VMX_SSDT_HOOK_RESPONSE);
+    }
+
+    return Status;
+}
+
+static NTSTATUS HandleIoctlSsdtUnhook(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SSDT_UNHOOK_REQUEST Input;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SSDT_UNHOOK_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SSDT_UNHOOK_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    if (Input->ByHookId) {
+        return SsdtUnhookByHookId(Input->HookId);
+    } else {
+        return SsdtUnhookByIndex(Input->SyscallIndex);
+    }
+}
+
+static NTSTATUS HandleIoctlSsdtUnhookAll(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    UNREFERENCED_PARAMETER(Irp);
+    UNREFERENCED_PARAMETER(IoStack);
+
+    SsdtUnhookAll();
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleIoctlSsdtListHooks(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SSDT_HOOK_LIST Output;
+    ULONG               OutputSize, MaxEntries, Count = 0;
+    PSSDT_HOOK_MAPPING  M;
+    KIRQL               OldIrql;
+
+    OutputSize = IoStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (OutputSize < sizeof(VMX_SSDT_HOOK_LIST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Output = (PVMX_SSDT_HOOK_LIST)Irp->AssociatedIrp.SystemBuffer;
+    if (!Output) return STATUS_INVALID_PARAMETER;
+
+    MaxEntries = (OutputSize - FIELD_OFFSET(VMX_SSDT_HOOK_LIST, Hooks)) / sizeof(SSDT_HOOK_INFO);
+
+    KeAcquireSpinLock(&g_SsdtState.HookLock, &OldIrql);
+
+    M = g_SsdtState.HookListHead;
+    while (M && Count < MaxEntries) {
+        VMX_HOOK_INFO GenInfo = { 0 };
+        NTSTATUS InfoStatus = GenericHookGetInfo(M->GenericHookId, &GenInfo);
+
+        if (NT_SUCCESS(InfoStatus)) {
+            Output->Hooks[Count].HookId = M->GenericHookId;
+            Output->Hooks[Count].SyscallIndex = M->SyscallIndex;
+            Output->Hooks[Count].FunctionVa = GenInfo.TargetAddress;
+            RtlCopyMemory(&Output->Hooks[Count].Rule, &GenInfo.Rule, sizeof(HOOK_RULE));
+            Output->Hooks[Count].HitCount = GenInfo.HitCount;
+            RtlCopyMemory(Output->Hooks[Count].FunctionName,
+                          GenInfo.FunctionName, sizeof(GenInfo.FunctionName));
+            Count++;
+        }
+        M = M->Next;
+    }
+
+    KeReleaseSpinLock(&g_SsdtState.HookLock, OldIrql);
+
+    Output->Count = Count;
+    Irp->IoStatus.Information = FIELD_OFFSET(VMX_SSDT_HOOK_LIST, Hooks) +
+                                 Count * sizeof(SSDT_HOOK_INFO);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleIoctlSsdtMonitor(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SSDT_MONITOR_REQUEST Input;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SSDT_MONITOR_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SSDT_MONITOR_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    return SsdtSetMonitorMode(Input);
+}
+
+/* ========================================================================= */
+/*  Shadow SSDT (Win32k) Framework IOCTL Handlers                            */
+/* ========================================================================= */
+
+static NTSTATUS HandleIoctlShadowSsdtInit(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SHADOW_SSDT_INIT_RESPONSE Output;
+    NTSTATUS Status;
+
+    if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(VMX_SHADOW_SSDT_INIT_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Output = (PVMX_SHADOW_SSDT_INIT_RESPONSE)Irp->AssociatedIrp.SystemBuffer;
+    if (!Output) return STATUS_INVALID_PARAMETER;
+
+    Status = ShadowSsdtInitialize();
+
+    RtlZeroMemory(Output, sizeof(VMX_SHADOW_SSDT_INIT_RESPONSE));
+    Output->Success = NT_SUCCESS(Status);
+    Output->ServiceCount = g_ShadowSsdtState.ServiceCount;
+    Output->W32pServiceTableVa = g_ShadowSsdtState.W32pServiceTableVa;
+    if (g_ShadowSsdtState.Win32kModuleCount > 0) {
+        Output->Win32kBase = g_ShadowSsdtState.Win32kModules[0].Base;
+    }
+
+    Irp->IoStatus.Information = sizeof(VMX_SHADOW_SSDT_INIT_RESPONSE);
+    return Status;
+}
+
+static NTSTATUS HandleIoctlShadowSsdtDump(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SHADOW_SSDT_DUMP_REQUEST  Input;
+    PVMX_SHADOW_SSDT_DUMP_RESPONSE Output;
+    ULONG                   OutputSize, MaxEntries, ReturnedCount = 0;
+    NTSTATUS                Status;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SHADOW_SSDT_DUMP_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    OutputSize = IoStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (OutputSize < sizeof(VMX_SHADOW_SSDT_DUMP_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SHADOW_SSDT_DUMP_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    Output = (PVMX_SHADOW_SSDT_DUMP_RESPONSE)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    MaxEntries = (OutputSize - FIELD_OFFSET(VMX_SHADOW_SSDT_DUMP_RESPONSE, Entries)) / sizeof(SSDT_ENTRY_INFO);
+    if (MaxEntries == 0) return STATUS_BUFFER_TOO_SMALL;
+
+    {
+        ULONG Start = Input->StartIndex;
+        ULONG Count = Input->Count;
+
+        if (Count == 0 || Count > MaxEntries) Count = MaxEntries;
+
+        Status = ShadowSsdtDumpTable(Start, Count, Output->Entries, &ReturnedCount);
+    }
+
+    Output->TotalServices = g_ShadowSsdtState.ServiceCount;
+    Output->ReturnedCount = ReturnedCount;
+
+    Irp->IoStatus.Information = FIELD_OFFSET(VMX_SHADOW_SSDT_DUMP_RESPONSE, Entries) +
+                                 ReturnedCount * sizeof(SSDT_ENTRY_INFO);
+    return Status;
+}
+
+static NTSTATUS HandleIoctlShadowSsdtHook(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SHADOW_SSDT_HOOK_REQUEST  Input;
+    PVMX_SHADOW_SSDT_HOOK_RESPONSE Output;
+    ULONG                   HookId = 0, SyscallIndex = 0;
+    NTSTATUS                Status;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SHADOW_SSDT_HOOK_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+    if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(VMX_SHADOW_SSDT_HOOK_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SHADOW_SSDT_HOOK_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    Output = (PVMX_SHADOW_SSDT_HOOK_RESPONSE)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    if (Input->ByName) {
+        Input->FunctionName[SSDT_MAX_NAME_LEN - 1] = L'\0';
+        Status = ShadowSsdtHookByName(Input->FunctionName, &Input->Rule,
+                                       &SyscallIndex, &HookId);
+    } else {
+        SyscallIndex = Input->SyscallIndex;
+        Status = ShadowSsdtHookByIndex(SyscallIndex, &Input->Rule, &HookId);
+    }
+
+    if (NT_SUCCESS(Status)) {
+        RtlZeroMemory(Output, sizeof(VMX_SHADOW_SSDT_HOOK_RESPONSE));
+        Output->HookId = HookId;
+        Output->SyscallIndex = SyscallIndex;
+        Output->FunctionVa = g_ShadowSsdtState.ResolvedAddresses[SyscallIndex];
+
+        if (g_ShadowSsdtState.NamesPopulated &&
+            g_ShadowSsdtState.NameCache[SyscallIndex][0] != L'\0') {
+            RtlStringCchCopyW(Output->FunctionName, SSDT_MAX_NAME_LEN,
+                              g_ShadowSsdtState.NameCache[SyscallIndex]);
+        }
+
+        Irp->IoStatus.Information = sizeof(VMX_SHADOW_SSDT_HOOK_RESPONSE);
+    }
+
+    return Status;
+}
+
+static NTSTATUS HandleIoctlShadowSsdtUnhook(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SHADOW_SSDT_UNHOOK_REQUEST Input;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SHADOW_SSDT_UNHOOK_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SHADOW_SSDT_UNHOOK_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    if (Input->ByHookId) {
+        return ShadowSsdtUnhookByHookId(Input->HookId);
+    } else {
+        return ShadowSsdtUnhookByIndex(Input->SyscallIndex);
+    }
+}
+
+static NTSTATUS HandleIoctlShadowSsdtUnhookAll(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    UNREFERENCED_PARAMETER(Irp);
+    UNREFERENCED_PARAMETER(IoStack);
+
+    ShadowSsdtUnhookAll();
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleIoctlShadowSsdtListHooks(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SHADOW_SSDT_HOOK_LIST Output;
+    ULONG               OutputSize, MaxEntries, Count = 0;
+    PSSDT_HOOK_MAPPING  M;
+    KIRQL               OldIrql;
+
+    OutputSize = IoStack->Parameters.DeviceIoControl.OutputBufferLength;
+    if (OutputSize < sizeof(VMX_SHADOW_SSDT_HOOK_LIST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Output = (PVMX_SHADOW_SSDT_HOOK_LIST)Irp->AssociatedIrp.SystemBuffer;
+    if (!Output) return STATUS_INVALID_PARAMETER;
+
+    MaxEntries = (OutputSize - FIELD_OFFSET(VMX_SHADOW_SSDT_HOOK_LIST, Hooks)) / sizeof(SHADOW_SSDT_HOOK_INFO);
+
+    KeAcquireSpinLock(&g_ShadowSsdtState.HookLock, &OldIrql);
+
+    M = g_ShadowSsdtState.HookListHead;
+    while (M && Count < MaxEntries) {
+        VMX_HOOK_INFO GenInfo = { 0 };
+        NTSTATUS InfoStatus = GenericHookGetInfo(M->GenericHookId, &GenInfo);
+
+        if (NT_SUCCESS(InfoStatus)) {
+            Output->Hooks[Count].HookId = M->GenericHookId;
+            Output->Hooks[Count].SyscallIndex = M->SyscallIndex;
+            Output->Hooks[Count].FunctionVa = GenInfo.TargetAddress;
+            RtlCopyMemory(&Output->Hooks[Count].Rule, &GenInfo.Rule, sizeof(HOOK_RULE));
+            Output->Hooks[Count].HitCount = GenInfo.HitCount;
+            RtlCopyMemory(Output->Hooks[Count].FunctionName,
+                          GenInfo.FunctionName, sizeof(GenInfo.FunctionName));
+            Count++;
+        }
+        M = M->Next;
+    }
+
+    KeReleaseSpinLock(&g_ShadowSsdtState.HookLock, OldIrql);
+
+    Output->Count = Count;
+    Irp->IoStatus.Information = FIELD_OFFSET(VMX_SHADOW_SSDT_HOOK_LIST, Hooks) +
+                                 Count * sizeof(SHADOW_SSDT_HOOK_INFO);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS HandleIoctlShadowSsdtMonitor(PIRP Irp, PIO_STACK_LOCATION IoStack)
+{
+    PVMX_SHADOW_SSDT_MONITOR_REQUEST Input;
+
+    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(VMX_SHADOW_SSDT_MONITOR_REQUEST))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Input = (PVMX_SHADOW_SSDT_MONITOR_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    if (!Input) return STATUS_INVALID_PARAMETER;
+
+    return ShadowSsdtSetMonitorMode(Input);
 }

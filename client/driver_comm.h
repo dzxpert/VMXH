@@ -119,4 +119,120 @@ BOOL    DriverGetHookEvents(HANDLE DeviceHandle,
                             DWORD BufferSize,
                             DWORD *BytesReturned);
 
+/* ========================================================================= */
+/*  SSDT Framework IOCTL Wrappers                                            */
+/* ========================================================================= */
+
+/*
+ * Initialize SSDT discovery (KiServiceTable scan, address resolution, naming).
+ * On success, OutResponse receives table info.
+ */
+BOOL    DriverSsdtInit(HANDLE DeviceHandle,
+                       VMX_SSDT_INIT_RESPONSE *OutResponse);
+
+/*
+ * Dump SSDT entries starting from StartIndex, up to Count entries.
+ * Buffer must be pre-allocated by the caller.
+ */
+BOOL    DriverSsdtDump(HANDLE DeviceHandle,
+                       DWORD StartIndex, DWORD Count,
+                       VMX_SSDT_DUMP_RESPONSE *Buffer,
+                       DWORD BufferSize,
+                       DWORD *BytesReturned);
+
+/*
+ * Hook an SSDT entry by syscall index or Nt* function name.
+ * On success, OutResponse receives hookId, resolved index and VA.
+ */
+BOOL    DriverSsdtHook(HANDLE DeviceHandle,
+                       BOOL ByName,
+                       DWORD SyscallIndex,
+                       const WCHAR *FunctionName,
+                       const HOOK_RULE *Rule,
+                       VMX_SSDT_HOOK_RESPONSE *OutResponse);
+
+/*
+ * Remove an SSDT hook by hookId or syscall index.
+ */
+BOOL    DriverSsdtUnhook(HANDLE DeviceHandle,
+                         BOOL ByHookId,
+                         DWORD HookId,
+                         DWORD SyscallIndex);
+
+/*
+ * Remove all SSDT hooks.
+ */
+BOOL    DriverSsdtUnhookAll(HANDLE DeviceHandle);
+
+/*
+ * List all active SSDT hooks.
+ */
+BOOL    DriverSsdtListHooks(HANDLE DeviceHandle,
+                            VMX_SSDT_HOOK_LIST *Buffer,
+                            DWORD BufferSize,
+                            DWORD *BytesReturned);
+
+/*
+ * Set SSDT monitor mode (off/all/filtered).
+ */
+BOOL    DriverSsdtMonitor(HANDLE DeviceHandle,
+                          const VMX_SSDT_MONITOR_REQUEST *Request);
+
+/* ========================================================================= */
+/*  Shadow SSDT (Win32k) Framework IOCTL Wrappers                            */
+/* ========================================================================= */
+
+/*
+ * Initialize Shadow SSDT discovery (KTHREAD scan, win32k module enumeration).
+ * Requires regular SSDT to be initialized first.
+ */
+BOOL    DriverShadowSsdtInit(HANDLE DeviceHandle,
+                              VMX_SHADOW_SSDT_INIT_RESPONSE *OutResponse);
+
+/*
+ * Dump Shadow SSDT entries starting from StartIndex, up to Count entries.
+ */
+BOOL    DriverShadowSsdtDump(HANDLE DeviceHandle,
+                              DWORD StartIndex, DWORD Count,
+                              VMX_SHADOW_SSDT_DUMP_RESPONSE *Buffer,
+                              DWORD BufferSize,
+                              DWORD *BytesReturned);
+
+/*
+ * Hook a Shadow SSDT entry by syscall index or NtUser/NtGdi name.
+ */
+BOOL    DriverShadowSsdtHook(HANDLE DeviceHandle,
+                              BOOL ByName,
+                              DWORD SyscallIndex,
+                              const WCHAR *FunctionName,
+                              const HOOK_RULE *Rule,
+                              VMX_SHADOW_SSDT_HOOK_RESPONSE *OutResponse);
+
+/*
+ * Remove a Shadow SSDT hook by hookId or syscall index.
+ */
+BOOL    DriverShadowSsdtUnhook(HANDLE DeviceHandle,
+                                BOOL ByHookId,
+                                DWORD HookId,
+                                DWORD SyscallIndex);
+
+/*
+ * Remove all Shadow SSDT hooks.
+ */
+BOOL    DriverShadowSsdtUnhookAll(HANDLE DeviceHandle);
+
+/*
+ * List all active Shadow SSDT hooks.
+ */
+BOOL    DriverShadowSsdtListHooks(HANDLE DeviceHandle,
+                                   VMX_SHADOW_SSDT_HOOK_LIST *Buffer,
+                                   DWORD BufferSize,
+                                   DWORD *BytesReturned);
+
+/*
+ * Set Shadow SSDT monitor mode (off/all/filtered).
+ */
+BOOL    DriverShadowSsdtMonitor(HANDLE DeviceHandle,
+                                 const VMX_SHADOW_SSDT_MONITOR_REQUEST *Request);
+
 #endif /* _DRIVER_COMM_H_ */

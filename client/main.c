@@ -40,6 +40,26 @@
  *   --read-mem <PID> <addr> [size]   Read memory from target process
  *   --write-mem <PID> <addr> <hex>   Write hex bytes to target process
  *   --dump-mem <PID> <addr> <size>   Dump memory region (full hex dump)
+ *
+ * SSDT Monitoring & Hook Framework:
+ *   --ssdt-init                          Initialize SSDT discovery
+ *   --ssdt-dump [start] [count]          Dump SSDT table entries
+ *   --ssdt-hook <index|NtName>           Hook SSDT function
+ *   --ssdt-unhook <index|hookid:N>       Remove SSDT hook
+ *   --ssdt-unhook-all                    Remove all SSDT hooks
+ *   --ssdt-list                          List active SSDT hooks
+ *   --ssdt-monitor <off|all|filtered>    Set SSDT monitor mode
+ *   --ssdt-filter <idx1,idx2,...>        Specify syscall indices for filtered mode
+ *
+ * Shadow SSDT (Win32k) Monitoring & Hook Framework:
+ *   --shadow-ssdt-init                          Initialize Shadow SSDT discovery
+ *   --shadow-ssdt-dump [start] [count]          Dump Shadow SSDT table entries
+ *   --shadow-ssdt-hook <index|NtUserName>       Hook Shadow SSDT function
+ *   --shadow-ssdt-unhook <index|hookid:N>       Remove Shadow SSDT hook
+ *   --shadow-ssdt-unhook-all                    Remove all Shadow SSDT hooks
+ *   --shadow-ssdt-list                          List active Shadow SSDT hooks
+ *   --shadow-ssdt-monitor <off|all|filtered>    Set Shadow SSDT monitor mode
+ *   --shadow-ssdt-filter <idx1,idx2,...>        Specify Shadow SSDT indices for filtered mode
  */
 
 #include <stdio.h>
@@ -105,6 +125,26 @@ static void PrintUsage(const char *Argv0)
     printf("  --write-mem <PID> <addr> <hex>  Write hex bytes (e.g. 90909090CC)\n");
     printf("  --dump-mem <PID> <addr> <size>  Full hex+ASCII dump of memory region\n");
     printf("\n");
+    printf("SSDT Monitoring & Hook Framework:\n");
+    printf("  --ssdt-init                       Initialize SSDT discovery\n");
+    printf("  --ssdt-dump [start] [count]       Dump SSDT table entries\n");
+    printf("  --ssdt-hook <index|NtName>        Hook SSDT function (use with --action, etc.)\n");
+    printf("  --ssdt-unhook <index|hookid:N>    Remove SSDT hook by index or hookid:N\n");
+    printf("  --ssdt-unhook-all                 Remove all SSDT hooks\n");
+    printf("  --ssdt-list                       List active SSDT hooks\n");
+    printf("  --ssdt-monitor <off|all|filtered> Set SSDT monitor mode\n");
+    printf("  --ssdt-filter <idx1,idx2,...>      Syscall indices for filtered mode\n");
+    printf("\n");
+    printf("Shadow SSDT (Win32k) Monitoring & Hook Framework:\n");
+    printf("  --shadow-ssdt-init                    Initialize Shadow SSDT discovery\n");
+    printf("  --shadow-ssdt-dump [start] [count]    Dump Shadow SSDT table entries\n");
+    printf("  --shadow-ssdt-hook <index|name>       Hook Shadow SSDT function\n");
+    printf("  --shadow-ssdt-unhook <index|hookid:N> Remove Shadow SSDT hook\n");
+    printf("  --shadow-ssdt-unhook-all              Remove all Shadow SSDT hooks\n");
+    printf("  --shadow-ssdt-list                    List active Shadow SSDT hooks\n");
+    printf("  --shadow-ssdt-monitor <off|all|filt>  Set Shadow SSDT monitor mode\n");
+    printf("  --shadow-ssdt-filter <idx1,idx2,...>   Indices for filtered mode\n");
+    printf("\n");
     printf("Examples:\n");
     printf("  %s --pid 1234 --hide-all\n", Argv0);
     printf("  %s --pid 1234 --hide-debugger --hide-hwbp --hide-timing\n", Argv0);
@@ -124,6 +164,35 @@ static void PrintUsage(const char *Argv0)
     printf("  %s --read-mem 1234 0x7FF600000000 64\n", Argv0);
     printf("  %s --write-mem 1234 0x7FF600001000 90909090\n", Argv0);
     printf("  %s --dump-mem 1234 0x7FF600000000 256\n", Argv0);
+    printf("\n");
+    printf("  SSDT Examples:\n");
+    printf("  %s --ssdt-init\n", Argv0);
+    printf("  %s --ssdt-dump\n", Argv0);
+    printf("  %s --ssdt-dump 0 20\n", Argv0);
+    printf("  %s --ssdt-hook NtOpenProcess --action 1 --hook-log\n", Argv0);
+    printf("  %s --ssdt-hook 38 --action 2 --block-retval 0xC0000022\n", Argv0);
+    printf("  %s --ssdt-unhook 38\n", Argv0);
+    printf("  %s --ssdt-unhook hookid:5\n", Argv0);
+    printf("  %s --ssdt-unhook-all\n", Argv0);
+    printf("  %s --ssdt-list\n", Argv0);
+    printf("  %s --ssdt-monitor all --hook-pid 1234\n", Argv0);
+    printf("  %s --ssdt-monitor filtered --ssdt-filter 35,38,55 --hook-pid 1234\n", Argv0);
+    printf("  %s --ssdt-monitor off\n", Argv0);
+    printf("  %s --hook-events\n", Argv0);
+    printf("\n");
+    printf("  Shadow SSDT Examples:\n");
+    printf("  %s --shadow-ssdt-init\n", Argv0);
+    printf("  %s --shadow-ssdt-dump\n", Argv0);
+    printf("  %s --shadow-ssdt-dump 0 20\n", Argv0);
+    printf("  %s --shadow-ssdt-hook NtUserGetForegroundWindow --action 1 --hook-log\n", Argv0);
+    printf("  %s --shadow-ssdt-hook 10 --action 2 --block-retval 0\n", Argv0);
+    printf("  %s --shadow-ssdt-unhook 10\n", Argv0);
+    printf("  %s --shadow-ssdt-unhook hookid:5\n", Argv0);
+    printf("  %s --shadow-ssdt-unhook-all\n", Argv0);
+    printf("  %s --shadow-ssdt-list\n", Argv0);
+    printf("  %s --shadow-ssdt-monitor all --hook-pid 1234\n", Argv0);
+    printf("  %s --shadow-ssdt-monitor filtered --shadow-ssdt-filter 10,20,30\n", Argv0);
+    printf("  %s --shadow-ssdt-monitor off\n", Argv0);
     printf("\n");
 }
 
@@ -1000,6 +1069,707 @@ static int CmdDumpMem(HANDLE hDevice, DWORD Pid, ULONG64 Address, DWORD Size)
 }
 
 /* ========================================================================= */
+/*  SSDT Framework Commands                                                  */
+/* ========================================================================= */
+
+static int CmdSsdtInit(HANDLE hDevice)
+{
+    VMX_SSDT_INIT_RESPONSE Response = { 0 };
+
+    /* Initialize VMX first (if not already running) */
+    if (!DriverInitVmx(hDevice)) {
+        DWORD Err = GetLastError();
+        if (Err != ERROR_ALREADY_REGISTERED && Err != 0) {
+            fprintf(stderr, "[!] Failed to initialize VMX: error %lu\n", Err);
+            return 1;
+        }
+    }
+
+    printf("[*] Initializing SSDT discovery...\n");
+
+    if (!DriverSsdtInit(hDevice, &Response)) {
+        fprintf(stderr, "[!] Failed to initialize SSDT: error %lu\n", GetLastError());
+        return 1;
+    }
+
+    if (!Response.Success) {
+        fprintf(stderr, "[!] SSDT discovery failed.\n");
+        return 1;
+    }
+
+    printf("[+] SSDT initialized successfully!\n");
+    printf("    KiSystemCall64:  0x%llX\n", (unsigned long long)Response.KiSystemCall64Va);
+    printf("    KiServiceTable:  0x%llX\n", (unsigned long long)Response.KiServiceTableVa);
+    printf("    Service Count:   %u\n", Response.ServiceCount);
+    return 0;
+}
+
+static int CmdSsdtDump(HANDLE hDevice, DWORD StartIndex, DWORD Count)
+{
+    DWORD BufferSize;
+    VMX_SSDT_DUMP_RESPONSE *Buffer;
+    DWORD BytesReturned = 0;
+    ULONG i;
+    char FuncNameA[SSDT_MAX_NAME_LEN];
+    int k;
+
+    /* Limit buffer to reasonable size */
+    if (Count == 0) Count = SSDT_MAX_SERVICES;
+    if (Count > SSDT_MAX_SERVICES) Count = SSDT_MAX_SERVICES;
+
+    BufferSize = (DWORD)(sizeof(VMX_SSDT_DUMP_RESPONSE) + sizeof(SSDT_ENTRY_INFO) * Count);
+    Buffer = (VMX_SSDT_DUMP_RESPONSE *)malloc(BufferSize);
+    if (!Buffer) {
+        fprintf(stderr, "[!] Memory allocation failed\n");
+        return 1;
+    }
+    memset(Buffer, 0, BufferSize);
+
+    printf("[*] Dumping SSDT entries (start=%u, count=%u)...\n\n", StartIndex, Count);
+
+    if (!DriverSsdtDump(hDevice, StartIndex, Count, Buffer, BufferSize, &BytesReturned)) {
+        fprintf(stderr, "[!] Failed to dump SSDT: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --ssdt-init has been called first.\n");
+        free(Buffer);
+        return 1;
+    }
+
+    printf("    Total services: %u, Returned: %u\n\n", Buffer->TotalServices, Buffer->ReturnedCount);
+
+    if (Buffer->ReturnedCount == 0) {
+        printf("    (no entries)\n");
+    } else {
+        printf("    %-6s %-18s %-4s %-12s %s\n",
+               "Index", "Address", "Args", "RawOffset", "Name");
+        printf("    %-6s %-18s %-4s %-12s %s\n",
+               "------", "------------------", "----", "------------", "----");
+
+        for (i = 0; i < Buffer->ReturnedCount; i++) {
+            SSDT_ENTRY_INFO *E = &Buffer->Entries[i];
+
+            memset(FuncNameA, 0, sizeof(FuncNameA));
+            for (k = 0; k < SSDT_MAX_NAME_LEN - 1 && E->FunctionName[k]; k++) {
+                FuncNameA[k] = (char)E->FunctionName[k];
+            }
+            FuncNameA[k] = '\0';
+
+            printf("    %-6u 0x%016llX %-4u 0x%08X   %s\n",
+                   E->SyscallIndex,
+                   (unsigned long long)E->FunctionVa,
+                   E->ArgCount,
+                   (unsigned int)E->RawOffset,
+                   FuncNameA[0] ? FuncNameA : "(unknown)");
+        }
+    }
+
+    printf("\n");
+    free(Buffer);
+    return 0;
+}
+
+static int CmdSsdtHook(HANDLE hDevice, const char *Target, DWORD HookPid,
+                        const HOOK_RULE *Rule)
+{
+    VMX_SSDT_HOOK_RESPONSE Response = { 0 };
+    WCHAR WideName[SSDT_MAX_NAME_LEN] = { 0 };
+    BOOL ByName;
+    DWORD SyscallIndex = 0;
+    char FuncNameA[SSDT_MAX_NAME_LEN];
+    int k;
+
+    /* Initialize VMX first */
+    if (!DriverInitVmx(hDevice)) {
+        DWORD Err = GetLastError();
+        if (Err != ERROR_ALREADY_REGISTERED && Err != 0) {
+            fprintf(stderr, "[!] Failed to initialize VMX: error %lu\n", Err);
+            return 1;
+        }
+    }
+
+    /* Determine if Target is a name (contains letters) or index (all digits) */
+    ByName = FALSE;
+    {
+        const char *p = Target;
+        while (*p) {
+            if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) {
+                ByName = TRUE;
+                break;
+            }
+            p++;
+        }
+    }
+
+    if (ByName) {
+        int j;
+        for (j = 0; j < SSDT_MAX_NAME_LEN - 1 && Target[j]; j++) {
+            WideName[j] = (WCHAR)Target[j];
+        }
+        WideName[j] = L'\0';
+
+        printf("[*] Hooking SSDT function: %s\n", Target);
+    } else {
+        SyscallIndex = (DWORD)atoi(Target);
+        printf("[*] Hooking SSDT syscall index: %u\n", SyscallIndex);
+    }
+
+    printf("    Action:     %s (%u)\n", HookActionToStr(Rule->Action), Rule->Action);
+    printf("    PID Filter: %s", Rule->TargetPid ? "" : "GLOBAL (all processes)\n");
+    if (Rule->TargetPid) {
+        printf("%u\n", Rule->TargetPid);
+    }
+    if (Rule->Action == HOOK_ACTION_BLOCK) {
+        printf("    Block RetVal:  0x%llX\n", (unsigned long long)Rule->BlockReturnValue);
+    }
+    if (Rule->Action == HOOK_ACTION_MODIFY_RETVAL) {
+        printf("    New RetVal:    0x%llX\n", (unsigned long long)Rule->NewReturnValue);
+    }
+    printf("    Logging:    %s\n", Rule->LogEnabled ? "ON" : "OFF");
+
+    if (!DriverSsdtHook(hDevice, ByName, SyscallIndex, WideName, Rule, &Response)) {
+        fprintf(stderr, "[!] Failed to hook SSDT: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --ssdt-init has been called first.\n");
+        return 1;
+    }
+
+    memset(FuncNameA, 0, sizeof(FuncNameA));
+    for (k = 0; k < SSDT_MAX_NAME_LEN - 1 && Response.FunctionName[k]; k++) {
+        FuncNameA[k] = (char)Response.FunctionName[k];
+    }
+    FuncNameA[k] = '\0';
+
+    printf("[+] SSDT hook installed!\n");
+    printf("    Hook ID:       %u\n", Response.HookId);
+    printf("    Syscall Index: %u\n", Response.SyscallIndex);
+    printf("    Function VA:   0x%llX\n", (unsigned long long)Response.FunctionVa);
+    if (FuncNameA[0]) {
+        printf("    Function:      %s\n", FuncNameA);
+    }
+    return 0;
+}
+
+static int CmdSsdtUnhook(HANDLE hDevice, const char *Target)
+{
+    /* Parse target: "hookid:N" or plain index number */
+    if (strncmp(Target, "hookid:", 7) == 0) {
+        DWORD HookId = (DWORD)atoi(Target + 7);
+        printf("[*] Removing SSDT hook by hookId=%u\n", HookId);
+
+        if (!DriverSsdtUnhook(hDevice, TRUE, HookId, 0)) {
+            fprintf(stderr, "[!] Failed to unhook: error %lu\n", GetLastError());
+            return 1;
+        }
+        printf("[+] SSDT hook (hookId=%u) removed.\n", HookId);
+    } else {
+        DWORD Index = (DWORD)atoi(Target);
+        printf("[*] Removing SSDT hook for syscall index=%u\n", Index);
+
+        if (!DriverSsdtUnhook(hDevice, FALSE, 0, Index)) {
+            fprintf(stderr, "[!] Failed to unhook: error %lu\n", GetLastError());
+            return 1;
+        }
+        printf("[+] SSDT hook (index=%u) removed.\n", Index);
+    }
+    return 0;
+}
+
+static int CmdSsdtUnhookAll(HANDLE hDevice)
+{
+    printf("[*] Removing all SSDT hooks...\n");
+
+    if (!DriverSsdtUnhookAll(hDevice)) {
+        fprintf(stderr, "[!] Failed to unhook all: error %lu\n", GetLastError());
+        return 1;
+    }
+
+    printf("[+] All SSDT hooks removed.\n");
+    return 0;
+}
+
+static int CmdSsdtList(HANDLE hDevice)
+{
+    DWORD BufferSize = (DWORD)(sizeof(VMX_SSDT_HOOK_LIST) + sizeof(SSDT_HOOK_INFO) * 64);
+    VMX_SSDT_HOOK_LIST *Buffer = (VMX_SSDT_HOOK_LIST *)malloc(BufferSize);
+    DWORD BytesReturned = 0;
+    ULONG i;
+    char FuncNameA[SSDT_MAX_NAME_LEN];
+    int k;
+
+    if (!Buffer) {
+        fprintf(stderr, "[!] Memory allocation failed\n");
+        return 1;
+    }
+    memset(Buffer, 0, BufferSize);
+
+    if (!DriverSsdtListHooks(hDevice, Buffer, BufferSize, &BytesReturned)) {
+        fprintf(stderr, "[!] Failed to list SSDT hooks: error %lu\n", GetLastError());
+        free(Buffer);
+        return 1;
+    }
+
+    printf("[*] Active SSDT Hooks: %u\n\n", Buffer->Count);
+
+    if (Buffer->Count == 0) {
+        printf("    (no active SSDT hooks)\n");
+    } else {
+        printf("    %-6s %-6s %-18s %-14s %-8s %-10s %s\n",
+               "HookID", "Index", "Address", "Action", "PID", "HitCount", "Function");
+        printf("    %-6s %-6s %-18s %-14s %-8s %-10s %s\n",
+               "------", "------", "------------------", "--------------",
+               "--------", "----------", "--------");
+
+        for (i = 0; i < Buffer->Count; i++) {
+            SSDT_HOOK_INFO *H = &Buffer->Hooks[i];
+
+            memset(FuncNameA, 0, sizeof(FuncNameA));
+            for (k = 0; k < SSDT_MAX_NAME_LEN - 1 && H->FunctionName[k]; k++) {
+                FuncNameA[k] = (char)H->FunctionName[k];
+            }
+            FuncNameA[k] = '\0';
+
+            printf("    %-6u %-6u 0x%016llX %-14s %-8s %llu         %s\n",
+                   H->HookId,
+                   H->SyscallIndex,
+                   (unsigned long long)H->FunctionVa,
+                   HookActionToStr(H->Rule.Action),
+                   H->Rule.TargetPid ? "PID" : "GLOBAL",
+                   (unsigned long long)H->HitCount,
+                   FuncNameA[0] ? FuncNameA : "(unknown)");
+
+            if (H->Rule.TargetPid) {
+                printf("         PID Filter: %u\n", H->Rule.TargetPid);
+            }
+            if (H->Rule.Action == HOOK_ACTION_BLOCK) {
+                printf("         Block RetVal: 0x%llX\n",
+                       (unsigned long long)H->Rule.BlockReturnValue);
+            }
+            if (H->Rule.Action == HOOK_ACTION_MODIFY_RETVAL) {
+                printf("         New RetVal: 0x%llX\n",
+                       (unsigned long long)H->Rule.NewReturnValue);
+            }
+            if (H->Rule.LogEnabled) {
+                printf("         Logging: ON\n");
+            }
+        }
+    }
+
+    printf("\n");
+    free(Buffer);
+    return 0;
+}
+
+static int CmdSsdtMonitor(HANDLE hDevice, DWORD Mode, DWORD MonitorPid,
+                           const DWORD *FilterIndices, DWORD FilterCount)
+{
+    VMX_SSDT_MONITOR_REQUEST Request = { 0 };
+    DWORD i;
+    const char *ModeStr;
+
+    /* Initialize VMX first */
+    if (!DriverInitVmx(hDevice)) {
+        DWORD Err = GetLastError();
+        if (Err != ERROR_ALREADY_REGISTERED && Err != 0) {
+            fprintf(stderr, "[!] Failed to initialize VMX: error %lu\n", Err);
+            return 1;
+        }
+    }
+
+    Request.Mode = Mode;
+    Request.TargetPid = MonitorPid;
+
+    if (Mode == SSDT_MONITOR_FILTERED && FilterIndices && FilterCount > 0) {
+        if (FilterCount > SSDT_MONITOR_MAX_FILTER)
+            FilterCount = SSDT_MONITOR_MAX_FILTER;
+        Request.FilterCount = FilterCount;
+        for (i = 0; i < FilterCount; i++) {
+            Request.FilterIndices[i] = FilterIndices[i];
+        }
+    }
+
+    switch (Mode) {
+    case SSDT_MONITOR_OFF:      ModeStr = "OFF"; break;
+    case SSDT_MONITOR_ALL:      ModeStr = "ALL"; break;
+    case SSDT_MONITOR_FILTERED: ModeStr = "FILTERED"; break;
+    default:                    ModeStr = "UNKNOWN"; break;
+    }
+
+    printf("[*] Setting SSDT monitor mode: %s\n", ModeStr);
+    if (MonitorPid) {
+        printf("    PID Filter: %u\n", MonitorPid);
+    }
+    if (Mode == SSDT_MONITOR_FILTERED) {
+        printf("    Filter indices (%u): ", FilterCount);
+        for (i = 0; i < FilterCount; i++) {
+            printf("%u%s", FilterIndices[i], (i < FilterCount - 1) ? "," : "");
+        }
+        printf("\n");
+    }
+
+    if (!DriverSsdtMonitor(hDevice, &Request)) {
+        fprintf(stderr, "[!] Failed to set monitor mode: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --ssdt-init has been called first.\n");
+        return 1;
+    }
+
+    if (Mode == SSDT_MONITOR_OFF) {
+        printf("[+] SSDT monitoring stopped.\n");
+    } else {
+        printf("[+] SSDT monitoring started. Use --hook-events to view captured calls.\n");
+    }
+    return 0;
+}
+
+/* ========================================================================= */
+/*  Shadow SSDT (Win32k) Framework Commands                                  */
+/* ========================================================================= */
+
+static int CmdShadowSsdtInit(HANDLE hDevice)
+{
+    VMX_SHADOW_SSDT_INIT_RESPONSE Response = { 0 };
+
+    /* Initialize VMX first (if not already running) */
+    if (!DriverInitVmx(hDevice)) {
+        DWORD Err = GetLastError();
+        if (Err != ERROR_ALREADY_REGISTERED && Err != 0) {
+            fprintf(stderr, "[!] Failed to initialize VMX: error %lu\n", Err);
+            return 1;
+        }
+    }
+
+    printf("[*] Initializing Shadow SSDT (Win32k) discovery...\n");
+    printf("[*] Note: Regular SSDT must be initialized first (--ssdt-init).\n");
+
+    if (!DriverShadowSsdtInit(hDevice, &Response)) {
+        fprintf(stderr, "[!] Failed to initialize Shadow SSDT: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --ssdt-init has been called first.\n");
+        fprintf(stderr, "    A GUI process must be running on the system.\n");
+        return 1;
+    }
+
+    if (!Response.Success) {
+        fprintf(stderr, "[!] Shadow SSDT discovery failed.\n");
+        return 1;
+    }
+
+    printf("[+] Shadow SSDT initialized successfully!\n");
+    printf("    W32pServiceTable: 0x%llX\n", (unsigned long long)Response.W32pServiceTableVa);
+    printf("    Win32k Base:      0x%llX\n", (unsigned long long)Response.Win32kBase);
+    printf("    Service Count:    %u\n", Response.ServiceCount);
+    return 0;
+}
+
+static int CmdShadowSsdtDump(HANDLE hDevice, DWORD StartIndex, DWORD Count)
+{
+    DWORD BufferSize;
+    VMX_SHADOW_SSDT_DUMP_RESPONSE *Buffer;
+    DWORD BytesReturned = 0;
+    ULONG i;
+    char FuncNameA[SSDT_MAX_NAME_LEN];
+    int k;
+
+    if (Count == 0) Count = SHADOW_SSDT_MAX_SERVICES;
+    if (Count > SHADOW_SSDT_MAX_SERVICES) Count = SHADOW_SSDT_MAX_SERVICES;
+
+    BufferSize = (DWORD)(sizeof(VMX_SHADOW_SSDT_DUMP_RESPONSE) + sizeof(SSDT_ENTRY_INFO) * Count);
+    Buffer = (VMX_SHADOW_SSDT_DUMP_RESPONSE *)malloc(BufferSize);
+    if (!Buffer) {
+        fprintf(stderr, "[!] Memory allocation failed\n");
+        return 1;
+    }
+    memset(Buffer, 0, BufferSize);
+
+    printf("[*] Dumping Shadow SSDT entries (start=%u, count=%u)...\n\n", StartIndex, Count);
+
+    if (!DriverShadowSsdtDump(hDevice, StartIndex, Count, Buffer, BufferSize, &BytesReturned)) {
+        fprintf(stderr, "[!] Failed to dump Shadow SSDT: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --shadow-ssdt-init has been called first.\n");
+        free(Buffer);
+        return 1;
+    }
+
+    printf("    Total services: %u, Returned: %u\n\n", Buffer->TotalServices, Buffer->ReturnedCount);
+
+    if (Buffer->ReturnedCount == 0) {
+        printf("    (no entries)\n");
+    } else {
+        printf("    %-6s %-18s %-4s %-12s %s\n",
+               "Index", "Address", "Args", "RawOffset", "Name");
+        printf("    %-6s %-18s %-4s %-12s %s\n",
+               "------", "------------------", "----", "------------", "----");
+
+        for (i = 0; i < Buffer->ReturnedCount; i++) {
+            SSDT_ENTRY_INFO *E = &Buffer->Entries[i];
+
+            memset(FuncNameA, 0, sizeof(FuncNameA));
+            for (k = 0; k < SSDT_MAX_NAME_LEN - 1 && E->FunctionName[k]; k++) {
+                FuncNameA[k] = (char)E->FunctionName[k];
+            }
+            FuncNameA[k] = '\0';
+
+            printf("    %-6u 0x%016llX %-4u 0x%08X   %s\n",
+                   E->SyscallIndex,
+                   (unsigned long long)E->FunctionVa,
+                   E->ArgCount,
+                   (unsigned int)E->RawOffset,
+                   FuncNameA[0] ? FuncNameA : "(unknown)");
+        }
+    }
+
+    printf("\n");
+    free(Buffer);
+    return 0;
+}
+
+static int CmdShadowSsdtHook(HANDLE hDevice, const char *Target, DWORD HookPid,
+                               const HOOK_RULE *Rule)
+{
+    VMX_SHADOW_SSDT_HOOK_RESPONSE Response = { 0 };
+    WCHAR WideName[SSDT_MAX_NAME_LEN] = { 0 };
+    BOOL ByName;
+    DWORD SyscallIndex = 0;
+    char FuncNameA[SSDT_MAX_NAME_LEN];
+    int k;
+
+    /* Initialize VMX first */
+    if (!DriverInitVmx(hDevice)) {
+        DWORD Err = GetLastError();
+        if (Err != ERROR_ALREADY_REGISTERED && Err != 0) {
+            fprintf(stderr, "[!] Failed to initialize VMX: error %lu\n", Err);
+            return 1;
+        }
+    }
+
+    /* Determine if Target is a name or index */
+    ByName = FALSE;
+    {
+        const char *p = Target;
+        while (*p) {
+            if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) {
+                ByName = TRUE;
+                break;
+            }
+            p++;
+        }
+    }
+
+    if (ByName) {
+        int j;
+        for (j = 0; j < SSDT_MAX_NAME_LEN - 1 && Target[j]; j++) {
+            WideName[j] = (WCHAR)Target[j];
+        }
+        WideName[j] = L'\0';
+
+        printf("[*] Hooking Shadow SSDT function: %s\n", Target);
+    } else {
+        SyscallIndex = (DWORD)atoi(Target);
+        printf("[*] Hooking Shadow SSDT syscall index: %u\n", SyscallIndex);
+    }
+
+    printf("    Action:     %s (%u)\n", HookActionToStr(Rule->Action), Rule->Action);
+    printf("    PID Filter: %s", Rule->TargetPid ? "" : "GLOBAL (all processes)\n");
+    if (Rule->TargetPid) {
+        printf("%u\n", Rule->TargetPid);
+    }
+    if (Rule->Action == HOOK_ACTION_BLOCK) {
+        printf("    Block RetVal:  0x%llX\n", (unsigned long long)Rule->BlockReturnValue);
+    }
+    if (Rule->Action == HOOK_ACTION_MODIFY_RETVAL) {
+        printf("    New RetVal:    0x%llX\n", (unsigned long long)Rule->NewReturnValue);
+    }
+    printf("    Logging:    %s\n", Rule->LogEnabled ? "ON" : "OFF");
+
+    if (!DriverShadowSsdtHook(hDevice, ByName, SyscallIndex, WideName, Rule, &Response)) {
+        fprintf(stderr, "[!] Failed to hook Shadow SSDT: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --shadow-ssdt-init has been called first.\n");
+        return 1;
+    }
+
+    memset(FuncNameA, 0, sizeof(FuncNameA));
+    for (k = 0; k < SSDT_MAX_NAME_LEN - 1 && Response.FunctionName[k]; k++) {
+        FuncNameA[k] = (char)Response.FunctionName[k];
+    }
+    FuncNameA[k] = '\0';
+
+    printf("[+] Shadow SSDT hook installed!\n");
+    printf("    Hook ID:       %u\n", Response.HookId);
+    printf("    Syscall Index: %u\n", Response.SyscallIndex);
+    printf("    Function VA:   0x%llX\n", (unsigned long long)Response.FunctionVa);
+    if (FuncNameA[0]) {
+        printf("    Function:      %s\n", FuncNameA);
+    }
+    return 0;
+}
+
+static int CmdShadowSsdtUnhook(HANDLE hDevice, const char *Target)
+{
+    if (strncmp(Target, "hookid:", 7) == 0) {
+        DWORD HookId = (DWORD)atoi(Target + 7);
+        printf("[*] Removing Shadow SSDT hook by hookId=%u\n", HookId);
+
+        if (!DriverShadowSsdtUnhook(hDevice, TRUE, HookId, 0)) {
+            fprintf(stderr, "[!] Failed to unhook: error %lu\n", GetLastError());
+            return 1;
+        }
+        printf("[+] Shadow SSDT hook (hookId=%u) removed.\n", HookId);
+    } else {
+        DWORD Index = (DWORD)atoi(Target);
+        printf("[*] Removing Shadow SSDT hook for syscall index=%u\n", Index);
+
+        if (!DriverShadowSsdtUnhook(hDevice, FALSE, 0, Index)) {
+            fprintf(stderr, "[!] Failed to unhook: error %lu\n", GetLastError());
+            return 1;
+        }
+        printf("[+] Shadow SSDT hook (index=%u) removed.\n", Index);
+    }
+    return 0;
+}
+
+static int CmdShadowSsdtUnhookAll(HANDLE hDevice)
+{
+    printf("[*] Removing all Shadow SSDT hooks...\n");
+
+    if (!DriverShadowSsdtUnhookAll(hDevice)) {
+        fprintf(stderr, "[!] Failed to unhook all: error %lu\n", GetLastError());
+        return 1;
+    }
+
+    printf("[+] All Shadow SSDT hooks removed.\n");
+    return 0;
+}
+
+static int CmdShadowSsdtList(HANDLE hDevice)
+{
+    DWORD BufferSize = (DWORD)(sizeof(VMX_SHADOW_SSDT_HOOK_LIST) + sizeof(SHADOW_SSDT_HOOK_INFO) * 64);
+    VMX_SHADOW_SSDT_HOOK_LIST *Buffer = (VMX_SHADOW_SSDT_HOOK_LIST *)malloc(BufferSize);
+    DWORD BytesReturned = 0;
+    ULONG i;
+    char FuncNameA[SSDT_MAX_NAME_LEN];
+    int k;
+
+    if (!Buffer) {
+        fprintf(stderr, "[!] Memory allocation failed\n");
+        return 1;
+    }
+    memset(Buffer, 0, BufferSize);
+
+    if (!DriverShadowSsdtListHooks(hDevice, Buffer, BufferSize, &BytesReturned)) {
+        fprintf(stderr, "[!] Failed to list Shadow SSDT hooks: error %lu\n", GetLastError());
+        free(Buffer);
+        return 1;
+    }
+
+    printf("[*] Active Shadow SSDT Hooks: %u\n\n", Buffer->Count);
+
+    if (Buffer->Count == 0) {
+        printf("    (no active Shadow SSDT hooks)\n");
+    } else {
+        printf("    %-6s %-6s %-18s %-14s %-8s %-10s %s\n",
+               "HookID", "Index", "Address", "Action", "PID", "HitCount", "Function");
+        printf("    %-6s %-6s %-18s %-14s %-8s %-10s %s\n",
+               "------", "------", "------------------", "--------------",
+               "--------", "----------", "--------");
+
+        for (i = 0; i < Buffer->Count; i++) {
+            SHADOW_SSDT_HOOK_INFO *H = &Buffer->Hooks[i];
+
+            memset(FuncNameA, 0, sizeof(FuncNameA));
+            for (k = 0; k < SSDT_MAX_NAME_LEN - 1 && H->FunctionName[k]; k++) {
+                FuncNameA[k] = (char)H->FunctionName[k];
+            }
+            FuncNameA[k] = '\0';
+
+            printf("    %-6u %-6u 0x%016llX %-14s %-8s %llu         %s\n",
+                   H->HookId,
+                   H->SyscallIndex,
+                   (unsigned long long)H->FunctionVa,
+                   HookActionToStr(H->Rule.Action),
+                   H->Rule.TargetPid ? "PID" : "GLOBAL",
+                   (unsigned long long)H->HitCount,
+                   FuncNameA[0] ? FuncNameA : "(unknown)");
+
+            if (H->Rule.TargetPid) {
+                printf("         PID Filter: %u\n", H->Rule.TargetPid);
+            }
+            if (H->Rule.Action == HOOK_ACTION_BLOCK) {
+                printf("         Block RetVal: 0x%llX\n",
+                       (unsigned long long)H->Rule.BlockReturnValue);
+            }
+            if (H->Rule.Action == HOOK_ACTION_MODIFY_RETVAL) {
+                printf("         New RetVal: 0x%llX\n",
+                       (unsigned long long)H->Rule.NewReturnValue);
+            }
+            if (H->Rule.LogEnabled) {
+                printf("         Logging: ON\n");
+            }
+        }
+    }
+
+    printf("\n");
+    free(Buffer);
+    return 0;
+}
+
+static int CmdShadowSsdtMonitor(HANDLE hDevice, DWORD Mode, DWORD MonitorPid,
+                                  const DWORD *FilterIndices, DWORD FilterCount)
+{
+    VMX_SHADOW_SSDT_MONITOR_REQUEST Request = { 0 };
+    DWORD i;
+    const char *ModeStr;
+
+    /* Initialize VMX first */
+    if (!DriverInitVmx(hDevice)) {
+        DWORD Err = GetLastError();
+        if (Err != ERROR_ALREADY_REGISTERED && Err != 0) {
+            fprintf(stderr, "[!] Failed to initialize VMX: error %lu\n", Err);
+            return 1;
+        }
+    }
+
+    Request.Mode = Mode;
+    Request.TargetPid = MonitorPid;
+
+    if (Mode == SSDT_MONITOR_FILTERED && FilterIndices && FilterCount > 0) {
+        if (FilterCount > SHADOW_SSDT_MONITOR_MAX_FILTER)
+            FilterCount = SHADOW_SSDT_MONITOR_MAX_FILTER;
+        Request.FilterCount = FilterCount;
+        for (i = 0; i < FilterCount; i++) {
+            Request.FilterIndices[i] = FilterIndices[i];
+        }
+    }
+
+    switch (Mode) {
+    case SSDT_MONITOR_OFF:      ModeStr = "OFF"; break;
+    case SSDT_MONITOR_ALL:      ModeStr = "ALL"; break;
+    case SSDT_MONITOR_FILTERED: ModeStr = "FILTERED"; break;
+    default:                    ModeStr = "UNKNOWN"; break;
+    }
+
+    printf("[*] Setting Shadow SSDT monitor mode: %s\n", ModeStr);
+    if (MonitorPid) {
+        printf("    PID Filter: %u\n", MonitorPid);
+    }
+    if (Mode == SSDT_MONITOR_FILTERED) {
+        printf("    Filter indices (%u): ", FilterCount);
+        for (i = 0; i < FilterCount; i++) {
+            printf("%u%s", FilterIndices[i], (i < FilterCount - 1) ? "," : "");
+        }
+        printf("\n");
+    }
+
+    if (!DriverShadowSsdtMonitor(hDevice, &Request)) {
+        fprintf(stderr, "[!] Failed to set Shadow SSDT monitor mode: error %lu\n", GetLastError());
+        fprintf(stderr, "    Make sure --shadow-ssdt-init has been called first.\n");
+        return 1;
+    }
+
+    if (Mode == SSDT_MONITOR_OFF) {
+        printf("[+] Shadow SSDT monitoring stopped.\n");
+    } else {
+        printf("[+] Shadow SSDT monitoring started. Use --hook-events to view captured calls.\n");
+    }
+    return 0;
+}
+
+/* ========================================================================= */
 /*  Argument Parsing                                                         */
 /* ========================================================================= */
 
@@ -1037,6 +1807,40 @@ int main(int argc, char *argv[])
     ULONG64     MemAddress = 0;
     DWORD       MemSize = 64;           /* default read size */
     char        MemHexData[1024] = { 0 };  /* hex string for --write-mem (512 bytes max) */
+
+    /* SSDT framework parameters */
+    BOOL        DoSsdtInit = FALSE;
+    BOOL        DoSsdtDump = FALSE;
+    BOOL        DoSsdtHook = FALSE;
+    BOOL        DoSsdtUnhook = FALSE;
+    BOOL        DoSsdtUnhookAll = FALSE;
+    BOOL        DoSsdtList = FALSE;
+    BOOL        DoSsdtMonitor = FALSE;
+    BOOL        IsSsdtCmd = FALSE;
+    char        SsdtHookTarget[SSDT_MAX_NAME_LEN] = { 0 };
+    char        SsdtUnhookTarget[SSDT_MAX_NAME_LEN] = { 0 };
+    DWORD       SsdtDumpStart = 0;
+    DWORD       SsdtDumpCount = 0;
+    DWORD       SsdtMonitorMode = SSDT_MONITOR_OFF;
+    DWORD       SsdtFilterIndices[SSDT_MONITOR_MAX_FILTER] = { 0 };
+    DWORD       SsdtFilterCount = 0;
+
+    /* Shadow SSDT framework parameters */
+    BOOL        DoShadowSsdtInit = FALSE;
+    BOOL        DoShadowSsdtDump = FALSE;
+    BOOL        DoShadowSsdtHook = FALSE;
+    BOOL        DoShadowSsdtUnhook = FALSE;
+    BOOL        DoShadowSsdtUnhookAll = FALSE;
+    BOOL        DoShadowSsdtList = FALSE;
+    BOOL        DoShadowSsdtMonitor = FALSE;
+    BOOL        IsShadowSsdtCmd = FALSE;
+    char        ShadowSsdtHookTarget[SSDT_MAX_NAME_LEN] = { 0 };
+    char        ShadowSsdtUnhookTarget[SSDT_MAX_NAME_LEN] = { 0 };
+    DWORD       ShadowSsdtDumpStart = 0;
+    DWORD       ShadowSsdtDumpCount = 0;
+    DWORD       ShadowSsdtMonitorMode = SSDT_MONITOR_OFF;
+    DWORD       ShadowSsdtFilterIndices[SHADOW_SSDT_MONITOR_MAX_FILTER] = { 0 };
+    DWORD       ShadowSsdtFilterCount = 0;
 
     /* Default hook action = LOG_ONLY (most useful for first-time testing) */
     HookRule.Action = HOOK_ACTION_LOG_ONLY;
@@ -1154,6 +1958,120 @@ int main(int argc, char *argv[])
             MemAddress = _strtoui64(argv[++i], NULL, 16);
             MemSize = (DWORD)atoi(argv[++i]);
         }
+        /* --- SSDT framework options --- */
+        else if (strcmp(argv[i], "--ssdt-init") == 0) {
+            DoSsdtInit = TRUE;
+        }
+        else if (strcmp(argv[i], "--ssdt-dump") == 0) {
+            DoSsdtDump = TRUE;
+            /* Optional: start and count arguments */
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                SsdtDumpStart = (DWORD)atoi(argv[++i]);
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    SsdtDumpCount = (DWORD)atoi(argv[++i]);
+                }
+            }
+        }
+        else if (strcmp(argv[i], "--ssdt-hook") == 0 && i + 1 < argc) {
+            DoSsdtHook = TRUE;
+            strncpy(SsdtHookTarget, argv[++i], SSDT_MAX_NAME_LEN - 1);
+            SsdtHookTarget[SSDT_MAX_NAME_LEN - 1] = '\0';
+        }
+        else if (strcmp(argv[i], "--ssdt-unhook") == 0 && i + 1 < argc) {
+            DoSsdtUnhook = TRUE;
+            strncpy(SsdtUnhookTarget, argv[++i], SSDT_MAX_NAME_LEN - 1);
+            SsdtUnhookTarget[SSDT_MAX_NAME_LEN - 1] = '\0';
+        }
+        else if (strcmp(argv[i], "--ssdt-unhook-all") == 0) {
+            DoSsdtUnhookAll = TRUE;
+        }
+        else if (strcmp(argv[i], "--ssdt-list") == 0) {
+            DoSsdtList = TRUE;
+        }
+        else if (strcmp(argv[i], "--ssdt-monitor") == 0 && i + 1 < argc) {
+            DoSsdtMonitor = TRUE;
+            i++;
+            if (strcmp(argv[i], "off") == 0) {
+                SsdtMonitorMode = SSDT_MONITOR_OFF;
+            } else if (strcmp(argv[i], "all") == 0) {
+                SsdtMonitorMode = SSDT_MONITOR_ALL;
+            } else if (strcmp(argv[i], "filtered") == 0) {
+                SsdtMonitorMode = SSDT_MONITOR_FILTERED;
+            } else {
+                fprintf(stderr, "[!] Invalid monitor mode '%s'. Use off/all/filtered.\n", argv[i]);
+                return 1;
+            }
+        }
+        else if (strcmp(argv[i], "--ssdt-filter") == 0 && i + 1 < argc) {
+            /* Parse comma-separated index list: "35,38,55" */
+            char *FilterStr = argv[++i];
+            char *Token;
+            char FilterBuf[512];
+            strncpy(FilterBuf, FilterStr, sizeof(FilterBuf) - 1);
+            FilterBuf[sizeof(FilterBuf) - 1] = '\0';
+            SsdtFilterCount = 0;
+            Token = strtok(FilterBuf, ",");
+            while (Token && SsdtFilterCount < SSDT_MONITOR_MAX_FILTER) {
+                SsdtFilterIndices[SsdtFilterCount++] = (DWORD)atoi(Token);
+                Token = strtok(NULL, ",");
+            }
+        }
+        /* --- Shadow SSDT framework options --- */
+        else if (strcmp(argv[i], "--shadow-ssdt-init") == 0) {
+            DoShadowSsdtInit = TRUE;
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-dump") == 0) {
+            DoShadowSsdtDump = TRUE;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                ShadowSsdtDumpStart = (DWORD)atoi(argv[++i]);
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    ShadowSsdtDumpCount = (DWORD)atoi(argv[++i]);
+                }
+            }
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-hook") == 0 && i + 1 < argc) {
+            DoShadowSsdtHook = TRUE;
+            strncpy(ShadowSsdtHookTarget, argv[++i], SSDT_MAX_NAME_LEN - 1);
+            ShadowSsdtHookTarget[SSDT_MAX_NAME_LEN - 1] = '\0';
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-unhook") == 0 && i + 1 < argc) {
+            DoShadowSsdtUnhook = TRUE;
+            strncpy(ShadowSsdtUnhookTarget, argv[++i], SSDT_MAX_NAME_LEN - 1);
+            ShadowSsdtUnhookTarget[SSDT_MAX_NAME_LEN - 1] = '\0';
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-unhook-all") == 0) {
+            DoShadowSsdtUnhookAll = TRUE;
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-list") == 0) {
+            DoShadowSsdtList = TRUE;
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-monitor") == 0 && i + 1 < argc) {
+            DoShadowSsdtMonitor = TRUE;
+            i++;
+            if (strcmp(argv[i], "off") == 0) {
+                ShadowSsdtMonitorMode = SSDT_MONITOR_OFF;
+            } else if (strcmp(argv[i], "all") == 0) {
+                ShadowSsdtMonitorMode = SSDT_MONITOR_ALL;
+            } else if (strcmp(argv[i], "filtered") == 0) {
+                ShadowSsdtMonitorMode = SSDT_MONITOR_FILTERED;
+            } else {
+                fprintf(stderr, "[!] Invalid monitor mode '%s'. Use off/all/filtered.\n", argv[i]);
+                return 1;
+            }
+        }
+        else if (strcmp(argv[i], "--shadow-ssdt-filter") == 0 && i + 1 < argc) {
+            char *FilterStr = argv[++i];
+            char *Token2;
+            char FilterBuf2[512];
+            strncpy(FilterBuf2, FilterStr, sizeof(FilterBuf2) - 1);
+            FilterBuf2[sizeof(FilterBuf2) - 1] = '\0';
+            ShadowSsdtFilterCount = 0;
+            Token2 = strtok(FilterBuf2, ",");
+            while (Token2 && ShadowSsdtFilterCount < SHADOW_SSDT_MONITOR_MAX_FILTER) {
+                ShadowSsdtFilterIndices[ShadowSsdtFilterCount++] = (DWORD)atoi(Token2);
+                Token2 = strtok(NULL, ",");
+            }
+        }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             PrintUsage(argv[0]);
             return 0;
@@ -1176,14 +2094,23 @@ int main(int argc, char *argv[])
     /* Memory commands don't require --pid either */
     IsMemCmd = DoReadMem || DoWriteMem || DoDumpMem;
 
-    /* Validate arguments for non-hook, non-memory commands */
-    if (!DoStatus && !DoStop && !DoLog && !IsHookCmd && !IsMemCmd && Pid == 0) {
-        fprintf(stderr, "[!] --pid is required (or use --status/--stop/--log/--list-hooks/--read-mem/etc.)\n\n");
+    /* SSDT commands don't require --pid */
+    IsSsdtCmd = DoSsdtInit || DoSsdtDump || DoSsdtHook || DoSsdtUnhook ||
+                DoSsdtUnhookAll || DoSsdtList || DoSsdtMonitor;
+
+    /* Shadow SSDT commands don't require --pid */
+    IsShadowSsdtCmd = DoShadowSsdtInit || DoShadowSsdtDump || DoShadowSsdtHook ||
+                      DoShadowSsdtUnhook || DoShadowSsdtUnhookAll ||
+                      DoShadowSsdtList || DoShadowSsdtMonitor;
+
+    /* Validate arguments for non-hook, non-memory, non-ssdt commands */
+    if (!DoStatus && !DoStop && !DoLog && !IsHookCmd && !IsMemCmd && !IsSsdtCmd && !IsShadowSsdtCmd && Pid == 0) {
+        fprintf(stderr, "[!] --pid is required (or use --status/--stop/--log/--list-hooks/--ssdt-*/--shadow-ssdt-*/etc.)\n\n");
         PrintUsage(argv[0]);
         return 1;
     }
 
-    if (!IsHookCmd && !IsMemCmd && Pid != 0 && !DoRemove && Flags == 0) {
+    if (!IsHookCmd && !IsMemCmd && !IsSsdtCmd && !IsShadowSsdtCmd && Pid != 0 && !DoRemove && Flags == 0) {
         fprintf(stderr, "[!] No hide options specified. Use --hide-all or specific options.\n\n");
         PrintUsage(argv[0]);
         return 1;
@@ -1246,6 +2173,52 @@ int main(int argc, char *argv[])
     }
     else if (DoDumpMem) {
         Result = CmdDumpMem(hDevice, MemPid, MemAddress, MemSize);
+    }
+    /* --- SSDT commands --- */
+    else if (DoSsdtInit) {
+        Result = CmdSsdtInit(hDevice);
+    }
+    else if (DoSsdtDump) {
+        Result = CmdSsdtDump(hDevice, SsdtDumpStart, SsdtDumpCount);
+    }
+    else if (DoSsdtHook) {
+        Result = CmdSsdtHook(hDevice, SsdtHookTarget, HookPid, &HookRule);
+    }
+    else if (DoSsdtUnhook) {
+        Result = CmdSsdtUnhook(hDevice, SsdtUnhookTarget);
+    }
+    else if (DoSsdtUnhookAll) {
+        Result = CmdSsdtUnhookAll(hDevice);
+    }
+    else if (DoSsdtList) {
+        Result = CmdSsdtList(hDevice);
+    }
+    else if (DoSsdtMonitor) {
+        Result = CmdSsdtMonitor(hDevice, SsdtMonitorMode, HookPid,
+                                SsdtFilterIndices, SsdtFilterCount);
+    }
+    /* --- Shadow SSDT commands --- */
+    else if (DoShadowSsdtInit) {
+        Result = CmdShadowSsdtInit(hDevice);
+    }
+    else if (DoShadowSsdtDump) {
+        Result = CmdShadowSsdtDump(hDevice, ShadowSsdtDumpStart, ShadowSsdtDumpCount);
+    }
+    else if (DoShadowSsdtHook) {
+        Result = CmdShadowSsdtHook(hDevice, ShadowSsdtHookTarget, HookPid, &HookRule);
+    }
+    else if (DoShadowSsdtUnhook) {
+        Result = CmdShadowSsdtUnhook(hDevice, ShadowSsdtUnhookTarget);
+    }
+    else if (DoShadowSsdtUnhookAll) {
+        Result = CmdShadowSsdtUnhookAll(hDevice);
+    }
+    else if (DoShadowSsdtList) {
+        Result = CmdShadowSsdtList(hDevice);
+    }
+    else if (DoShadowSsdtMonitor) {
+        Result = CmdShadowSsdtMonitor(hDevice, ShadowSsdtMonitorMode, HookPid,
+                                       ShadowSsdtFilterIndices, ShadowSsdtFilterCount);
     }
     else if (DoStatus) {
         Result = CmdQueryStatus(hDevice);
