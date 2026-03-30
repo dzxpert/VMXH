@@ -562,6 +562,12 @@ typedef struct _VMX_CPU_CONTEXT {
     /* Statistics */
     volatile LONG64 ExitCount;
 
+    /* Enlightened VMCS (nested mode only, NULL on bare metal) */
+    PVOID       VpAssistPageVa;
+    ULONG64     VpAssistPagePa;
+    PVOID       EvmcsVa;                /* PHV_VMX_ENLIGHTENED_VMCS */
+    ULONG64     EvmcsPa;
+
 } VMX_CPU_CONTEXT, *PVMX_CPU_CONTEXT;
 
 /*
@@ -692,16 +698,52 @@ extern VOID     AsmRestoreGuestState(PGUEST_CONTEXT Context);
 extern VOID     AsmXsetbv(ULONG Index, ULONG64 Value);
 extern VOID     AsmVmxVmcall(VOID);
 
-/* Intrinsics wrappers */
+/* Intrinsics wrappers — branch on g_IsNestedMode for Enlightened VMCS */
+#include "vmx_enlightened.h"
+#include "hv_detect.h"
+
+/* Global VMX state (defined in vmxdrv.c) — forward-declared here for inlines */
+extern VMX_STATE g_VmxState;
+
+/*
+ * Per-CPU pointer to active Enlightened VMCS.
+ * NULL on bare-metal (g_IsNestedMode == FALSE).
+ * Set per-CPU during VmxEnableOnCpu() in nested mode.
+ * Accessed via g_VmxState.CpuContexts[cpu].EvmcsVa.
+ */
+FORCEINLINE PHV_VMX_ENLIGHTENED_VMCS VmxGetCurrentEvmcs(VOID)
+{
+    ULONG Cpu = KeGetCurrentProcessorNumber();
+    if (Cpu < MAX_PROCESSORS) {
+        return (PHV_VMX_ENLIGHTENED_VMCS)g_VmxState.CpuContexts[Cpu].EvmcsVa;
+    }
+    return NULL;
+}
+
 FORCEINLINE ULONG64 VmxRead(ULONG Field)
 {
-    SIZE_T Value = 0;
-    __vmx_vmread(Field, &Value);
-    return (ULONG64)Value;
+    if (g_IsNestedMode) {
+        PHV_VMX_ENLIGHTENED_VMCS Evmcs = VmxGetCurrentEvmcs();
+        if (Evmcs) {
+            return EvmcsRead(Evmcs, Field);
+        }
+    }
+    {
+        SIZE_T Value = 0;
+        __vmx_vmread(Field, &Value);
+        return (ULONG64)Value;
+    }
 }
 
 FORCEINLINE VOID VmxWrite(ULONG Field, ULONG64 Value)
 {
+    if (g_IsNestedMode) {
+        PHV_VMX_ENLIGHTENED_VMCS Evmcs = VmxGetCurrentEvmcs();
+        if (Evmcs) {
+            EvmcsWrite(Evmcs, Field, Value);
+            return;
+        }
+    }
     __vmx_vmwrite(Field, Value);
 }
 
@@ -712,9 +754,6 @@ FORCEINLINE VOID VmxAdvanceGuestRip(VOID)
     ULONG64 Len = VmxRead(VMCS_EXIT_INSTRUCTION_LENGTH);
     VmxWrite(VMCS_GUEST_RIP, Rip + Len);
 }
-
-/* Global VMX state (defined in vmxdrv.c) */
-extern VMX_STATE g_VmxState;
 
 /* VMX HV_OPS backend (registered in vmx_init.c) */
 extern HV_OPS g_VmxOps;

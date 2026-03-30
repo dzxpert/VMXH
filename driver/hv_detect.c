@@ -178,3 +178,66 @@ ULONG HvGetMaxAsid(VOID)
     __cpuid(CpuInfo, SVM_CPUID_FUNC);
     return (ULONG)CpuInfo[1];  /* EBX = number of ASIDs */
 }
+
+/* ========================================================================= */
+/*  Hyper-V Nested Virtualization Detection                                  */
+/* ========================================================================= */
+
+BOOLEAN   g_IsNestedMode = FALSE;
+ULONG     g_HypervisorMaxLeaf = 0;
+
+BOOLEAN HvDetectNestedMode(VOID)
+{
+    int CpuInfo[4];
+
+    /*
+     * Step 1: Check CPUID.1:ECX[31] — Hypervisor Present bit.
+     * If clear, we are running on bare metal (or a hypervisor that
+     * doesn't set this bit). Either way, no nested mode.
+     */
+    __cpuid(CpuInfo, 1);
+    if (!(CpuInfo[2] & (1 << 31))) {
+        LOG_INFO("No hypervisor present (CPUID.1:ECX[31] = 0)");
+        return FALSE;
+    }
+
+    /*
+     * Step 2: Verify it's Microsoft Hyper-V via leaf 0x40000000.
+     * EBX:ECX:EDX should spell "Microsoft Hv" in little-endian.
+     */
+    __cpuid(CpuInfo, 0x40000000);
+    if (CpuInfo[1] != 0x7263694D ||   /* "Micr" */
+        CpuInfo[2] != 0x666F736F ||   /* "osof" */
+        CpuInfo[3] != 0x76482074) {   /* "t Hv" */
+        LOG_INFO("Hypervisor present but not Microsoft Hyper-V (EBX=0x%08X ECX=0x%08X EDX=0x%08X)",
+                 CpuInfo[1], CpuInfo[2], CpuInfo[3]);
+        return FALSE;
+    }
+
+    g_HypervisorMaxLeaf = (ULONG)CpuInfo[0];
+    LOG_INFO("Microsoft Hyper-V detected, max leaf: 0x%08X", g_HypervisorMaxLeaf);
+
+    /*
+     * Step 3: Check leaf 0x4000000A for nested virtualization enlightenments.
+     * This is informational — we enable nested mode regardless, but we
+     * log what optimizations are available.
+     *
+     * EAX[0] = Enlightened VMCS support
+     * EAX[1] = Direct virtual flush support
+     */
+    if (g_HypervisorMaxLeaf >= 0x4000000A) {
+        __cpuid(CpuInfo, 0x4000000A);
+        LOG_INFO("Nested virt enlightenments (leaf 0x4000000A): EAX=0x%08X",
+                 CpuInfo[0]);
+        if (CpuInfo[0] & (1 << 0)) {
+            LOG_INFO("  Enlightened VMCS supported");
+        }
+        if (CpuInfo[0] & (1 << 1)) {
+            LOG_INFO("  Direct virtual flush supported");
+        }
+    }
+
+    g_IsNestedMode = TRUE;
+    LOG_INFO("Running under Hyper-V — nested mode enabled");
+    return TRUE;
+}

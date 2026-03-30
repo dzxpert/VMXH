@@ -92,6 +92,12 @@ NTSTATUS DriverEntry(
     /* Detect CPU vendor and select hypervisor backend */
     g_CpuVendor = HvDetectCpuVendor();
 
+    /* Check if we're inside Hyper-V (nested virtualization) */
+    HvDetectNestedMode();
+    if (g_IsNestedMode) {
+        LOG_INFO("Hyper-V detected — using enlightened interface for nested operation");
+    }
+
     switch (g_CpuVendor) {
     case CPU_VENDOR_INTEL:
         if (!HvCheckVmxSupport()) {

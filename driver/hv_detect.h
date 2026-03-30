@@ -44,4 +44,29 @@ BOOLEAN HvCheckNptSupport(VOID);
 ULONG HvGetSvmRevision(VOID);
 ULONG HvGetMaxAsid(VOID);
 
+/* ========================================================================= */
+/*  Hyper-V Nested Virtualization Detection                                  */
+/* ========================================================================= */
+
+/*
+ * TRUE if running under Hyper-V as a nested hypervisor.
+ * Set once during DriverEntry and never changed.
+ */
+extern BOOLEAN g_IsNestedMode;
+
+/*
+ * Maximum CPUID leaf supported by the Hyper-V interface (0x4000000x range).
+ * Only valid when g_IsNestedMode == TRUE.
+ */
+extern ULONG g_HypervisorMaxLeaf;
+
+/*
+ * Detect if we are running inside Hyper-V.
+ * Checks CPUID.1:ECX[31] (Hypervisor Present) and verifies
+ * the "Microsoft Hv" vendor string via leaf 0x40000000.
+ * If Hyper-V is detected, sets g_IsNestedMode = TRUE.
+ * Returns TRUE if Hyper-V is present, FALSE otherwise.
+ */
+BOOLEAN HvDetectNestedMode(VOID);
+
 #endif /* _HV_DETECT_H_ */

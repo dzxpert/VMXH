@@ -12,6 +12,7 @@
 #include "vmx.h"        /* For AsmGet* segment/register accessor declarations */
 #include "log.h"
 #include "ept.h"
+#include "svm_enlightened.h"
 
 /* ========================================================================= */
 /*  Globals                                                                  */
@@ -191,6 +192,19 @@ static NTSTATUS SvmAllocateCpuContext(PSVM_CPU_CONTEXT CpuCtx)
         CpuCtx->Asid = 1;  /* Wrap to 1 if too many CPUs */
     }
 
+    /* Partition Assist Page (nested mode only) */
+    if (g_IsNestedMode) {
+        CpuCtx->PartitionAssistPageVa = SvmAllocateContiguous(
+            PAGE_SIZE, &CpuCtx->PartitionAssistPagePa);
+        if (!CpuCtx->PartitionAssistPageVa) {
+            LOG_ERROR("Failed to allocate Partition Assist Page for CPU %u",
+                      CpuCtx->Common.ProcessorNumber);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        LOG_INFO("Partition Assist Page allocated for CPU %u: PA=0x%llX",
+                 CpuCtx->Common.ProcessorNumber, CpuCtx->PartitionAssistPagePa);
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -211,6 +225,11 @@ static VOID SvmFreeCpuContext(PSVM_CPU_CONTEXT CpuCtx)
     if (CpuCtx->HostStackBase) {
         ExFreePoolWithTag(CpuCtx->HostStackBase, SVM_TAG);
         CpuCtx->HostStackBase = NULL;
+    }
+    /* Partition Assist Page (nested mode) */
+    if (CpuCtx->PartitionAssistPageVa) {
+        MmFreeContiguousMemory(CpuCtx->PartitionAssistPageVa);
+        CpuCtx->PartitionAssistPageVa = NULL;
     }
 }
 
@@ -526,6 +545,32 @@ static VOID SvmInitVmcb(PSVM_CPU_CONTEXT CpuCtx)
 
     /* RSP and RIP will be set just before VMRUN */
     Vmcb->Save.Cpl = 0;    /* Ring 0 */
+
+    /*
+     * Enlightened VMCB fields (nested mode only).
+     * Overlay the HV_SVM_ENLIGHTENED_VMCB_FIELDS at VMCB offset 0x3E0
+     * (within the control area reserved region).
+     */
+    if (g_IsNestedMode) {
+        PHV_SVM_ENLIGHTENED_VMCB_FIELDS Enl =
+            (PHV_SVM_ENLIGHTENED_VMCB_FIELDS)((PUCHAR)Vmcb + VMCB_ENLIGHTENED_OFFSET);
+
+        Enl->EnlightenedVmcbVersion = 1;
+        Enl->EnableEnlightenedNptTlb = 1;
+        Enl->EnableEnlightenedMsrBitmap = 1;
+        Enl->VpId = CpuCtx->Common.ProcessorNumber + 1;
+        Enl->VmId = 1;  /* Single VM */
+
+        if (CpuCtx->PartitionAssistPageVa) {
+            Enl->PartitionAssistPagePa = CpuCtx->PartitionAssistPagePa;
+        }
+
+        /* Mark enlightened fields as dirty on first setup */
+        Vmcb->Control.CleanBits &= ~VMCB_CLEAN_BIT_ENLIGHTENED;
+
+        LOG_INFO("Enlightened VMCB fields configured for CPU %u (VpId=%u)",
+                 CpuCtx->Common.ProcessorNumber, Enl->VpId);
+    }
 
     LOG_INFO("VMCB initialized for CPU %u", CpuCtx->Common.ProcessorNumber);
 }

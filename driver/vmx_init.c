@@ -7,6 +7,7 @@
 #include "ept.h"
 #include "log.h"
 #include "hv_ops.h"
+#include "hv_detect.h"
 
 /* ========================================================================= */
 /*  Forward Declarations                                                     */
@@ -212,6 +213,30 @@ static NTSTATUS VmxAllocateCpuContext(PVMX_CPU_CONTEXT CpuCtx, ULONG VmcsRevisio
     }
     RtlZeroMemory(CpuCtx->HostStackBase, CpuCtx->HostStackSize);
 
+    /* Enlightened VMCS allocations (nested mode only) */
+    if (g_IsNestedMode) {
+        /* VP Assist Page (4KB, zeroed) */
+        CpuCtx->VpAssistPageVa = VmxAllocateAlignedMemory(
+            PAGE_SIZE_4KB, &CpuCtx->VpAssistPagePa);
+        if (!CpuCtx->VpAssistPageVa) {
+            LOG_ERROR("Failed to allocate VP Assist Page for CPU %u",
+                      CpuCtx->ProcessorNumber);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        /* Enlightened VMCS page (4KB, zeroed) */
+        CpuCtx->EvmcsVa = VmxAllocateAlignedMemory(
+            PAGE_SIZE_4KB, &CpuCtx->EvmcsPa);
+        if (!CpuCtx->EvmcsVa) {
+            LOG_ERROR("Failed to allocate Enlightened VMCS for CPU %u",
+                      CpuCtx->ProcessorNumber);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        LOG_INFO("Enlightened VMCS allocated for CPU %u: eVMCS PA=0x%llX, VpAssist PA=0x%llX",
+                 CpuCtx->ProcessorNumber, CpuCtx->EvmcsPa, CpuCtx->VpAssistPagePa);
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -232,6 +257,15 @@ static VOID VmxFreeCpuContext(PVMX_CPU_CONTEXT CpuCtx)
     if (CpuCtx->HostStackBase) {
         ExFreePoolWithTag(CpuCtx->HostStackBase, VMX_TAG);
         CpuCtx->HostStackBase = NULL;
+    }
+    /* Enlightened VMCS resources (nested mode) */
+    if (CpuCtx->VpAssistPageVa) {
+        MmFreeContiguousMemory(CpuCtx->VpAssistPageVa);
+        CpuCtx->VpAssistPageVa = NULL;
+    }
+    if (CpuCtx->EvmcsVa) {
+        MmFreeContiguousMemory(CpuCtx->EvmcsVa);
+        CpuCtx->EvmcsVa = NULL;
     }
 }
 
@@ -331,16 +365,29 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     ULONG64     Rflags;
     NTSTATUS    Status;
 
-    /* Clear VMCS */
-    if (__vmx_vmclear(&CpuCtx->VmcsRegionPa) != 0) {
-        LOG_ERROR("VMCLEAR failed for CPU %u", CpuCtx->ProcessorNumber);
-        return STATUS_UNSUCCESSFUL;
-    }
+    /* Clear VMCS (skip in nested mode — eVMCS doesn't use VMCLEAR/VMPTRLD) */
+    if (!g_IsNestedMode) {
+        if (__vmx_vmclear(&CpuCtx->VmcsRegionPa) != 0) {
+            LOG_ERROR("VMCLEAR failed for CPU %u", CpuCtx->ProcessorNumber);
+            return STATUS_UNSUCCESSFUL;
+        }
 
-    /* Load VMCS */
-    if (__vmx_vmptrld(&CpuCtx->VmcsRegionPa) != 0) {
-        LOG_ERROR("VMPTRLD failed for CPU %u", CpuCtx->ProcessorNumber);
-        return STATUS_UNSUCCESSFUL;
+        /* Load VMCS */
+        if (__vmx_vmptrld(&CpuCtx->VmcsRegionPa) != 0) {
+            LOG_ERROR("VMPTRLD failed for CPU %u", CpuCtx->ProcessorNumber);
+            return STATUS_UNSUCCESSFUL;
+        }
+    } else {
+        /*
+         * In nested mode, the Enlightened VMCS is already active via
+         * VP Assist Page. All subsequent VmxWrite() calls go through
+         * EvmcsWrite() which writes directly into the eVMCS struct.
+         * Ensure all clean fields are cleared so L0 reads everything.
+         */
+        PHV_VMX_ENLIGHTENED_VMCS Evmcs = (PHV_VMX_ENLIGHTENED_VMCS)CpuCtx->EvmcsVa;
+        if (Evmcs) {
+            Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_NONE;
+        }
     }
 
     /* ===== Read current CPU state ===== */
@@ -582,12 +629,43 @@ static NTSTATUS VmxEnableOnCpu(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     CpuCtx->VmxEnabled = TRUE;
     LOG_INFO("VMXON succeeded on CPU %u", CpuCtx->ProcessorNumber);
 
+    /*
+     * Enlightened VMCS activation (nested mode only).
+     * After VMXON, we configure the VP Assist Page to tell L0 Hyper-V
+     * to use the Enlightened VMCS instead of the regular VMCS region.
+     */
+    if (g_IsNestedMode && CpuCtx->VpAssistPageVa && CpuCtx->EvmcsVa) {
+        PHV_VP_ASSIST_PAGE VpAssist = (PHV_VP_ASSIST_PAGE)CpuCtx->VpAssistPageVa;
+        PHV_VMX_ENLIGHTENED_VMCS Evmcs = (PHV_VMX_ENLIGHTENED_VMCS)CpuCtx->EvmcsVa;
+
+        /* Write VP Assist Page PA to Hyper-V MSR with enable bit */
+        __writemsr(HV_X64_MSR_VP_ASSIST_PAGE,
+                   CpuCtx->VpAssistPagePa | HV_VP_ASSIST_PAGE_ENABLE);
+
+        /* Configure VP Assist Page to activate Enlightened VMCS */
+        VpAssist->EnlightenedVmcsEnabled = 1;
+        VpAssist->CurrentEnlightenedVmcs = CpuCtx->EvmcsPa;
+
+        /* Initialize Enlightened VMCS version and clear all clean fields */
+        Evmcs->VersionNumber = 1;
+        Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_NONE;
+
+        LOG_INFO("Enlightened VMCS activated on CPU %u (eVMCS PA=0x%llX)",
+                 CpuCtx->ProcessorNumber, CpuCtx->EvmcsPa);
+
+        /* No VMPTRLD needed — Enlightened VMCS is activated via VP Assist Page */
+    }
+
     return STATUS_SUCCESS;
 }
 
 static VOID VmxDisableOnCpu(PVMX_CPU_CONTEXT CpuCtx)
 {
     if (CpuCtx->VmxEnabled) {
+        /* Deactivate VP Assist Page in nested mode */
+        if (g_IsNestedMode && CpuCtx->VpAssistPageVa) {
+            __writemsr(HV_X64_MSR_VP_ASSIST_PAGE, 0);
+        }
         __vmx_off();
         __writecr4(CpuCtx->OriginalCr4);
         CpuCtx->VmxEnabled = FALSE;
@@ -658,6 +736,17 @@ static VOID VmxInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
 
     /* Success - we're now running as a guest! */
     CpuCtx->VmcsLaunched = TRUE;
+
+    /*
+     * In nested mode, after successful VM-Entry, mark all clean fields
+     * as "unchanged" so L0 Hyper-V can skip re-validation on VMRESUME.
+     * Fields will be dirtied individually as VmxWrite() is called.
+     */
+    if (g_IsNestedMode && CpuCtx->EvmcsVa) {
+        PHV_VMX_ENLIGHTENED_VMCS Evmcs = (PHV_VMX_ENLIGHTENED_VMCS)CpuCtx->EvmcsVa;
+        Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_ALL;
+    }
+
     DpcCtx->Status = STATUS_SUCCESS;
     KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
 }

@@ -23,6 +23,7 @@
   - [MSR 拦截](#msr-拦截)
   - [日志系统](#日志系统)
 - [AMD SVM 技术细节](#amd-svm-技术细节)
+- [Hyper-V 嵌套虚拟化支持](#hyper-v-嵌套虚拟化支持)
 - [Hypervisor 内存读写](#hypervisor-内存读写)
 - [后加载虚拟化与内存连续性](#后加载虚拟化与内存连续性)
 - [通用 EPT/NPT Hook 框架](#通用-eptnpt-hook-框架)
@@ -52,6 +53,7 @@
 | 平台 | Windows 10/11 x64 |
 | CPU | Intel (VT-x/VMX/EPT) 和 AMD (SVM/NPT) |
 | 架构 | Type-2 Hypervisor (寄生式, Blue Pill) + hv_ops 抽象层 |
+| 嵌套虚拟化 | 自动检测 Hyper-V，启用 Enlightened VMCS/VMCB 加速嵌套运行 |
 | 语言 | C + x64 MASM |
 | 编译工具 | WDK 7600 (GRMWDK_EN_7600_1) |
 | 核心功能 | 反反调试 / 内核 Hook 框架 / 进程内存读写 / 更多扩展中 |
@@ -66,6 +68,7 @@
 | **进程内存读写** | 直接读写任意进程内存，绕过一切内核回调和反作弊 Hook | CR3 页表遍历 → 物理地址 → MmMapIoSpace 直接访问 |
 | **SSDT 监控与 Hook** | 发现、转储、按名称/索引 Hook 任意 SSDT 函数，支持全量/过滤监控 | 磁盘映射 ntoskrnl.exe (SEC_IMAGE) 获取无污染 SSDT 地址，复用 EPT Hook 框架 |
 | **Shadow SSDT (Win32k) Hook** | 发现、转储、Hook NtUser*/NtGdi* 函数，支持全量/过滤监控 | KTHREAD 偏移扫描定位 KeServiceDescriptorTableShadow，Session 上下文中解析 win32k |
+| **Hyper-V 嵌套虚拟化** | 在 Hyper-V 开启的环境下正常运行，无需关闭 Hyper-V | 自动检测 L0 Hyper-V，使用 Enlightened VMCS/VMCB 替代低效的 VMREAD/VMWRITE 模拟 |
 | **更多扩展** | 后续持续增加基于 VMX 的高级功能 | — |
 
 ### 设计理念
@@ -122,6 +125,10 @@
 |   Intel VT-x: VMCS | EPT | MSR Bitmap               |
 |   AMD SVM:    VMCB | NPT | MSRPM | IOPM             |
 +-----------------------------------------------------+
+|   Hyper-V 嵌套虚拟化 (自动检测, 可选)                |
+|   Intel: Enlightened VMCS (VP Assist Page 激活)      |
+|   AMD:   Enlightened VMCB (offset 0x3E0 覆盖)        |
++-----------------------------------------------------+
 ```
 
 ### 双平台抽象架构 (hv_ops)
@@ -138,6 +145,13 @@ vmx_backend                 svm_backend
 - EPT + Execute-Only        - NPT + Read+Execute
 - INVEPT                    - ASID Flush
 - MTF single-step           - RFLAGS.TF single-step
+    |                           |
+    +--- g_IsNestedMode? -------+
+    |         |                 |
+    v         v                 v
+ 裸机模式   Enlightened      Enlightened
+ VMREAD/    VMCS (内存       VMCB (VMCB
+ VMWRITE    直接读写)        offset 0x3E0)
 ```
 
 ---
@@ -153,16 +167,18 @@ VMXToolbox/
 |   +-- hv_detect.h           [新增] CPU 厂商检测接口
 |   +-- hv_detect.c           [新增] CPU 厂商检测 (Intel/AMD) + 能力探测
 |   +-- vmx.h                 VMX 核心定义 (VMCS 编码, Exit Reason, 控制位)
-|   +-- vmxdrv.c              驱动入口, CPU 检测, 后端选择, IOCTL 处理
-|   +-- vmx_init.c            VMX 初始化 + HV_OPS 后端注册
+|   +-- vmxdrv.c              驱动入口, CPU 检测, 嵌套模式检测, 后端选择, IOCTL 处理
+|   +-- vmx_init.c            VMX 初始化 + HV_OPS 后端注册 + Enlightened VMCS 生命周期
 |   +-- vmx_exit.c            VMX VM-Exit 主分发器
 |   +-- vmx_asm.asm           Intel x64 汇编 (VMLAUNCH/VMRESUME/INVEPT)
+|   +-- vmx_enlightened.h     [新增] Enlightened VMCS 结构, 字段映射表, Clean Bits, VP Assist Page
 |   +-- ept.h                 EPT 数据结构定义
 |   +-- ept.c                 EPT 恒等映射, Hook 引擎, Violation 处理
 |   +-- svm.h                 [新增] SVM 核心定义 (VMCB, Exit Codes, Intercepts)
-|   +-- svm_init.c            [新增] SVM 初始化 + HV_OPS 后端注册
+|   +-- svm_init.c            [新增] SVM 初始化 + HV_OPS 后端注册 + Enlightened VMCB 配置
 |   +-- svm_exit.c            [新增] SVM #VMEXIT 分发器
 |   +-- svm_asm.asm           [新增] AMD x64 汇编 (VMRUN/VMLOAD/VMSAVE/CLGI/STGI)
+|   +-- svm_enlightened.h     [新增] Enlightened VMCB 字段结构, Clean Bit 31, Partition Assist Page
 |   +-- npt.h                 [新增] NPT 结构定义
 |   +-- npt.c                 [新增] NPT 恒等映射 + Hook 引擎 (AMD 版 EPT)
 |   +-- hv_mem.h              [新增] Hypervisor 内存读写接口 (页表遍历, VMCALL 定义)
@@ -833,6 +849,330 @@ SVM 后端提供与 VMX 完全相同的反反调试能力：
 | 异常标准化 | Exception Bitmap | Exception Intercept |
 | API Hook | EPT Execute-Only | NPT Read+Execute |
 | MSR 伪造 | MSR Bitmap (4KB) | MSRPM (8KB) |
+
+---
+
+## Hyper-V 嵌套虚拟化支持
+
+### 背景与问题
+
+当宿主机启用了 Hyper-V 后，Hyper-V (L0) 已经占据了 VMX Root Mode。此时驱动执行 `VMXON` 会由 L0 Hyper-V **模拟**——这就是嵌套虚拟化 (Nested Virtualization)。虽然功能上可以正常工作，但 `VMREAD`/`VMWRITE` 每次都触发 L0 #VMEXIT 进行模拟，**性能极差**。
+
+微软提供了 **Enlightened VMCS/VMCB** 优化接口：将 VMCS/VMCB 字段以结构体形式映射到内存，L1 直接读写内存而非执行指令，L0 通过 **Clean Field 位掩码** 跳过未修改字段的验证，大幅降低嵌套开销。
+
+### 设计决策
+
+**在现有 VMX/SVM 后端内部条件分支**，而非新建第三套后端：
+
+```
+DriverEntry
+  |
+  +-- HvDetectCpuVendor()     → 选择 Intel 或 AMD 后端 (不变)
+  +-- HvDetectNestedMode()    → 设置 g_IsNestedMode (新增)
+  +-- g_HvOps = &g_VmxOps 或 &g_SvmOps (不变)
+```
+
+核心洞察：**只有 VMCS 读写方式和生命周期管理不同**。VM-Exit 处理、反反调试、Hook 框架、内存引擎——全部不需要修改。
+
+### 检测流程
+
+**文件**: `hv_detect.c` — `HvDetectNestedMode()`
+
+```
+CPUID.1:ECX[31] == 1?        ← Hypervisor Present 位
+       |
+       v
+CPUID.0x40000000              ← 获取厂商字符串
+EBX:ECX:EDX == "Microsoft Hv"?
+       |
+       v
+g_HypervisorMaxLeaf = EAX    ← 最大叶子号
+       |
+       v
+leaf 0x4000000A               ← 嵌套虚拟化能力
+EAX[0] = Enlightened VMCS     (Intel)
+EAX[1] = Direct Virtual Flush
+       |
+       v
+g_IsNestedMode = TRUE         ← 全局标志, 初始化后不再改变
+```
+
+`g_IsNestedMode` 在 `DriverEntry` 中设置一次，之后永不改变。`VmxRead`/`VmxWrite` 中的分支完全可被 CPU 分支预测器预测，开销接近零。
+
+### Intel: Enlightened VMCS
+
+**文件**: `vmx_enlightened.h` + `vmx.h` + `vmx_init.c`
+
+#### 架构概览
+
+```
++----------------------------------------------+
+|             L1 Guest (VMXToolbox)             |
+|                                               |
+|  VmxWrite(field, val)                         |
+|       |                                       |
+|  g_IsNestedMode?                              |
+|    N: __vmx_vmwrite(field, val)  ← 裸机路径  |
+|    Y: EvmcsWrite(eVMCS, field, val)           |
+|       |                                       |
+|       +-- 查表: field → struct offset         |
+|       +-- 直接写入 eVMCS 结构体成员           |
+|       +-- CleanFields &= ~对应clean bit       |
+|           (标记该字段组为"脏")                 |
++----------------------------------------------+
+                    |
+          VMLAUNCH / VMRESUME
+                    |
++----------------------------------------------+
+|             L0 Hyper-V                        |
+|                                               |
+|  检查 VP Assist Page                          |
+|    → EnlightenedVmcsEnabled == 1              |
+|    → 读 CurrentEnlightenedVmcs (物理地址)     |
+|                                               |
+|  读取 eVMCS.CleanFields                       |
+|    bit=1: 跳过该组字段 (未修改, 无需重验证)   |
+|    bit=0: 重新加载该组字段到硬件 VMCS         |
+|                                               |
+|  执行真正的 VMENTRY                           |
++----------------------------------------------+
+```
+
+#### Enlightened VMCS 结构
+
+`HV_VMX_ENLIGHTENED_VMCS` 是一个 4KB 页大小的结构体，将所有 VMCS 字段映射为结构体成员：
+
+```c
+typedef struct _HV_VMX_ENLIGHTENED_VMCS {
+    ULONG   VersionNumber;          // 0x000: 必须为 1
+    ULONG   AbortIndicator;         // 0x004
+
+    // Host State
+    USHORT  HostEsSel, HostCsSel, ..., HostTrSel;
+    ULONG64 HostIa32Pat, HostIa32Efer, HostCr0, HostCr3, HostCr4;
+    ULONG64 HostRip, HostRsp;
+
+    // Control Fields
+    ULONG   PinBasedVmExecControl;
+    ULONG   CpuBasedVmExecControl;
+    ULONG   SecondaryVmExecControl;
+    ULONG64 EptPointer;
+    ULONG64 MsrBitmap;
+
+    // Guest State (全部字段: 段寄存器, CR, DR, RSP, RIP, RFLAGS, ...)
+    ...
+
+    // Read-Only Data (Exit Reason, Qualification, ...)
+    ULONG   ExitReason;
+    ULONG64 ExitQualification;
+    ULONG64 GuestPhysicalAddress;
+
+    // ★ 核心: Clean Fields 位掩码
+    ULONG   CleanFields;            // 0x2E4
+
+    // Pad to 4KB
+} HV_VMX_ENLIGHTENED_VMCS;   // sizeof == 4096
+```
+
+#### Clean Fields 位掩码
+
+每个 bit 对应一组相关的 VMCS 字段。L0 只重新加载 bit=0（脏）的字段组：
+
+| Bit | 名称 | 控制的字段组 |
+|-----|------|-------------|
+| 0 | IO_BITMAP | I/O Bitmap A/B 地址 |
+| 1 | MSR_BITMAP | MSR Bitmap 地址 |
+| 2 | CONTROL_GRP2 | TSC Offset 等 |
+| 3 | CONTROL_GRP1 | Pin/Secondary Controls, Exit Controls, MSR load/store |
+| 4 | CONTROL_PROC | Primary Proc-Based Controls |
+| 5 | CONTROL_EVENT | VM-Entry Interruption Info, Error Code, Instr Length |
+| 6 | CONTROL_ENTRY | VM-Entry Controls, MSR Load Count |
+| 7 | CONTROL_EXCPN | Exception Bitmap, PF Error Mask/Match |
+| 8 | CRDR | CR0/CR3/CR4/DR7, Guest/Host Mask, Read Shadow |
+| 9 | CONTROL_XLAT | EPT Pointer, VPID |
+| 10 | GUEST_BASIC | RSP, RIP, RFLAGS, Activity, Interruptibility |
+| 11 | GUEST_GRP1 | EFER, PAT, DEBUGCTL, SYSENTER, VMCS Link Ptr |
+| 12 | GUEST_GRP2 | 所有段寄存器 (Selector/Base/Limit/AR), GDTR/IDTR |
+| 13 | HOST_POINTER | Host FS/GS/TR/GDTR/IDTR Base, Host RSP/RIP |
+| 14 | HOST_GRP1 | Host CR0/CR3/CR4, Selectors, EFER, PAT, SYSENTER |
+| 15 | ENLIGHTENMENTSCONTROL | 合成控制字段 |
+
+#### 字段查找表
+
+`g_EvmcsFieldTable[]` 是一个 VMCS 字段编码 → (结构体偏移, Clean Bit) 的映射表，约 100 条。`EvmcsRead()`/`EvmcsWrite()` 通过线性搜索此表完成字段访问：
+
+```c
+FORCEINLINE ULONG64 EvmcsRead(PHV_VMX_ENLIGHTENED_VMCS Evmcs, ULONG Field) {
+    USHORT Offset = EvmcsFieldOffset(Field);  // 查表
+    if (Offset == (USHORT)-1)
+        return __vmx_vmread(Field);             // 未映射字段回退到指令
+    // 根据字段编码判断大小 (16/32/64/natural-width)
+    return *(type*)(((PUCHAR)Evmcs) + Offset);
+}
+
+FORCEINLINE VOID EvmcsWrite(PHV_VMX_ENLIGHTENED_VMCS Evmcs, ULONG Field, ULONG64 Value) {
+    USHORT Offset = EvmcsFieldOffset(Field);
+    *(type*)(((PUCHAR)Evmcs) + Offset) = Value;
+    Evmcs->CleanFields &= ~EvmcsFieldCleanBit(Field);  // ★ 标记脏
+}
+```
+
+#### VP Assist Page 激活流程
+
+```
+VmxEnableOnCpu():
+  1. VMXON (与裸机相同)
+  2. if g_IsNestedMode:
+       写 MSR 0x40000073 = VpAssistPagePa | 1   ← 告知 L0 激活 VP Assist
+       VpAssistPage->EnlightenedVmcsEnabled = 1  ← 启用 eVMCS 模式
+       VpAssistPage->CurrentEnlightenedVmcs = EvmcsPa  ← 指向 eVMCS 页
+       eVMCS->VersionNumber = 1
+       eVMCS->CleanFields = 0                     ← 首次全脏
+       // 不需要 VMPTRLD —— eVMCS 通过 VP Assist Page 激活
+```
+
+#### Per-CPU 内存分配
+
+嵌套模式下每个 CPU 额外分配：
+
+| 区域 | 大小 | 用途 |
+|------|------|------|
+| VP Assist Page | 4KB | L1↔L0 通信页，激活 eVMCS |
+| Enlightened VMCS | 4KB | 替代 VMCS Region 的结构化访问 |
+| VMXON Region | 4KB | 仍需分配 (VMXON 仍然要执行) |
+| MSR Bitmap | 4KB | 不变 |
+| Host Stack | 16KB | 不变 |
+
+#### VMCS 生命周期对比
+
+```
+裸机模式:                         嵌套模式:
+VMXON                             VMXON
+VMCLEAR(vmcs_pa)                  [跳过 — 无需 VMCLEAR]
+VMPTRLD(vmcs_pa)                  [跳过 — 通过 VP Assist 激活]
+多次 VMWRITE(field, val)          多次 eVMCS->field = val
+VMLAUNCH                          VMLAUNCH (L0 从 eVMCS 加载)
+[VM-Exit]                         [VM-Exit] (L0 写回 eVMCS)
+多次 VMREAD(field)                多次 val = eVMCS->field
+VMWRITE(修改字段)                 eVMCS->field = val; CleanFields &= ~bit
+VMRESUME                          CleanFields = ALL; VMRESUME
+                                  (L0 仅重载脏字段)
+```
+
+### AMD: Enlightened VMCB
+
+**文件**: `svm_enlightened.h` + `svm.h` + `svm_init.c`
+
+AMD SVM 的 VMCB 本身就是内存中的结构体（不像 Intel 的 VMCS 需要 VMREAD/VMWRITE 指令），所以 AMD 的嵌套优化更加简单。
+
+#### 核心差异
+
+SVM 已经通过 `Vmcb->Save.Rip`、`Vmcb->Control.ExitCode` 等直接内存访问 VMCB。Enlightened VMCB 只是在 VMCB 控制区的保留区域 (offset 0x3E0) 覆盖一小块额外字段，告诉 L0 Hyper-V 可以使用优化的 TLB 刷新和 MSR bitmap 处理。
+
+#### Enlightened VMCB 字段结构
+
+```c
+// 覆盖在 VMCB offset 0x3E0 (Reserved7 区域)
+typedef struct _HV_SVM_ENLIGHTENED_VMCB_FIELDS {
+    ULONG   EnlightenedVmcbVersion;      // 必须为 1
+    ULONG   EnableEnlightenedNptTlb : 1; // L0 优化 NPT TLB 管理
+    ULONG   EnableEnlightenedMsrBitmap : 1; // L0 优化 MSR bitmap
+    ULONG   Reserved : 30;
+    ULONG   VpId;                        // 虚拟处理器 ID
+    ULONG   VmId;                        // 虚拟机 ID
+    ULONG64 PartitionAssistPagePa;       // Partition Assist Page 物理地址
+    UCHAR   Reserved2[8];
+} HV_SVM_ENLIGHTENED_VMCB_FIELDS;        // sizeof == 32, 恰好填满 0x3E0-0x3FF
+```
+
+#### VMCB Clean Bit 31
+
+```
+标准 VMCB CleanBits: bits 0-11 (AMD APM 定义)
+Hyper-V 扩展:       bit 31 = Enlightened 区域 dirty bit
+
+首次 VMRUN:  CleanBits &= ~(1<<31)    → L0 读取 enlightened 字段
+后续 VMRUN:  CleanBits |= (1<<31)     → L0 跳过 (字段未变)
+```
+
+#### 配置代码
+
+```c
+SvmInitVmcb():
+    // ... 标准 VMCB 配置 (不变) ...
+
+    if (g_IsNestedMode) {
+        PHV_SVM_ENLIGHTENED_VMCB_FIELDS Enl =
+            (PUCHAR)Vmcb + 0x3E0;  // 覆盖保留区域
+        Enl->EnlightenedVmcbVersion = 1;
+        Enl->EnableEnlightenedNptTlb = 1;
+        Enl->EnableEnlightenedMsrBitmap = 1;
+        Enl->VpId = CpuNumber + 1;
+        Enl->PartitionAssistPagePa = PartitionAssistPa;
+        Vmcb->Control.CleanBits &= ~(1UL << 31);  // 首次标记脏
+    }
+```
+
+### 反反调试兼容性
+
+**文件**: `anti_anti_debug.c`
+
+嵌套模式下，`AAD_HIDE_CPUID`（CPUID 隐藏）功能被自动禁用：
+
+```c
+// AadHandleCpuid() 中:
+if (!g_IsNestedMode && IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
+    // 清除 Hypervisor Present 位, 伪造 0x40000000 叶子
+}
+```
+
+**原因**: CPUID hiding 会清零叶子 `0x40000000~0x400000FF` 的返回值。在嵌套模式下，这些叶子是 L0 Hyper-V 的接口，清零会导致 L0 enlightenments 失效，甚至可能导致蓝屏。
+
+其他所有反反调试功能 (PEB 隐藏、DR 伪造、RDTSC 补偿、NtQuery Hook、异常标准化等) 在嵌套模式下**完全正常工作**。
+
+### 不受影响的模块
+
+| 模块 | 为什么不需要修改 |
+|------|----------------|
+| `vmx_exit.c` | 通过 `VmxRead()` 读取，自动走 eVMCS 路径 |
+| `svm_exit.c` | 直接访问 VMCB 结构体成员，嵌套模式下行为相同 |
+| `ept.c` / `npt.c` | EPT/NPT 页表由 L0 透明处理，恒等映射不受影响 |
+| `hv_hook.c` | 通过 `hv_ops` 抽象层，不感知底层 |
+| `hv_mem.c` | 物理内存访问通过 L0 透明翻译 |
+| `ssdt.c` / `shadow_ssdt.c` | 复用 Hook 框架 |
+| `process.c` | CR3 跟踪不受虚拟化层级影响 |
+| `vmx_asm.asm` / `svm_asm.asm` | VMLAUNCH/VMRUN 由 L0 模拟，汇编代码不变 |
+
+### 整体数据流（嵌套模式）
+
+```
+                   L2 Guest (Windows + 应用程序)
+                            |
+                   VM-Exit (L0 模拟)
+                            |
+        +-------------------+--------------------+
+        |          L1 VMXToolbox 驱动              |
+        |                                         |
+        |   VmxRead(VMCS_EXIT_REASON)             |
+        |     → eVMCS->ExitReason (内存读取)      |
+        |                                         |
+        |   [处理 Exit: 反反调试/Hook/...]         |
+        |                                         |
+        |   VmxWrite(VMCS_GUEST_RIP, newRip)      |
+        |     → eVMCS->GuestRip = newRip          |
+        |     → eVMCS->CleanFields &= ~GUEST_BASIC|
+        |                                         |
+        |   VMRESUME                               |
+        |     → eVMCS->CleanFields = ALL           |
+        +-------------------+--------------------+
+                            |
+                   VMRESUME (L0 执行)
+                   L0 检查 CleanFields:
+                     GUEST_BASIC=0 → 重载 RIP
+                     其他=1 → 跳过
+                            |
+                   L2 Guest 继续执行
+```
 
 ---
 
@@ -2055,23 +2395,26 @@ DriverSetTarget(1234, AAD_HIDE_ALL) -> IOCTL_VMX_SET_TARGET
 ```
 vmxdrv.c (驱动入口)
 +-- hv_ops.h (抽象层接口)
-+-- hv_detect.h/c (CPU 厂商检测)
++-- hv_detect.h/c (CPU 厂商检测 + Hyper-V 嵌套模式检测)
 +-- hv_mem.h/c (物理内存读写引擎, Guest 页表遍历)
 +-- hv_hook.h/c (通用 Hook 框架, 动态 Thunk, 规则引擎)
 |   +-- hv_hook_asm.asm (ASM dispatcher)
 +-- log.h/c (日志)
 +-- process.h/c (进程跟踪)
 +-- vmx.h + vmx_init.c (Intel VMX 后端)
+|   +-- vmx_enlightened.h (Enlightened VMCS 结构/字段表/读写助手)
 |   +-- ept.h/c (EPT)
 |   +-- vmx_asm.asm (VMLAUNCH)
 +-- svm.h + svm_init.c (AMD SVM 后端)
+|   +-- svm_enlightened.h (Enlightened VMCB 字段/Clean Bit 31)
 |   +-- npt.h/c (NPT)
 |   +-- svm_asm.asm (VMRUN)
 +-- vmx_exit.c (Intel Exit 分发)
 +-- svm_exit.c (AMD Exit 分发)
 |   +-- hv_mem.h/c (VMCALL 内存操作处理)
-|   +-- anti_anti_debug.h/c (反反调试, 双平台共用)
+|   +-- anti_anti_debug.h/c (反反调试, 双平台共用, 嵌套模式感知)
 |   |   +-- hv_ops 宏 (HvReadGuestCr3, HvAdvanceGuestRip, ...)
+|   |   +-- hv_detect.h (g_IsNestedMode, 控制 CPUID 隐藏)
 |   |   +-- process.h/c (进程查找)
 |   +-- msr.c (MSR 处理, 通过 hv_ops)
 +-- shared.h (IOCTL 定义)
@@ -2195,9 +2538,11 @@ sc delete VMXToolboxDrv
 | 内存读写 | 物理内存直接访问，绕过一切内核回调 | ✅ 已完成 |
 | SSDT 监控 | 磁盘映像解析 SSDT + EPT Hook 监控/拦截/过滤 syscall | ✅ 已完成 |
 | Shadow SSDT | Win32k Shadow SSDT 发现 + NtUser*/NtGdi* Hook/监控 | ✅ 已完成 |
+| 嵌套虚拟化 | Hyper-V 环境自动检测 + Enlightened VMCS/VMCB 加速 | ✅ 已完成 |
 | 驱动隐藏 | 隐藏自身驱动对象，防止枚举 | 📋 规划中 |
 | 虚拟化保护 | 对目标进程代码段进行 VMX 级别加密保护 | 📋 规划中 |
 | 通信隐藏 | 基于 VMCALL 的隐蔽驱动通信通道 | 📋 规划中 |
+| INVEPT 加速 | 嵌套模式下用 HvCallFlushGuestPhysicalAddressSpace 替代 INVEPT | 📋 规划中 |
 
 ---
 
@@ -2208,7 +2553,7 @@ sc delete VMXToolboxDrv
 | **蓝屏 (BSOD)** | VMX 代码中任何错误都可能导致蓝屏 | 在虚拟机中测试, 双机调试 |
 | **PatchGuard** | Windows 内核补丁保护可能检测异常 | EPT Hook 不修改内核代码, 通常不触发 |
 | **HVCI** | Hypervisor-protected Code Integrity 阻止自定义 Hypervisor | 需关闭 HVCI |
-| **Hyper-V 冲突** | 已有 Hyper-V 运行时无法加载 | 需关闭 Hyper-V, 或在嵌套虚拟化环境测试 |
+| **Hyper-V 兼容** | Hyper-V 开启时 VMXON 由 L0 模拟，性能降低 | 自动检测 Hyper-V 并启用 Enlightened VMCS/VMCB 加速；CPUID 隐藏在嵌套模式下自动禁用 |
 | **驱动签名** | Windows 10+ 要求驱动签名 | 开发阶段使用 testsigning, 生产需 EV 证书 |
 | **EPROCESS 偏移** | 不同 Windows 版本偏移不同 | 已实现动态发现, 覆盖 Win7~Win11 |
 | **多核同步** | VM-Exit handler 在各核心并行运行 | 使用原子操作和 Spin Lock |

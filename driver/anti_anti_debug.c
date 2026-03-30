@@ -7,6 +7,7 @@
 #include "anti_anti_debug.h"
 #include "ept.h"
 #include "hv_ops.h"
+#include "hv_detect.h"
 #include "log.h"
 #include "../common/shared.h"
 #include <ntstrsafe.h>
@@ -576,8 +577,10 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
     /* Execute real CPUID */
     __cpuidex(CpuInfo, Leaf, SubLeaf);
 
-    /* Spoof for target processes */
-    if (IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
+    /* Spoof for target processes.
+     * In nested mode, skip CPUID hiding to avoid interfering with
+     * Hyper-V's own CPUID leaves (0x40000000+ range). */
+    if (!g_IsNestedMode && IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
         switch (Leaf) {
         case 1:
             /*
