@@ -1,0 +1,325 @@
+<mxfile host="draw.io" modified="2026-03-31T00:00:00.000Z" agent="Claude Code" version="24.0.0" type="device">
+  <diagram id="ioctl-protocol" name="IOCTL Communication Protocol">
+    <mxGraphModel dx="1900" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1400" math="0" shadow="1" background="#FFFFFF">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- ============================================================ -->
+        <!-- TITLE & SUBTITLE                                              -->
+        <!-- ============================================================ -->
+        <mxCell id="title1" value="VMX Hypervisor Toolbox — 驱动与用户态通信协议全景" style="text;html=1;fontSize=22;fontFamily=Segoe UI;fontStyle=1;align=center;verticalAlign=middle;whiteSpace=wrap;fillColor=none;strokeColor=none;fontColor=#1A1A2E;" vertex="1" parent="1">
+          <mxGeometry x="250" y="15" width="1400" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="title2" value="27 个 IOCTL 码 · 6 大功能组 · DeviceIoControl 通信 · \\.\VMXToolbox" style="text;html=1;fontSize=13;fontFamily=Segoe UI;fontStyle=0;align=center;verticalAlign=middle;whiteSpace=wrap;fillColor=none;strokeColor=none;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="400" y="52" width="1100" height="25" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- USER MODE SECTION (Ring 3)                                    -->
+        <!-- ============================================================ -->
+        <mxCell id="ring3_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E3F2FD;strokeColor=#90CAF9;strokeWidth=2;arcSize=8;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="520" y="85" width="860" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="ring3_label" value="&lt;b&gt;User Mode (Ring 3)&lt;/b&gt;" style="text;html=1;fontSize=11;fontFamily=Segoe UI;fontColor=#1565C0;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="535" y="90" width="150" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="cli_box" value="&lt;b&gt;VMXToolbox.exe&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666&quot;&gt;CLI Tool · main.c (~87KB)&lt;br&gt;命令行参数解析 &amp;amp; 分发&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1976D2;strokeWidth=2;shadow=1;fontFamily=Segoe UI;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="580" y="112" width="260" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="comm_box" value="&lt;b&gt;driver_comm.c&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666&quot;&gt;DeviceIoControl Wrapper&lt;br&gt;所有 IOCTL 调用封装&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#1976D2;strokeWidth=2;shadow=1;fontFamily=Segoe UI;fontSize=12;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="900" y="112" width="260" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="cli_to_comm" value="调用" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1976D2;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;fontColor=#1976D2;" edge="1" source="cli_box" target="comm_box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- DEVICE PATH ARROW                                             -->
+        <!-- ============================================================ -->
+        <mxCell id="device_arrow" value="" style="shape=mxgraph.arrows2.arrow;dy=0.39;dx=35;notch=0;fillColor=#1565C0;strokeColor=#0D47A1;strokeWidth=1;shadow=1;rotation=90;" vertex="1" parent="1">
+          <mxGeometry x="900" y="207" width="100" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="device_label" value="&lt;b&gt;\\.\VMXToolbox&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;DeviceIoControl()&lt;br&gt;METHOD_BUFFERED&lt;br&gt;FILE_ANY_ACCESS&lt;/font&gt;" style="text;html=1;fontSize=11;fontFamily=Segoe UI;fontColor=#0D47A1;align=center;verticalAlign=middle;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="208" width="160" height="58" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- IOCTL CODE GROUPS HEADER                                      -->
+        <!-- ============================================================ -->
+        <mxCell id="ioctl_header" value="IOCTL Code Groups — 6 大功能组" style="text;html=1;fontSize=15;fontFamily=Segoe UI;fontStyle=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="550" y="272" width="800" height="28" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- GROUP 1: 核心控制 (Blue) 0x800-0x806                          -->
+        <!-- ============================================================ -->
+        <mxCell id="g1_frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8EAF6;strokeColor=#3F51B5;strokeWidth=2;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="30" y="305" width="380" height="420" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_title" value="&lt;font color=&quot;#FFFFFF&quot;&gt;&lt;b&gt;核心控制&lt;/b&gt;  Core Control&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3F51B5;strokeColor=#283593;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=13;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="45" y="315" width="350" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_range" value="0x800 — 0x806 (7 IOCTLs)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#5C6BC0;align=center;" vertex="1" parent="1">
+          <mxGeometry x="45" y="349" width="350" height="16" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g1_0" value="&lt;b&gt;0x800&lt;/b&gt; IOCTL_VMX_INIT&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;初始化虚拟化 → out: VMX_STATUS&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="370" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_1" value="&lt;b&gt;0x801&lt;/b&gt; IOCTL_VMX_SET_TARGET&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;设置目标进程 → in: VMX_TARGET_INFO {Pid, Flags}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="413" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_2" value="&lt;b&gt;0x802&lt;/b&gt; IOCTL_VMX_REMOVE_TARGET&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;移除目标 → in: VMX_REMOVE_TARGET {Pid}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="456" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_3" value="&lt;b&gt;0x803&lt;/b&gt; IOCTL_VMX_SET_CONFIG&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;更新配置 → in: VMX_CONFIG_INFO {Pid, Flags}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="499" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_4" value="&lt;b&gt;0x804&lt;/b&gt; IOCTL_VMX_GET_LOG&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;读取日志 → out: LOG_ENTRY[]&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="542" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_5" value="&lt;b&gt;0x805&lt;/b&gt; IOCTL_VMX_STOP&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;停止虚拟化&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="585" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g1_6" value="&lt;b&gt;0x806&lt;/b&gt; IOCTL_VMX_QUERY_STATUS&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;查询状态 → out: VMX_STATUS&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#7986CB;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="50" y="628" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <!-- I/O direction indicators for Group 1 -->
+        <mxCell id="g1_dir" value="&lt;font style=&quot;font-size:9px;&quot;&gt;⬇ IN &amp;nbsp;⬆ OUT&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#3F51B5;align=right;" vertex="1" parent="1">
+          <mxGeometry x="260" y="680" width="130" height="16" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- GROUP 2: 内存读写 (Green) 0x807-0x808                         -->
+        <!-- ============================================================ -->
+        <mxCell id="g2_frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5E9;strokeColor=#4CAF50;strokeWidth=2;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="425" y="305" width="340" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="g2_title" value="&lt;font color=&quot;#FFFFFF&quot;&gt;&lt;b&gt;内存读写&lt;/b&gt;  Memory R/W&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4CAF50;strokeColor=#2E7D32;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=13;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="440" y="315" width="310" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="g2_range" value="0x807 — 0x808 (2 IOCTLs)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#66BB6A;align=center;" vertex="1" parent="1">
+          <mxGeometry x="440" y="349" width="310" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="g2_0" value="&lt;b&gt;0x807&lt;/b&gt; IOCTL_VMX_READ_MEMORY&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;in: VMX_MEMORY_REQUEST {Pid, Size, VA}&lt;br&gt;out: data bytes (物理地址翻译读取)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#81C784;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="440" y="370" width="310" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="g2_1" value="&lt;b&gt;0x808&lt;/b&gt; IOCTL_VMX_WRITE_MEMORY&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;in: VMX_MEMORY_REQUEST + data bytes&lt;br&gt;CR3 Walk → 绕过 OS 保护&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#81C784;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="440" y="423" width="310" height="48" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- GROUP 3: Hook 框架 (Orange) 0x809-0x80C                       -->
+        <!-- ============================================================ -->
+        <mxCell id="g3_frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#FF9800;strokeWidth=2;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="425" y="500" width="340" height="225" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3_title" value="&lt;font color=&quot;#FFFFFF&quot;&gt;&lt;b&gt;Hook 框架&lt;/b&gt;  EPT/NPT Hooks&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FF9800;strokeColor=#E65100;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=13;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="440" y="510" width="310" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3_range" value="0x809 — 0x80C (4 IOCTLs)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#FFA726;align=center;" vertex="1" parent="1">
+          <mxGeometry x="440" y="544" width="310" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3_0" value="&lt;b&gt;0x809&lt;/b&gt; IOCTL_VMX_INSTALL_HOOK&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;in: hook request → out: HookId&lt;br&gt;Actions: Passthrough / Log / Block / Modify-Retval&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFB74D;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="440" y="565" width="310" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3_1" value="&lt;b&gt;0x80A&lt;/b&gt; IOCTL_VMX_REMOVE_HOOK&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;in: HookId → 移除指定 Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFB74D;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="440" y="618" width="310" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3_2" value="&lt;b&gt;0x80B&lt;/b&gt; IOCTL_VMX_LIST_HOOKS&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;out: VMX_HOOK_INFO[] (Count + Entries[1])&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFB74D;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="440" y="661" width="310" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g3_3" value="&lt;b&gt;0x80C&lt;/b&gt; IOCTL_VMX_GET_HOOK_EVENTS&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;out: HOOK_EVENT[] 事件流&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFB74D;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="440" y="704" width="310" height="38" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- GROUP 4: SSDT 监控 (Amber) 0x80D-0x813                        -->
+        <!-- ============================================================ -->
+        <mxCell id="g4_frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#FFC107;strokeWidth=2;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="780" y="305" width="370" height="420" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_title" value="&lt;font color=&quot;#FFFFFF&quot;&gt;&lt;b&gt;SSDT 监控&lt;/b&gt;  Syscall Monitor&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFC107;strokeColor=#FF8F00;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=13;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="795" y="315" width="340" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_range" value="0x80D — 0x813 (7 IOCTLs)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#FFB300;align=center;" vertex="1" parent="1">
+          <mxGeometry x="795" y="349" width="340" height="16" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g4_0" value="&lt;b&gt;0x80D&lt;/b&gt; IOCTL_VMX_SSDT_INIT&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;初始化 SSDT → out: init response&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="370" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_1" value="&lt;b&gt;0x80E&lt;/b&gt; IOCTL_VMX_SSDT_DUMP&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;转储 SSDT 表 → out: SSDT_ENTRY_INFO[]&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="413" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_2" value="&lt;b&gt;0x80F&lt;/b&gt; IOCTL_VMX_SSDT_HOOK&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;Hook 系统调用 → in: VMX_SSDT_HOOK_REQUEST → out: response&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="456" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_3" value="&lt;b&gt;0x810&lt;/b&gt; IOCTL_VMX_SSDT_UNHOOK&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;移除 SSDT Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="499" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_4" value="&lt;b&gt;0x811&lt;/b&gt; IOCTL_VMX_SSDT_UNHOOK_ALL&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;移除全部 SSDT Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="542" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_5" value="&lt;b&gt;0x812&lt;/b&gt; IOCTL_VMX_SSDT_LIST_HOOKS&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;列出 SSDT Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="585" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_6" value="&lt;b&gt;0x813&lt;/b&gt; IOCTL_VMX_SSDT_MONITOR&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;设置监控模式 → in: VMX_SSDT_MONITOR_REQUEST&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#FFD54F;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="795" y="628" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g4_dir" value="&lt;font style=&quot;font-size:9px;&quot;&gt;nt!KiServiceTable&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#FF8F00;align=right;" vertex="1" parent="1">
+          <mxGeometry x="980" y="680" width="150" height="16" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- GROUP 5: Shadow SSDT (Purple) 0x814-0x81A                     -->
+        <!-- ============================================================ -->
+        <mxCell id="g5_frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F3E5F5;strokeColor=#9C27B0;strokeWidth=2;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="305" width="370" height="420" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_title" value="&lt;font color=&quot;#FFFFFF&quot;&gt;&lt;b&gt;Shadow SSDT&lt;/b&gt;  Win32k Monitor&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9C27B0;strokeColor=#6A1B9A;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=13;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="315" width="340" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_range" value="0x814 — 0x81A (7 IOCTLs)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#AB47BC;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="349" width="340" height="16" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="g5_0" value="&lt;b&gt;0x814&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_INIT&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;初始化 Shadow SSDT&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="370" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_1" value="&lt;b&gt;0x815&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_DUMP&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;转储 Shadow SSDT 表&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="413" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_2" value="&lt;b&gt;0x816&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_HOOK&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;Hook NtUser/NtGdi 系统调用&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="456" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_3" value="&lt;b&gt;0x817&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_UNHOOK&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;移除 Shadow SSDT Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="499" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_4" value="&lt;b&gt;0x818&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_UNHOOK_ALL&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;移除全部 Shadow SSDT Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="542" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_5" value="&lt;b&gt;0x819&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;列出 Shadow SSDT Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="585" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_6" value="&lt;b&gt;0x81A&lt;/b&gt; IOCTL_VMX_SHADOW_SSDT_MONITOR&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#666&quot;&gt;设置 Shadow SSDT 监控模式&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CE93D8;strokeWidth=1;fontFamily=Segoe UI;fontSize=10;align=left;spacingLeft=8;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="628" width="340" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="g5_dir" value="&lt;font style=&quot;font-size:9px;&quot;&gt;KeServiceDescriptorTableShadow&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#7B1FA2;align=right;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="680" width="210" height="16" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- BOTTOM - DRIVER DISPATCHER (Kernel Mode)                      -->
+        <!-- ============================================================ -->
+        <mxCell id="kernel_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ECEFF1;strokeColor=#78909C;strokeWidth=2;arcSize=6;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="30" y="755" width="1505" height="195" as="geometry"/>
+        </mxCell>
+        <mxCell id="kernel_label" value="&lt;b&gt;Kernel Mode (Ring 0 / Ring -1)&lt;/b&gt;" style="text;html=1;fontSize=11;fontFamily=Segoe UI;fontColor=#37474F;align=left;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="45" y="762" width="200" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Dispatch box -->
+        <mxCell id="dispatch_box" value="&lt;b style=&quot;font-size:14px;&quot;&gt;驱动 IOCTL 分发器&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#455A64&quot;&gt;vmxdrv.c :: IRP_MJ_DEVICE_CONTROL Handler&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;font-family:Consolas;color:#546E7A&quot;&gt;switch (IoControlCode) {&lt;br&gt;&amp;nbsp;&amp;nbsp;case IOCTL_VMX_INIT: ...&lt;br&gt;&amp;nbsp;&amp;nbsp;case IOCTL_VMX_SET_TARGET: ...&lt;br&gt;&amp;nbsp;&amp;nbsp;...&lt;br&gt;&amp;nbsp;&amp;nbsp;case IOCTL_VMX_SHADOW_SSDT_MONITOR: ...&lt;br&gt;}&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#546E7A;strokeWidth=2;shadow=1;fontFamily=Segoe UI;fontSize=12;arcSize=8;align=left;spacingLeft=15;spacingTop=5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="785" width="420" height="150" as="geometry"/>
+        </mxCell>
+
+        <!-- Protocol details box -->
+        <mxCell id="proto_box" value="&lt;b style=&quot;font-size:12px;&quot;&gt;通信协议细节&lt;/b&gt;&lt;hr style=&quot;border:0;border-top:1px solid #B0BEC5;margin:4px 0;&quot;&gt;&lt;table style=&quot;font-size:10px;font-family:Segoe UI;color:#455A64;border-collapse:collapse;&quot; cellpadding=&quot;3&quot;&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;Method:&lt;/b&gt;&lt;/td&gt;&lt;td&gt;METHOD_BUFFERED (SystemBuffer)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;Access:&lt;/b&gt;&lt;/td&gt;&lt;td&gt;FILE_ANY_ACCESS&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;Device:&lt;/b&gt;&lt;/td&gt;&lt;td&gt;FILE_DEVICE_UNKNOWN (0x22)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;Shared Header:&lt;/b&gt;&lt;/td&gt;&lt;td&gt;common/shared.h&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;Code Range:&lt;/b&gt;&lt;/td&gt;&lt;td&gt;0x800 — 0x81A (27 codes)&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#78909C;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=11;arcSize=10;align=left;spacingLeft=12;spacingTop=5;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="500" y="785" width="300" height="150" as="geometry"/>
+        </mxCell>
+
+        <!-- Data pattern box -->
+        <mxCell id="pattern_box" value="&lt;b style=&quot;font-size:12px;&quot;&gt;可变长度输出模式&lt;/b&gt;&lt;hr style=&quot;border:0;border-top:1px solid #B0BEC5;margin:4px 0;&quot;&gt;&lt;font style=&quot;font-size:10px;font-family:Consolas;color:#455A64&quot;&gt;typedef struct _XXX_LIST {&lt;br&gt;&amp;nbsp;&amp;nbsp;ULONG Count;&lt;br&gt;&amp;nbsp;&amp;nbsp;XXX_ENTRY Entries[1];&lt;br&gt;} XXX_LIST;&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;color:#78909C&quot;&gt;• 所有列表输出 (Hook、SSDT、Log) 均使用此模式&lt;br&gt;• 调用方先用小缓冲区获取 Count&lt;br&gt;• 再以 sizeof(Header) + Count * sizeof(Entry) 重新调用&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#78909C;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=11;arcSize=10;align=left;spacingLeft=12;spacingTop=5;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="830" y="785" width="340" height="150" as="geometry"/>
+        </mxCell>
+
+        <!-- Module targets box -->
+        <mxCell id="modules_box" value="&lt;b style=&quot;font-size:12px;&quot;&gt;后端功能模块&lt;/b&gt;&lt;hr style=&quot;border:0;border-top:1px solid #B0BEC5;margin:4px 0;&quot;&gt;&lt;font style=&quot;font-size:9px;color:#455A64&quot;&gt;• anti_anti_debug.c/h&lt;br&gt;• hv_hook.c/h + hv_hook_asm.asm&lt;br&gt;• hv_mem.c/h (CR3 Walk)&lt;br&gt;• ssdt.c/h (KiServiceTable)&lt;br&gt;• shadow_ssdt.c/h (KeServiceDescriptorTableShadow)&lt;br&gt;• process.c/h (EPROCESS)&lt;br&gt;• log.c/h (Ring Buffer)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#78909C;strokeWidth=1;shadow=1;fontFamily=Segoe UI;fontSize=11;arcSize=10;align=left;spacingLeft=12;spacingTop=5;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="785" width="310" height="150" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- CONNECTING ARROWS: Groups to Dispatcher                       -->
+        <!-- ============================================================ -->
+        <mxCell id="arr_g1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#3F51B5;strokeWidth=2;dashed=1;entryX=0.2;entryY=0;entryDx=0;entryDy=0;" edge="1" source="g1_frame" target="kernel_bg" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="arr_g2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4CAF50;strokeWidth=2;dashed=1;entryX=0.35;entryY=0;entryDx=0;entryDy=0;" edge="1" source="g2_frame" target="kernel_bg" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="arr_g3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF9800;strokeWidth=2;dashed=1;entryX=0.45;entryY=0;entryDx=0;entryDy=0;" edge="1" source="g3_frame" target="kernel_bg" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="arr_g4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FFC107;strokeWidth=2;dashed=1;entryX=0.65;entryY=0;entryDx=0;entryDy=0;" edge="1" source="g4_frame" target="kernel_bg" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="arr_g5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#9C27B0;strokeWidth=2;dashed=1;entryX=0.85;entryY=0;entryDx=0;entryDy=0;" edge="1" source="g5_frame" target="kernel_bg" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LEGEND                                                        -->
+        <!-- ============================================================ -->
+        <mxCell id="legend_frame" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#BDBDBD;strokeWidth=1;arcSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="30" y="960" width="1505" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#3F51B5;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="50" y="970" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg1t" value="核心控制 (7)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="70" y="968" width="90" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4CAF50;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="180" y="970" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2t" value="内存读写 (2)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="200" y="968" width="90" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FF9800;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="310" y="970" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3t" value="Hook 框架 (4)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="330" y="968" width="90" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg4" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFC107;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="440" y="970" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg4t" value="SSDT 监控 (7)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="460" y="968" width="100" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg5" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9C27B0;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="580" y="970" width="16" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg5t" value="Shadow SSDT (7)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="600" y="968" width="110" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg_total" value="&lt;b&gt;Total: 27 IOCTL Codes&lt;/b&gt;  |  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800+N, METHOD_BUFFERED, FILE_ANY_ACCESS)" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#666;align=right;" vertex="1" parent="1">
+          <mxGeometry x="900" y="968" width="620" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- DATA FLOW ARROWS (User → Kernel)                              -->
+        <!-- ============================================================ -->
+        <mxCell id="flow_down" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565C0;strokeWidth=3;entryX=0.5;entryY=0;entryDx=0;entryDy=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" edge="1" source="comm_box" target="g4_frame" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1030" y="200"/>
+              <mxPoint x="965" y="200"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow_label" value="&lt;font style=&quot;font-size:9px;&quot;&gt;DeviceIoControl()&lt;/font&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;points=[];fontFamily=Segoe UI;fontColor=#1565C0;" vertex="1" connectable="0" parent="flow_down">
+          <mxGeometry x="-0.2" relative="1" as="geometry">
+            <mxPoint as="offset"/>
+          </mxGeometry>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

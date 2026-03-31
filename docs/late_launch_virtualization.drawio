@@ -1,0 +1,475 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram id="late-launch-virt" name="Late-Launch Virtualization &amp; Memory Continuity">
+    <mxGraphModel dx="821" dy="475" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1400" background="#ffffff" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Segoe UI;fontColor=#1a1a2e;" value="&lt;font style=&quot;font-size:22px;&quot;&gt;&lt;b&gt;VMX Hypervisor Toolbox — 后加载虚拟化与内存连续性&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="40" width="1400" x="200" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Segoe UI;" value="&lt;font color=&quot;#555&quot; style=&quot;font-size:12px;&quot;&gt;不搬移任何一个字节 · 恒等映射 (GPA==HPA) · OS 完全无感知&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="1000" x="400" y="48" as="geometry" />
+        </mxCell>
+        <mxCell id="timeline_arrow" edge="1" parent="1" style="shape=flexArrow;endArrow=classic;startArrow=none;html=1;fillColor=#546e7a;strokeColor=#546e7a;width=8;endSize=5;startSize=5;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="32" y="100" as="sourcePoint" />
+            <mxPoint x="32" y="1050" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="timeline_label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;rotation=-90;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#546e7a&quot;&gt;&lt;b&gt;时间线&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="60" x="2" y="560" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_marker" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#2e7d32;strokeColor=#1b5e20;strokeWidth=2;shadow=1;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;T0&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="36" width="36" x="15" y="87" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=2;arcSize=4;shadow=1;" value="" vertex="1">
+          <mxGeometry height="220" width="820" x="60" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#1b5e20&quot;&gt;&lt;b&gt;T0: 系统正常运行&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="250" x="75" y="85" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_sublabel" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#388e3c&quot;&gt;&lt;i&gt;一层翻译&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="120" x="270" y="85" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_dram_label" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#333&quot;&gt;&lt;b&gt;Physical DRAM&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="18" width="120" x="80" y="115" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_dram_kernel" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;OS Kernel&lt;/b&gt;&lt;br&gt;ntoskrnl&lt;/font&gt;" vertex="1">
+          <mxGeometry height="44" width="120" x="80" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_dram_proc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;Other&lt;br&gt;Processes&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="44" width="100" x="210" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_dram_game_code" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;Game Code Page&lt;/b&gt;&lt;br&gt;0x3F8A5000&lt;/font&gt;" vertex="1">
+          <mxGeometry height="44" width="120" x="320" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_dram_game_data" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;Game Data&lt;/b&gt;&lt;br&gt;0x52100000&lt;/font&gt;" vertex="1">
+          <mxGeometry height="44" width="120" x="450" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_dram_free" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#bdbdbd;strokeWidth=1;fontFamily=Segoe UI;dashed=1;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#777&quot;&gt;Free / Other&lt;/font&gt;" vertex="1">
+          <mxGeometry height="44" width="140" x="580" y="136" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_va_label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#1b5e20&quot;&gt;&lt;b&gt;VA&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="18" width="30" x="100" y="198" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_arrow1" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#2e7d32;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="135" y="207" as="sourcePoint" />
+            <mxPoint x="220" y="207" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t0_cr3_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a5d6a7;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;CR3&lt;/b&gt;&lt;br&gt;Page Table&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="80" x="222" y="193" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_arrow2" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#2e7d32;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="305" y="207" as="sourcePoint" />
+            <mxPoint x="375" y="207" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t0_pa_label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#1b5e20&quot;&gt;&lt;b&gt;PA&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="18" width="30" x="378" y="198" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_arrow3" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#2e7d32;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="410" y="207" as="sourcePoint" />
+            <mxPoint x="475" y="207" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t0_dram_chip" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;🔲 &lt;b&gt;DRAM&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="70" x="478" y="193" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_note" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#2e7d32&quot;&gt;&lt;b&gt;→ 一层翻译: VA → CR3 → PA → DRAM&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="350" x="80" y="238" as="geometry" />
+        </mxCell>
+        <mxCell id="t0_t1_conn" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#888;strokeWidth=1;dashed=1;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="460" y="270" as="sourcePoint" />
+            <mxPoint x="460" y="310" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t1_marker" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#e65100;strokeColor=#bf360c;strokeWidth=2;shadow=1;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;T1&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="36" width="36" x="15" y="317" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;arcSize=4;shadow=1;" value="" vertex="1">
+          <mxGeometry height="210" width="820" x="60" y="310" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#bf360c&quot;&gt;&lt;b&gt;T1: 驱动加载, EPT/NPT 构建&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="300" x="75" y="315" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_sublabel" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#ef6c00&quot;&gt;&lt;i&gt;页表构建中，数据纹丝不动&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="200" x="370" y="315" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_code_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#263238;strokeColor=#e65100;strokeWidth=1.5;arcSize=6;shadow=1;" value="" vertex="1">
+          <mxGeometry height="100" width="380" x="80" y="348" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_code_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Consolas;fontColor=#ffcc80;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#ffcc80&quot;&gt;&lt;b&gt;EptInitialize() — Identity Map&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="16" width="300" x="92" y="352" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_code" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Consolas;whiteSpace=wrap;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#e0e0e0&quot;&gt;&lt;pre style=&quot;margin:0;font-family:Consolas;&quot;&gt;for (i = 0; i &amp;lt; 512; i++)           // 512 PDPT entries&lt;br&gt;  for (j = 0; j &amp;lt; 512; j++) {       // 512 PD entries&lt;br&gt;    PhysAddr = (i*512 + j) * 2MB;&lt;br&gt;    PD[i][j].PhysAddr = PhysAddr;  // → 指向自己!&lt;br&gt;  }&lt;br&gt;// 覆盖 512 × 512 × 2MB = &lt;b&gt;&lt;font color=&quot;#ffab40&quot;&gt;512 GB&lt;/font&gt;&lt;/b&gt; 恒等映射&lt;/pre&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="72" width="360" x="92" y="370" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_key" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;align=center;" value="&lt;font style=&quot;font-size:10px;&quot;&gt;&lt;b&gt;关键:&lt;/b&gt; GPA == HPA&lt;br&gt;&lt;br&gt;每个 2MB 页表项的物理地址&lt;br&gt;&lt;b&gt;指向它自己&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#e65100&quot;&gt;PD[i][j].PhysAddr = PhysAddr&lt;/font&gt;&lt;br&gt;&lt;br&gt;整个 512GB 物理内存&lt;br&gt;全部恒等映射&lt;/font&gt;" vertex="1">
+          <mxGeometry height="130" width="190" x="480" y="348" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_dram_note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ff9800;strokeWidth=1;fontFamily=Segoe UI;dashed=1;dashPattern=5 3;align=center;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#e65100&quot;&gt;&lt;b&gt;⚠ Physical DRAM: 完全不变!&lt;/b&gt;&lt;br&gt;数据原地不动，仅在内核内存中&lt;br&gt;构建了一组页表结构&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="178" x="690" y="355" as="geometry" />
+        </mxCell>
+        <mxCell id="t1_t2_conn" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#888;strokeWidth=1;dashed=1;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="460" y="520" as="sourcePoint" />
+            <mxPoint x="460" y="546" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t2_marker" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#1565c0;strokeColor=#0d47a1;strokeWidth=2;shadow=1;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;T2&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="36" width="36" x="15" y="553" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=2;arcSize=4;shadow=1;" value="" vertex="1">
+          <mxGeometry height="220" width="820" x="60" y="546" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#0d47a1&quot;&gt;&lt;b&gt;T2: VMLAUNCH 后, 虚拟化已启用&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="340" x="75" y="551" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_sublabel" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#1976d2&quot;&gt;&lt;i&gt;两层翻译，但等效一层&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="200" x="410" y="551" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_va" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#0d47a1&quot;&gt;&lt;b&gt;VA&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="30" x="80" y="590" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_a1" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#1565c0;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="113" y="600" as="sourcePoint" />
+            <mxPoint x="153" y="600" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t2_guest_cr3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#90caf9;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;Guest CR3&lt;/b&gt;&lt;br&gt;Page Table&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="80" x="155" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_a2" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#1565c0;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="238" y="600" as="sourcePoint" />
+            <mxPoint x="278" y="600" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t2_gpa" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#0d47a1&quot;&gt;&lt;b&gt;GPA&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="35" x="280" y="590" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_a3" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#1565c0;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="318" y="600" as="sourcePoint" />
+            <mxPoint x="358" y="600" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t2_ept_box" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;EPT Identity&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#e65100&quot;&gt;GPA → HPA&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="90" x="360" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_a4" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#1565c0;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="453" y="600" as="sourcePoint" />
+            <mxPoint x="498" y="600" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t2_hpa" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#0d47a1&quot;&gt;&lt;b&gt;HPA=GPA&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="58" x="498" y="590" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_a5" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#1565c0;strokeWidth=2;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="558" y="600" as="sourcePoint" />
+            <mxPoint x="608" y="600" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t2_dram" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#90caf9;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;🔲 &lt;b&gt;Same DRAM&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="90" x="610" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_emphasis" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1976d2;strokeWidth=2;fontFamily=Segoe UI;shadow=1;align=center;dashed=1;dashPattern=8 4;" value="&lt;font style=&quot;font-size:11px;&quot; color=&quot;#0d47a1&quot;&gt;&lt;b&gt;恒等映射使第二层 ≡ 没翻译&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#1976d2&quot;&gt;EPT(GPA) = GPA → 等于什么都没加&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="45" width="280" x="80" y="635" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_unaware" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1;fontFamily=Segoe UI;shadow=1;align=center;" value="&lt;font style=&quot;font-size:10px;&quot;&gt;&lt;b&gt;OS, 所有进程继续运行&lt;/b&gt;&lt;br&gt;&lt;font color=&quot;#1565c0&quot;&gt;完全无感知 — 因为结果一样!&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="230" x="400" y="635" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_layer1" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;T0: VA → &lt;b&gt;[CR3]&lt;/b&gt; → PA → DRAM&lt;/font&gt;" vertex="1">
+          <mxGeometry height="16" width="280" x="80" y="695" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_layer2" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#1565c0&quot;&gt;T2: VA → &lt;b&gt;[CR3]&lt;/b&gt; → GPA → &lt;b&gt;[EPT]&lt;/b&gt; → HPA=GPA → DRAM&lt;/font&gt;" vertex="1">
+          <mxGeometry height="16" width="380" x="80" y="713" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_layer_eq" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;≡ 结果完全相同!&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="16" width="160" x="470" y="704" as="geometry" />
+        </mxCell>
+        <mxCell id="t2_t3_conn" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#888;strokeWidth=1;dashed=1;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="460" y="766" as="sourcePoint" />
+            <mxPoint x="460" y="792" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t3_marker" parent="1" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6a1b9a;strokeColor=#4a148c;strokeWidth=2;shadow=1;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;T3&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="36" width="36" x="15" y="799" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#6a1b9a;strokeWidth=2;arcSize=4;shadow=1;" value="" vertex="1">
+          <mxGeometry height="180" width="820" x="60" y="792" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#4a148c&quot;&gt;&lt;b&gt;T3: 通过 IOCTL 读取内存&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="300" x="75" y="797" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_client" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ce93d8;strokeColor=#6a1b9a;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;VMXToolbox.exe&lt;/b&gt;&lt;br&gt;--read-mem&lt;/font&gt;" vertex="1">
+          <mxGeometry height="38" width="105" x="80" y="835" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_a1" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#6a1b9a;strokeWidth=1.5;endFill=1;" value="&lt;font style=&quot;font-size:7px;&quot; color=&quot;#6a1b9a&quot;&gt;IOCTL&lt;/font&gt;">
+          <mxGeometry relative="1" x="0.1" as="geometry">
+            <mxPoint as="offset" />
+            <mxPoint x="188" y="854" as="sourcePoint" />
+            <mxPoint x="245" y="854" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t3_driver" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ce93d8;strokeColor=#6a1b9a;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;Driver&lt;/b&gt;&lt;br&gt;hv_mem.c&lt;/font&gt;" vertex="1">
+          <mxGeometry height="38" width="85" x="248" y="835" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_a2" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#6a1b9a;strokeWidth=1.5;endFill=1;" value="&lt;font style=&quot;font-size:7px;&quot; color=&quot;#6a1b9a&quot;&gt;Walk CR3&lt;/font&gt;">
+          <mxGeometry relative="1" x="0.1" as="geometry">
+            <mxPoint as="offset" />
+            <mxPoint x="336" y="854" as="sourcePoint" />
+            <mxPoint x="403" y="854" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t3_cr3walk" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#6a1b9a;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;Game CR3&lt;/b&gt;&lt;br&gt;PML4→PDP→PD→PT&lt;/font&gt;" vertex="1">
+          <mxGeometry height="38" width="130" x="405" y="835" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_a3" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#6a1b9a;strokeWidth=1.5;endFill=1;" value="&lt;font style=&quot;font-size:7px;&quot; color=&quot;#6a1b9a&quot;&gt;GPA&lt;/font&gt;">
+          <mxGeometry relative="1" x="0.1" as="geometry">
+            <mxPoint as="offset" />
+            <mxPoint x="538" y="854" as="sourcePoint" />
+            <mxPoint x="598" y="854" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t3_map" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ce93d8;strokeColor=#6a1b9a;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;MmMapIoSpace&lt;/b&gt;&lt;br&gt;Read real data&lt;/font&gt;" vertex="1">
+          <mxGeometry height="38" width="110" x="600" y="835" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_stealth" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#8e24aa;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;align=center;" value="&lt;font style=&quot;font-size:10px;&quot;&gt;🔒 &lt;b&gt;Game 不知道 · Anti-Cheat 不知道 · Windows 不知道&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="450" x="180" y="892" as="geometry" />
+        </mxCell>
+        <mxCell id="t3_why" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:8px;&quot; color=&quot;#6a1b9a&quot;&gt;读取操作发生在 Ring -1 (VMX Root)&lt;br&gt;通过物理地址直接访问，绕过所有 OS 保护&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="450" x="180" y="925" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#455a64;strokeWidth=2;arcSize=4;shadow=1;" value="" vertex="1">
+          <mxGeometry height="440" width="880" x="900" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#263238&quot;&gt;&lt;b&gt;传统虚拟机 vs Blue Pill 对比&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="28" width="300" x="920" y="85" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#c62828;strokeWidth=1.5;arcSize=5;shadow=1;" value="" vertex="1">
+          <mxGeometry height="195" width="400" x="920" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:12px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;❌ 传统虚拟机 (VMware / VirtualBox)&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="22" width="370" x="935" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_s1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;1. 创建空 VM&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="85" x="935" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_s1a" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#c62828;strokeWidth=1.5;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1023" y="170" as="sourcePoint" />
+            <mxPoint x="1048" y="170" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trad_s2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;2. 安装 OS&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="75" x="1050" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_s2a" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#c62828;strokeWidth=1.5;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1128" y="170" as="sourcePoint" />
+            <mxPoint x="1153" y="170" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trad_s3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;3. 虚拟磁盘&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="80" x="1155" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_s3a" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#c62828;strokeWidth=1.5;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1238" y="170" as="sourcePoint" />
+            <mxPoint x="1263" y="170" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trad_s4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;4. 运行&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="45" x="1265" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_result" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;align=center;dashed=1;dashPattern=5 3;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;GPA ≠ HPA&lt;/b&gt;&lt;br&gt;Guest 物理地址 ≠ 真实物理地址&lt;br&gt;需要复杂的地址映射&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="250" x="935" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="trad_diagram" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Consolas;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#c62828&quot;&gt;GPA: 0x1000 → HPA: 0x7F3A2000&lt;br&gt;GPA: 0x2000 → HPA: 0x3B100000&lt;br&gt;&lt;i&gt;(地址完全不同!)&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="250" x="935" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=1.5;arcSize=5;shadow=1;" value="" vertex="1">
+          <mxGeometry height="185" width="400" x="920" y="325" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:12px;&quot; color=&quot;#2e7d32&quot;&gt;&lt;b&gt;✅ Blue Pill (VMXToolbox)&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="22" width="370" x="935" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_s1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;1. OS 已运行&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="85" x="935" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_s1a" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#2e7d32;strokeWidth=1.5;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1023" y="375" as="sourcePoint" />
+            <mxPoint x="1048" y="375" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bp_s2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;2. 插入层&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="75" x="1050" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_s2a" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#2e7d32;strokeWidth=1.5;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1128" y="375" as="sourcePoint" />
+            <mxPoint x="1153" y="375" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bp_s3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;3. 恒等映射&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="80" x="1155" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_s3a" edge="1" parent="1" style="endArrow=block;html=1;strokeColor=#2e7d32;strokeWidth=1.5;endFill=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1238" y="375" as="sourcePoint" />
+            <mxPoint x="1263" y="375" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bp_s4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;4. 运行&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="45" x="1265" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_result" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;align=center;dashed=1;dashPattern=5 3;" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#2e7d32&quot;&gt;&lt;b&gt;GPA == HPA&lt;/b&gt;&lt;br&gt;Guest 物理地址 == 真实物理地址&lt;br&gt;恒等映射 = 透明层&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="250" x="935" y="405" as="geometry" />
+        </mxCell>
+        <mxCell id="bp_diagram" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Consolas;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;GPA: 0x1000 → HPA: 0x1000&lt;br&gt;GPA: 0x2000 → HPA: 0x2000&lt;br&gt;&lt;i&gt;(完全相同!)&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="250" x="935" y="462" as="geometry" />
+        </mxCell>
+        <mxCell id="vs_label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:16px;&quot; color=&quot;#455a64&quot;&gt;&lt;b&gt;VS&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="40" x="1300" y="297" as="geometry" />
+        </mxCell>
+        <mxCell id="metaphor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#f9a825;strokeWidth=2;fontFamily=Segoe UI;shadow=1;align=center;" value="&lt;font style=&quot;font-size:11px;&quot; color=&quot;#37474f&quot;&gt;💡 &lt;b&gt;比喻:&lt;/b&gt;&lt;br&gt;&lt;i&gt;&amp;quot;没有搬进虚拟机，&lt;br&gt;只是脚下多了一层透明地板&amp;quot;&lt;/i&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="75" width="210" x="1350" y="115" as="geometry" />
+        </mxCell>
+        <mxCell id="floor_person" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;🖥 Windows + Apps&lt;/font&gt;" vertex="1">
+          <mxGeometry height="18" width="180" x="1365" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="floor_glass" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#42a5f5;strokeWidth=1.5;opacity=40;" value="" vertex="1">
+          <mxGeometry height="10" width="170" x="1370" y="220" as="geometry" />
+        </mxCell>
+        <mxCell id="floor_glass_label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:8px;&quot; color=&quot;#1565c0&quot;&gt;← 透明地板 (EPT Identity Map)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="14" width="200" x="1355" y="232" as="geometry" />
+        </mxCell>
+        <mxCell id="floor_hw" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;⚙ Physical Hardware (DRAM)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="18" width="180" x="1365" y="248" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#eceff1;strokeColor=#455a64;strokeWidth=2;arcSize=3;shadow=1;" value="" vertex="1">
+          <mxGeometry height="220" width="420" x="900" y="540" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:13px;&quot; color=&quot;#263238&quot;&gt;&lt;b&gt;⚡ 性能影响分析&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="200" x="915" y="545" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_h1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#455a64;strokeColor=#37474f;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;场景&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="24" width="140" x="915" y="575" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_h2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#455a64;strokeColor=#37474f;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;翻译路径&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="24" width="140" x="1055" y="575" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_h3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#455a64;strokeColor=#37474f;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;开销&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="24" width="110" x="1195" y="575" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r1c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;无虚拟化&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="915" y="599" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r1c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;VA → CR3 (4级)&lt;br&gt;~4 次内存访问&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="1055" y="599" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r1c3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;&lt;b&gt;基准&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="110" x="1195" y="599" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r2c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;有虚拟化 (最差)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="915" y="629" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r2c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;CR3(4) × EPT(4)&lt;br&gt;最多 24 次内存访问&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="1055" y="629" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r2c3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#e65100&quot;&gt;&lt;b&gt;~6x (理论)&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="110" x="1195" y="629" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r3c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;有虚拟化 + TLB&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="915" y="659" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r3c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;EPT TLB 缓存命中&lt;br&gt;大部分翻译被缓存&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="1055" y="659" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r3c3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#1565c0&quot;&gt;&lt;b&gt;~1-5%&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="110" x="1195" y="659" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r4c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;游戏帧率影响&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="915" y="689" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r4c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:8px;&quot;&gt;GPU 不受影响&lt;br&gt;仅 CPU 内存访问有开销&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="140" x="1055" y="689" as="geometry" />
+        </mxCell>
+        <mxCell id="perf_r4c3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;&amp;lt; 3%&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="110" x="1195" y="689" as="geometry" />
+        </mxCell>
+        <mxCell id="why_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#283593;strokeWidth=2;arcSize=3;shadow=1;" value="" vertex="1">
+          <mxGeometry height="220" width="440" x="1340" y="540" as="geometry" />
+        </mxCell>
+        <mxCell id="why_title" parent="1" style="text;html=1;align=left;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:13px;&quot; color=&quot;#1a237e&quot;&gt;&lt;b&gt;🛡 为什么 Windows 完全无感知?&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="350" x="1355" y="545" as="geometry" />
+        </mxCell>
+        <mxCell id="why_h1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#283593;strokeColor=#1a237e;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;检查项&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="24" width="160" x="1355" y="575" as="geometry" />
+        </mxCell>
+        <mxCell id="why_h2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#283593;strokeColor=#1a237e;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#fff&quot;&gt;&lt;b&gt;状态&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="24" width="250" x="1515" y="575" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r1c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Guest 页表&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="160" x="1355" y="599" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r1c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;✅ 未修改 — 原始 CR3 不变&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="250" x="1515" y="599" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r2c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;物理内存&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="160" x="1355" y="625" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r2c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;✅ 未搬移 — 数据原地不动&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="250" x="1515" y="625" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r3c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;指令流&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="160" x="1355" y="651" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r3c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;✅ 未中断 — Guest RIP = 当前 RIP&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="250" x="1515" y="651" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r4c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;时间连续性&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="160" x="1355" y="677" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r4c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;✅ TSC 不跳变 — 时间连续&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="250" x="1515" y="677" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r5c1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;新内存分配&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="160" x="1355" y="703" as="geometry" />
+        </mxCell>
+        <mxCell id="why_r5c2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#bdbdbd;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#2e7d32&quot;&gt;✅ 512GB 恒等映射全覆盖&lt;/font&gt;" vertex="1">
+          <mxGeometry height="26" width="250" x="1515" y="703" as="geometry" />
+        </mxCell>
+        <mxCell id="why_conclusion" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#1a237e&quot;&gt;&lt;b&gt;结论: OS 没有任何手段能检测到虚拟化层的存在&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="18" width="410" x="1355" y="735" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_vs_arrow" edge="1" parent="1" style="endArrow=none;html=1;strokeColor=#455a64;strokeWidth=1;dashed=1;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="920" y="318" as="sourcePoint" />
+            <mxPoint x="1300" y="318" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="summary_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0f2f1;strokeColor=#00695c;strokeWidth=2;arcSize=5;shadow=1;" value="" vertex="1">
+          <mxGeometry height="60" width="820" x="60" y="990" as="geometry" />
+        </mxCell>
+        <mxCell id="summary_text" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:11px;&quot; color=&quot;#004d40&quot;&gt;&lt;b&gt;核心原理总结:&lt;/b&gt; 后加载虚拟化 = 在已运行的 OS 下方插入一层&lt;b&gt;透明的&lt;/b&gt;地址翻译层。恒等映射 (GPA==HPA) 保证插入前后&lt;b&gt;所有内存地址的翻译结果不变&lt;/b&gt;，&lt;br&gt;因此 OS 和所有应用程序完全无法察觉。这就是 &lt;b&gt;Blue Pill&lt;/b&gt; 技术的核心 — 不是把 OS 搬进虚拟机，而是在 OS 脚下悄悄铺了一层透明地板。&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="800" x="70" y="995" as="geometry" />
+        </mxCell>
+        <mxCell id="arch_ref" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#78909c&quot;&gt;&lt;b&gt;VMX Hypervisor Toolbox&lt;/b&gt; — Intel VT-x (EPT) / AMD-V (NPT) dual-backend architecture&lt;br&gt;Source: driver/ept.c · driver/npt.c · driver/vmx_init.c · driver/svm_init.c · driver/hv_mem.c&lt;/font&gt;" vertex="1">
+          <mxGeometry height="30" width="440" x="900" y="775" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

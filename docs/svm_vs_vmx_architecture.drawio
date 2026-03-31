@@ -1,0 +1,288 @@
+<mxfile host="app.diagrams.net" modified="2026-03-31T00:00:00.000Z" agent="Claude Code" version="24.0.0" type="device">
+  <diagram id="svm-vs-vmx-arch" name="AMD SVM vs Intel VMX Architecture">
+    <mxGraphModel dx="1900" dy="1350" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1350" math="0" shadow="1" background="#FFFFFF">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- ==================== TITLE ==================== -->
+        <mxCell id="title1" value="VMX Hypervisor Toolbox — AMD SVM vs Intel VMX 双平台抽象架构" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=22;fontFamily=Segoe UI;fontStyle=1;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="250" y="15" width="1400" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="title2" value="hv_ops 统一接口 · VMCB vs VMCS · NPT vs EPT · 双后端透明切换" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=13;fontFamily=Segoe UI;fontStyle=2;fontColor=#6c6c8a;" vertex="1" parent="1">
+          <mxGeometry x="400" y="52" width="1100" height="25" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== DETECTION FLOW (TOP) ==================== -->
+        <mxCell id="detect_bg" value="" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#cccccc;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="85" width="1420" height="52" as="geometry"/>
+        </mxCell>
+        <mxCell id="det1" value="&lt;b&gt;DriverEntry&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e6e6e6;strokeColor=#999999;fontFamily=Segoe UI;fontSize=11;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="93" width="110" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="det2" value="&lt;b&gt;HvDetectCpuVendor()&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Segoe UI;fontSize=11;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="410" y="93" width="175" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="det3" value="&lt;b&gt;CPUID&lt;/b&gt;&lt;br&gt;Vendor String" style="rhombus;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Segoe UI;fontSize=10;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="625" y="82" width="130" height="58" as="geometry"/>
+        </mxCell>
+        <mxCell id="det4" value="&lt;font color=&quot;#b85450&quot;&gt;&lt;b&gt;&quot;GenuineIntel&quot;&lt;/b&gt;&lt;/font&gt;&lt;br&gt;→ g_HvOps = &amp;amp;VmxOps" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=10;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="795" y="85" width="195" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="det5" value="&lt;font color=&quot;#0e7a8a&quot;&gt;&lt;b&gt;&quot;AuthenticAMD&quot;&lt;/b&gt;&lt;/font&gt;&lt;br&gt;→ g_HvOps = &amp;amp;SvmOps" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Segoe UI;fontSize=10;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="85" width="195" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="det_label" value="&lt;b&gt;hv_detect.c&lt;/b&gt;" style="text;html=1;fontSize=9;fontFamily=Segoe UI;fontColor=#888888;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="95" width="80" height="20" as="geometry"/>
+        </mxCell>
+        <!-- Detection arrows -->
+        <mxCell id="da1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#999999;strokeWidth=1.5;" edge="1" source="det1" target="det2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="da2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#999999;strokeWidth=1.5;" edge="1" source="det2" target="det3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="da3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=1.5;" edge="1" source="det3" target="det4" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="da4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=1.5;" edge="1" source="det3" target="det5" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- ==================== CONSUMER MODULES (ABOVE CENTER) ==================== -->
+        <mxCell id="mod_bg" value="" style="rounded=1;whiteSpace=wrap;fillColor=#f3e8ff;strokeColor=#b388d9;shadow=1;arcSize=8;dashed=1;dashPattern=5 3;" vertex="1" parent="1">
+          <mxGeometry x="470" y="150" width="960" height="62" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod_title" value="Consumer Modules — 通过 hv_ops 抽象层调用" style="text;html=1;fontSize=10;fontFamily=Segoe UI;fontColor=#7b4faa;fontStyle=3;" vertex="1" parent="1">
+          <mxGeometry x="480" y="151" width="280" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod1" value="🛡️ Anti-Anti-Debug&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;anti_anti_debug.c&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Segoe UI;fontSize=9;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="480" y="170" width="125" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod2" value="🪝 Hook Framework&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;hv_hook.c&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Segoe UI;fontSize=9;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="615" y="170" width="125" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod3" value="💾 Memory Engine&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;hv_mem.c&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Segoe UI;fontSize=9;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="750" y="170" width="125" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod4" value="📋 SSDT Monitor&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;ssdt.c&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Segoe UI;fontSize=9;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="885" y="170" width="125" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod5" value="📋 Shadow SSDT&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;shadow_ssdt.c&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Segoe UI;fontSize=9;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="170" width="125" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="mod6" value="👤 Process Track&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;process.c&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#e1d5e7;strokeColor=#9673a6;fontFamily=Segoe UI;fontSize=9;fontColor=#333333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1155" y="170" width="120" height="36" as="geometry"/>
+        </mxCell>
+        <!-- Arrows from modules to hv_ops -->
+        <mxCell id="ma1" style="rounded=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" source="mod1" target="hvops_box" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma2" style="rounded=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" source="mod2" target="hvops_box" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma3" style="rounded=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" source="mod3" target="hvops_box" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma4" style="rounded=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" source="mod4" target="hvops_box" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma5" style="rounded=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" source="mod5" target="hvops_box" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma6" style="rounded=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;endArrow=block;endFill=1;" edge="1" source="mod6" target="hvops_box" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- ==================== CENTER - HV_OPS ABSTRACTION LAYER ==================== -->
+        <mxCell id="hvops_box" value="" style="rounded=1;whiteSpace=wrap;fillColor=#7b2d8e;strokeColor=#5c1a6e;shadow=1;arcSize=8;gradientColor=#9b4dca;gradientDirection=south;" vertex="1" parent="1">
+          <mxGeometry x="600" y="225" width="700" height="230" as="geometry"/>
+        </mxCell>
+        <mxCell id="hvops_title" value="hv_ops 抽象层 — HV_OPS vtable (hv_ops.h)" style="text;html=1;align=center;fontSize=15;fontFamily=Segoe UI;fontStyle=1;fontColor=#ffffff;" vertex="1" parent="1">
+          <mxGeometry x="700" y="230" width="500" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="hvops_ptr" value="&lt;font color=&quot;#ffd700&quot;&gt;&lt;b&gt;Global:&lt;/b&gt;&lt;/font&gt; &lt;font face=&quot;Consolas&quot;&gt;HV_OPS* g_HvOps;&lt;/font&gt;" style="text;html=1;align=center;fontSize=11;fontFamily=Segoe UI;fontColor=#e0c0ff;" vertex="1" parent="1">
+          <mxGeometry x="740" y="254" width="420" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Methods list - left column -->
+        <mxCell id="hvops_m1" value="&lt;font face=&quot;Consolas&quot; size=&quot;1&quot;&gt;&lt;font style=&quot;font-size: 9px;&quot;&gt;BOOLEAN (*IsSupported)(VOID);&lt;br&gt;NTSTATUS (*Initialize)(PVOID ctx);&lt;br&gt;VOID (*Terminate)(VOID);&lt;br&gt;ULONG64 (*ReadGuestRip)(PVOID);&lt;br&gt;ULONG64 (*ReadGuestRsp)(PVOID);&lt;br&gt;ULONG64 (*ReadGuestCr3)(PVOID);&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=left;fontSize=9;fontFamily=Consolas;fontColor=#e8d5f5;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="620" y="278" width="225" height="90" as="geometry"/>
+        </mxCell>
+        <!-- Methods list - right column -->
+        <mxCell id="hvops_m2" value="&lt;font face=&quot;Consolas&quot; size=&quot;1&quot;&gt;&lt;font style=&quot;font-size: 9px;&quot;&gt;VOID (*WriteGuestRip)(PVOID, ULONG64);&lt;br&gt;VOID (*WriteGuestRsp)(PVOID, ULONG64);&lt;br&gt;ULONG64 (*ReadExitReason)(PVOID);&lt;br&gt;ULONG64 (*ReadExitQualification)(PVOID);&lt;br&gt;VOID (*AdvanceGuestRip)(PVOID);&lt;br&gt;VOID (*InjectException)(PVOID, ...);&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=left;fontSize=9;fontFamily=Consolas;fontColor=#e8d5f5;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="850" y="278" width="280" height="90" as="geometry"/>
+        </mxCell>
+        <!-- Methods list - center bottom -->
+        <mxCell id="hvops_m3" value="&lt;font face=&quot;Consolas&quot; size=&quot;1&quot;&gt;&lt;font style=&quot;font-size: 9px;&quot;&gt;NTSTATUS (*HookFunction)(ULONG64 target, PVOID hook, ...);&amp;nbsp; &amp;nbsp;VOID (*UnhookFunction)(HANDLE id);&lt;br&gt;VOID (*EnableSingleStep)(PVOID ctx);&amp;nbsp; &amp;nbsp;VOID (*DisableSingleStep)(PVOID ctx);&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Consolas;fontColor=#e8d5f5;" vertex="1" parent="1">
+          <mxGeometry x="620" y="370" width="660" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Convenience macros -->
+        <mxCell id="hvops_macro" value="" style="rounded=1;whiteSpace=wrap;fillColor=#5c1a6e;strokeColor=#4a1060;arcSize=15;" vertex="1" parent="1">
+          <mxGeometry x="650" y="405" width="600" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="hvops_macro_text" value="&lt;b&gt;Convenience Macros:&lt;/b&gt;&amp;nbsp; &lt;font face=&quot;Consolas&quot;&gt;HvReadGuestRip()&lt;/font&gt; = &lt;font face=&quot;Consolas&quot;&gt;g_HvOps-&amp;gt;ReadGuestRip()&lt;/font&gt; &amp;nbsp;|&amp;nbsp; &lt;font face=&quot;Consolas&quot;&gt;HvHookFunction()&lt;/font&gt; = &lt;font face=&quot;Consolas&quot;&gt;g_HvOps-&amp;gt;HookFunction()&lt;/font&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontColor=#ffd700;" vertex="1" parent="1">
+          <mxGeometry x="655" y="410" width="590" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== LEFT SIDE - INTEL VMX BACKEND ==================== -->
+        <mxCell id="vmx_box" value="" style="rounded=1;whiteSpace=wrap;fillColor=#fce4e4;strokeColor=#c0392b;shadow=1;arcSize=6;gradientColor=#fff0f0;gradientDirection=south;" vertex="1" parent="1">
+          <mxGeometry x="20" y="225" width="555" height="340" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmx_title" value="Intel VMX Backend" style="text;html=1;align=center;fontSize=16;fontFamily=Segoe UI;fontStyle=1;fontColor=#c0392b;" vertex="1" parent="1">
+          <mxGeometry x="140" y="230" width="310" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmx_files" value="&lt;i&gt;vmx_init.c · vmx_exit.c · vmx_asm.asm · ept.c&lt;/i&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="100" y="254" width="380" height="16" as="geometry"/>
+        </mxCell>
+
+        <!-- VMX Properties table -->
+        <mxCell id="vmx_tbl" value="&lt;table style=&quot;font-family:Segoe UI;font-size:10px;color:#333;&quot; cellpadding=&quot;3&quot; cellspacing=&quot;0&quot;&gt;&lt;tr style=&quot;background:#e8b4b4;&quot;&gt;&lt;td&gt;&lt;b&gt;特性&lt;/b&gt;&lt;/td&gt;&lt;td&gt;&lt;b&gt;Intel VMX 实现&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Control Structure&lt;/td&gt;&lt;td&gt;&lt;b&gt;VMCS&lt;/b&gt; (VMREAD / VMWRITE)&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#fff5f5;&quot;&gt;&lt;td&gt;Enter Guest&lt;/td&gt;&lt;td&gt;&lt;b&gt;VMLAUNCH / VMRESUME&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;State Save&lt;/td&gt;&lt;td&gt;Automatic (VMCS fields)&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#fff5f5;&quot;&gt;&lt;td&gt;Page Tables&lt;/td&gt;&lt;td&gt;&lt;b&gt;EPT&lt;/b&gt; (Extended Page Tables)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;TLB Management&lt;/td&gt;&lt;td&gt;&lt;b&gt;INVEPT / INVVPID&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#fff5f5;&quot;&gt;&lt;td&gt;Single-step&lt;/td&gt;&lt;td&gt;&lt;b&gt;MTF&lt;/b&gt; (Monitor Trap Flag)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Execute-Only Pages&lt;/td&gt;&lt;td&gt;&lt;font color=&quot;#27ae60&quot;&gt;✅ Supported (R=0,W=0,X=1)&lt;/font&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#fff5f5;&quot;&gt;&lt;td&gt;Hook Strategy&lt;/td&gt;&lt;td&gt;X-Only → Hook Page&lt;br&gt;R/W → Original Page&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Integrity Check 抗性&lt;/td&gt;&lt;td&gt;&lt;font color=&quot;#27ae60&quot;&gt;&lt;b&gt;极高&lt;/b&gt;&lt;/font&gt; (读取看原始)&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#fff5f5;&quot;&gt;&lt;td&gt;Nested Virt&lt;/td&gt;&lt;td&gt;eVMCS + VP Assist Page&lt;br&gt;+ Clean Fields&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;overflow=fill;rounded=1;fillColor=#ffffff;strokeColor=#d4a0a0;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="275" width="520" height="280" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow from VMX to hv_ops -->
+        <mxCell id="vmx_arrow" value="implements" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#c0392b;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Segoe UI;fontSize=9;fontColor=#c0392b;fontStyle=2;labelBackgroundColor=#ffffff;" edge="1" source="vmx_box" target="hvops_box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== RIGHT SIDE - AMD SVM BACKEND ==================== -->
+        <mxCell id="svm_box" value="" style="rounded=1;whiteSpace=wrap;fillColor=#daeef7;strokeColor=#1a8a9e;shadow=1;arcSize=6;gradientColor=#f0faff;gradientDirection=south;" vertex="1" parent="1">
+          <mxGeometry x="1325" y="225" width="555" height="340" as="geometry"/>
+        </mxCell>
+        <mxCell id="svm_title" value="AMD SVM Backend" style="text;html=1;align=center;fontSize=16;fontFamily=Segoe UI;fontStyle=1;fontColor=#1a8a9e;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="230" width="310" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="svm_files" value="&lt;i&gt;svm_init.c · svm_exit.c · svm_asm.asm · npt.c&lt;/i&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="1410" y="254" width="380" height="16" as="geometry"/>
+        </mxCell>
+
+        <!-- SVM Properties table -->
+        <mxCell id="svm_tbl" value="&lt;table style=&quot;font-family:Segoe UI;font-size:10px;color:#333;&quot; cellpadding=&quot;3&quot; cellspacing=&quot;0&quot;&gt;&lt;tr style=&quot;background:#a8d8e8;&quot;&gt;&lt;td&gt;&lt;b&gt;特性&lt;/b&gt;&lt;/td&gt;&lt;td&gt;&lt;b&gt;AMD SVM 实现&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Control Structure&lt;/td&gt;&lt;td&gt;&lt;b&gt;VMCB&lt;/b&gt; (direct memory access!)&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#eef8fc;&quot;&gt;&lt;td&gt;Enter Guest&lt;/td&gt;&lt;td&gt;&lt;b&gt;VMRUN&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;State Save&lt;/td&gt;&lt;td&gt;&lt;b&gt;VMSAVE / VMLOAD&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#eef8fc;&quot;&gt;&lt;td&gt;Page Tables&lt;/td&gt;&lt;td&gt;&lt;b&gt;NPT&lt;/b&gt; (Nested Page Tables)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;TLB Management&lt;/td&gt;&lt;td&gt;&lt;b&gt;ASID + TLB Control&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#eef8fc;&quot;&gt;&lt;td&gt;Single-step&lt;/td&gt;&lt;td&gt;&lt;b&gt;RFLAGS.TF + #DB intercept&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Execute-Only Pages&lt;/td&gt;&lt;td&gt;&lt;font color=&quot;#c0392b&quot;&gt;❌ NOT Supported&lt;/font&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#eef8fc;&quot;&gt;&lt;td&gt;Hook Strategy&lt;/td&gt;&lt;td&gt;R+X → Hook Page&lt;br&gt;Write → Orig Page + TF&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;Integrity Check 抗性&lt;/td&gt;&lt;td&gt;&lt;font color=&quot;#e67e22&quot;&gt;&lt;b&gt;中等&lt;/b&gt;&lt;/font&gt; (读取看 Hook)&lt;/td&gt;&lt;/tr&gt;&lt;tr style=&quot;background:#eef8fc;&quot;&gt;&lt;td&gt;Nested Virt&lt;/td&gt;&lt;td&gt;eVMCB (offset 0x3E0)&lt;br&gt;+ Clean Bit 31&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;overflow=fill;rounded=1;fillColor=#ffffff;strokeColor=#a0d4e4;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="275" width="520" height="280" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow from SVM to hv_ops -->
+        <mxCell id="svm_arrow" value="implements" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#1a8a9e;strokeWidth=2;endArrow=block;endFill=1;fontFamily=Segoe UI;fontSize=9;fontColor=#1a8a9e;fontStyle=2;labelBackgroundColor=#ffffff;" edge="1" source="svm_box" target="hvops_box" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== BOTTOM LEFT - VMCS STRUCTURE ==================== -->
+        <mxCell id="vmcs_box" value="" style="rounded=1;whiteSpace=wrap;fillColor=#fff0f0;strokeColor=#c0392b;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="20" y="585" width="555" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcs_title" value="VMCS Structure (4KB)" style="text;html=1;align=center;fontSize=14;fontFamily=Segoe UI;fontStyle=1;fontColor=#c0392b;" vertex="1" parent="1">
+          <mxGeometry x="150" y="590" width="290" height="22" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcs_access" value="&lt;font color=&quot;#c0392b&quot;&gt;&lt;b&gt;Access:&lt;/b&gt; VMREAD / VMWRITE instructions (or eVMCS memory for nested)&lt;/font&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="60" y="612" width="470" height="16" as="geometry"/>
+        </mxCell>
+        <!-- VMCS fields -->
+        <mxCell id="vmcs_f1" value="&lt;b&gt;Guest State Area&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;CR0-4, DR7, RSP, RIP,&lt;br&gt;RFLAGS, Segments, EFER&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="35" y="635" width="125" height="52" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcs_f2" value="&lt;b&gt;Host State Area&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;CR0-4, RSP, RIP,&lt;br&gt;Segments, SYSENTER&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="170" y="635" width="125" height="52" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcs_f3" value="&lt;b&gt;VM-Execution Ctls&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Pin/Proc/2nd Proc,&lt;br&gt;Exception Bitmap, EPT&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="305" y="635" width="125" height="52" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcs_f4" value="&lt;b&gt;VM-Exit Info&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Exit Reason, Qual,&lt;br&gt;Instr Len, Intr Info&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="635" width="120" height="52" as="geometry"/>
+        </mxCell>
+        <!-- eVMCS note -->
+        <mxCell id="vmcs_note" value="💡 &lt;b&gt;Enlightened VMCS:&lt;/b&gt; Memory-mapped for nested (like VMCB!) — Clean Fields skip unchanged VMCS areas" style="text;html=1;align=center;fontSize=8;fontFamily=Segoe UI;fontColor=#b85450;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="700" width="520" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== BOTTOM RIGHT - VMCB STRUCTURE ==================== -->
+        <mxCell id="vmcb_box" value="" style="rounded=1;whiteSpace=wrap;fillColor=#eef8fc;strokeColor=#1a8a9e;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1325" y="585" width="555" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcb_title" value="VMCB Structure (4KB)" style="text;html=1;align=center;fontSize=14;fontFamily=Segoe UI;fontStyle=1;fontColor=#1a8a9e;" vertex="1" parent="1">
+          <mxGeometry x="1450" y="590" width="290" height="22" as="geometry"/>
+        </mxCell>
+        <mxCell id="vmcb_access" value="&lt;font color=&quot;#1a8a9e&quot;&gt;&lt;b&gt;Access:&lt;/b&gt; Direct memory read/write — no special instructions needed!&lt;/font&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1370" y="612" width="470" height="16" as="geometry"/>
+        </mxCell>
+        <!-- VMCB Control Area -->
+        <mxCell id="vmcb_f1" value="&lt;b&gt;Control Area&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;0x000 — 0x3FF&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;intercepts, exit_code,&lt;br&gt;nested_ctl, event_inj,&lt;br&gt;N_CR3, TLB_CONTROL&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1345" y="632" width="240" height="70" as="geometry"/>
+        </mxCell>
+        <!-- VMCB Save Area -->
+        <mxCell id="vmcb_f2" value="&lt;b&gt;State Save Area&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;0x400 — 0xFFF&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px&quot;&gt;Segments, CRs, DRs,&lt;br&gt;RFLAGS, RIP, RSP, RAX,&lt;br&gt;EFER, SYSENTER, PAT&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1615" y="632" width="240" height="70" as="geometry"/>
+        </mxCell>
+        <!-- eVMCB note -->
+        <mxCell id="vmcb_note" value="💡 &lt;b&gt;Enlightened VMCB:&lt;/b&gt; offset 0x3E0 enables nested optimization — Clean Bit 31 skips TLB flush" style="text;html=1;align=center;fontSize=8;fontFamily=Segoe UI;fontColor=#1a8a9e;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="1345" y="710" width="520" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== BOTTOM CENTER - NPT vs EPT HOOK STRATEGY ==================== -->
+        <mxCell id="hook_bg" value="" style="rounded=1;whiteSpace=wrap;fillColor=#f9f4ff;strokeColor=#7b2d8e;shadow=1;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="590" y="475" width="720" height="300" as="geometry"/>
+        </mxCell>
+        <mxCell id="hook_title" value="NPT vs EPT Hook 策略对比" style="text;html=1;align=center;fontSize=14;fontFamily=Segoe UI;fontStyle=1;fontColor=#7b2d8e;" vertex="1" parent="1">
+          <mxGeometry x="760" y="480" width="380" height="24" as="geometry"/>
+        </mxCell>
+
+        <!-- EPT Hook Flow (left) -->
+        <mxCell id="ept_hook_title" value="&lt;font color=&quot;#c0392b&quot;&gt;&lt;b&gt;EPT Hook Flow (Intel)&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;fontSize=11;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="615" y="508" width="330" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="ept_s1" value="&lt;b&gt;Normal&lt;/b&gt;&lt;br&gt;Set X-Only&lt;br&gt;(Hook Page)" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="532" width="100" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ept_s2" value="&lt;b&gt;Read/Write&lt;/b&gt;&lt;br&gt;EPT Violation →&lt;br&gt;R+W (Orig) + MTF" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="735" y="532" width="110" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ept_s3" value="&lt;b&gt;MTF Exit&lt;/b&gt;&lt;br&gt;Restore X-Only&lt;br&gt;(Hook Page)" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="860" y="532" width="100" height="50" as="geometry"/>
+        </mxCell>
+        <!-- EPT arrows -->
+        <mxCell id="epta1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="ept_s1" target="ept_s2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="epta2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="ept_s2" target="ept_s3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="epta3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=1;dashed=1;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" source="ept_s3" target="ept_s1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="910" y="598"/><mxPoint x="670" y="598"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ept_loop" value="&lt;font style=&quot;font-size:8px&quot;&gt;loop&lt;/font&gt;" style="text;html=1;fontSize=8;fontFamily=Segoe UI;fontColor=#b85450;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="775" y="595" width="30" height="14" as="geometry"/>
+        </mxCell>
+
+        <!-- EPT Advantage -->
+        <mxCell id="ept_adv" value="&lt;font color=&quot;#27ae60&quot;&gt;✅ 读取始终看到原始代码 → 极高隐蔽性&lt;/font&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="612" width="300" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Separator -->
+        <mxCell id="hook_sep" value="" style="line;strokeWidth=1;strokeColor=#c8b0d9;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="615" y="640" width="670" height="1" as="geometry"/>
+        </mxCell>
+
+        <!-- NPT Hook Flow (right / bottom) -->
+        <mxCell id="npt_hook_title" value="&lt;font color=&quot;#1a8a9e&quot;&gt;&lt;b&gt;NPT Hook Flow (AMD)&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;fontSize=11;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="615" y="648" width="330" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="npt_s1" value="&lt;b&gt;Normal&lt;/b&gt;&lt;br&gt;Set R+X&lt;br&gt;(Hook Page)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="672" width="100" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="npt_s2" value="&lt;b&gt;Write&lt;/b&gt;&lt;br&gt;#NPF →&lt;br&gt;R+W+X (Orig) + TF" style="rounded=1;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="735" y="672" width="110" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="npt_s3" value="&lt;b&gt;#DB Exit&lt;/b&gt;&lt;br&gt;Restore R+X&lt;br&gt;(Hook Page)" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Segoe UI;fontSize=9;fontColor=#333;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="860" y="672" width="100" height="50" as="geometry"/>
+        </mxCell>
+        <!-- NPT arrows -->
+        <mxCell id="npta1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="npt_s1" target="npt_s2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="npta2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" source="npt_s2" target="npt_s3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="npta3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=1;dashed=1;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" source="npt_s3" target="npt_s1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points"><mxPoint x="910" y="738"/><mxPoint x="670" y="738"/></Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="npt_loop" value="&lt;font style=&quot;font-size:8px&quot;&gt;loop&lt;/font&gt;" style="text;html=1;fontSize=8;fontFamily=Segoe UI;fontColor=#6c8ebf;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="775" y="735" width="30" height="14" as="geometry"/>
+        </mxCell>
+
+        <!-- NPT Disadvantage -->
+        <mxCell id="npt_dis" value="&lt;font color=&quot;#e67e22&quot;&gt;⚠️ 读取看到 Hook 代码 → 需额外伪装策略&lt;/font&gt;" style="text;html=1;align=center;fontSize=9;fontFamily=Segoe UI;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="752" width="300" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Permission Legend (right side of hook box) -->
+        <mxCell id="perm_legend" value="&lt;table style=&quot;font-family:Segoe UI;font-size:9px;color:#555;&quot; cellpadding=&quot;2&quot;&gt;&lt;tr&gt;&lt;td colspan=&quot;2&quot;&gt;&lt;b style=&quot;color:#7b2d8e;&quot;&gt;Permission Key&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;R&lt;/b&gt;&lt;/td&gt;&lt;td&gt;Read&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;W&lt;/b&gt;&lt;/td&gt;&lt;td&gt;Write&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;X&lt;/b&gt;&lt;/td&gt;&lt;td&gt;Execute&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;MTF&lt;/b&gt;&lt;/td&gt;&lt;td&gt;Monitor Trap Flag (Intel)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;TF&lt;/b&gt;&lt;/td&gt;&lt;td&gt;RFLAGS.TF Trap Flag (AMD)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;#NPF&lt;/b&gt;&lt;/td&gt;&lt;td&gt;Nested Page Fault&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;b&gt;#DB&lt;/b&gt;&lt;/td&gt;&lt;td&gt;Debug Exception&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;overflow=fill;rounded=1;fillColor=#ffffff;strokeColor=#d0b8e0;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="505" width="290" height="160" as="geometry"/>
+        </mxCell>
+
+        <!-- Key Difference Summary -->
+        <mxCell id="diff_summary" value="&lt;table style=&quot;font-family:Segoe UI;font-size:9px;color:#555;&quot; cellpadding=&quot;2&quot;&gt;&lt;tr&gt;&lt;td colspan=&quot;2&quot;&gt;&lt;b style=&quot;color:#7b2d8e;&quot;&gt;核心差异总结&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;font color=&quot;#c0392b&quot;&gt;●&lt;/font&gt; Intel&lt;/td&gt;&lt;td&gt;Execute-Only 页面 → 读写分离完美&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;font color=&quot;#1a8a9e&quot;&gt;●&lt;/font&gt; AMD&lt;/td&gt;&lt;td&gt;无 X-Only → 读取暴露 Hook 代码&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;font color=&quot;#c0392b&quot;&gt;●&lt;/font&gt; Intel&lt;/td&gt;&lt;td&gt;MTF 硬件单步 → 精确高效&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;font color=&quot;#1a8a9e&quot;&gt;●&lt;/font&gt; AMD&lt;/td&gt;&lt;td&gt;RFLAGS.TF 软件模拟 → 需 #DB 拦截&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;&lt;font color=&quot;#7b2d8e&quot;&gt;●&lt;/font&gt; Both&lt;/td&gt;&lt;td&gt;hv_ops 抽象层屏蔽差异，上层透明&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;overflow=fill;rounded=1;fillColor=#ffffff;strokeColor=#d0b8e0;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="675" width="290" height="95" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

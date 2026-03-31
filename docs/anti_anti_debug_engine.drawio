@@ -1,0 +1,322 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-03-31T00:00:00.000Z" agent="Claude" version="24.0.0" type="device">
+  <diagram id="aad-engine" name="Anti-Anti-Debug Engine">
+    <mxGraphModel dx="1800" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1350" background="#ffffff" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="&lt;font style=&quot;font-size:22px;&quot;&gt;&lt;b&gt;VMX Hypervisor Toolbox — 反反调试引擎全景架构&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="300" y="12" width="1300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="&lt;font color=&quot;#666&quot; style=&quot;font-size:11px;&quot;&gt;10 种独立反检测技术 · 双层拦截架构 (VM-Exit Handler + EPT Hook) · 按进程独立配置 · 位掩码标志组合&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="350" y="44" width="1200" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!--  Top: Target Process + Flag Bitmask                              -->
+        <!-- ================================================================ -->
+        <mxCell id="target_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=2;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="30" y="75" width="1840" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="target_title" value="&lt;b&gt;用户配置层&lt;/b&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#666&quot;&gt; — VMXToolbox.exe --pid &amp;lt;PID&amp;gt; --hide-*&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#1565c0;" vertex="1" parent="1">
+          <mxGeometry x="45" y="80" width="400" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="flag0" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;DEBUGGER&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 0&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="50" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag1" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;HWBP&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 1&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="142" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag2" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;TIMING&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 2&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="234" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag3" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;CPUID&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 3&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="326" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag4" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;SYSINFO&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 4&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="418" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag5" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;EXCEPTIONS&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 5&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="510" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag6" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;NTCLOSE&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 6&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="602" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag7" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;THREADINFO&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 7&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="694" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag8" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;HEAP&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 8&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="786" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag9" value="&lt;b&gt;AAD_HIDE_&lt;br&gt;PARENT&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;bit 9&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="878" y="105" width="82" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flag_all" value="&lt;b&gt;AAD_HIDE_ALL&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;0xFFFFFFFF&lt;br&gt;--hide-all&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#90caf9;strokeColor=#0d47a1;strokeWidth=2;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=12;" vertex="1" parent="1">
+          <mxGeometry x="985" y="105" width="95" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pid_filter" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;进程 CR3 快速匹配&lt;/b&gt;&lt;br&gt;ProcessFindByCr3() → 线性扫描&lt;br&gt;MAX_TARGET = 16 · 无锁读取&lt;br&gt;高 IRQL 安全&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3949ab;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="100" width="190" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!--  Layer 1: VM-Exit Handler (Ring -1)                              -->
+        <!-- ================================================================ -->
+        <mxCell id="layer1_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="185" width="1840" height="350" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1_title" value="&lt;font style=&quot;font-size:13px;&quot;&gt;&lt;b&gt;Layer 1: VM-Exit Handler 拦截层&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#888&quot;&gt; — Ring -1 硬件级拦截，CPU 敏感指令自动触发 VM-Exit&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontColor=#c62828;" vertex="1" parent="1">
+          <mxGeometry x="45" y="190" width="700" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- CPUID -->
+        <mxCell id="cpuid_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#e53935;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="45" y="220" width="280" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="cpuid_title" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;① CPUID 隐藏&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt; (AAD_HIDE_CPUID)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="55" y="225" width="260" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="cpuid_detect" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;反调试检测:&lt;/b&gt;&lt;br&gt;CPUID Leaf 1: ECX[31]&lt;br&gt;= Hypervisor Present?&lt;br&gt;Leaf 0x40000000:&lt;br&gt;HV 厂商字符串?&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="248" width="120" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="cpuid_fake" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;伪造策略:&lt;/b&gt;&lt;br&gt;Leaf 1: ECX &amp;= ~(1&amp;lt;&amp;lt;31)&lt;br&gt;清除 HV Present 位&lt;br&gt;Leaf 0x40000000~FF:&lt;br&gt;EAX=EBX=ECX=EDX=0&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="190" y="248" width="125" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="cpuid_arrow" style="rounded=1;html=1;strokeColor=#e53935;strokeWidth=1.5;" edge="1" source="cpuid_detect" target="cpuid_fake" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="cpuid_note" value="&lt;font style=&quot;font-size:7px;&quot; color=&quot;#c62828&quot;&gt;⚠ 嵌套模式下自动禁用&lt;br&gt;(保护 L0 Hyper-V 接口)&lt;/font&gt;" style="text;html=1;align=center;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="55" y="330" width="160" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- DR Registers -->
+        <mxCell id="dr_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#e53935;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="340" y="220" width="280" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="dr_title" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;② DR 寄存器伪造&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt; (AAD_HIDE_HWBP)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="350" y="225" width="260" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="dr_detect" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;反调试检测:&lt;/b&gt;&lt;br&gt;读取 DR0-DR3:&lt;br&gt;有硬件断点地址?&lt;br&gt;读取 DR7:&lt;br&gt;断点启用位?&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="350" y="248" width="120" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="dr_fake" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;伪造策略:&lt;/b&gt;&lt;br&gt;DR0-DR3 → 返回 0&lt;br&gt;DR6 → 0xFFFF0FF0&lt;br&gt;DR7 → 0x400 (默认)&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;写入正常执行!&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="485" y="248" width="125" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="dr_arrow" style="rounded=1;html=1;strokeColor=#e53935;strokeWidth=1.5;" edge="1" source="dr_detect" target="dr_fake" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="dr_note" value="&lt;font style=&quot;font-size:7px;&quot; color=&quot;#2e7d32&quot;&gt;断点仍然工作，只是读取时隐藏&lt;/font&gt;" style="text;html=1;align=center;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="350" y="330" width="200" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- RDTSC -->
+        <mxCell id="rdtsc_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#e53935;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="635" y="220" width="280" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="rdtsc_title" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;③ RDTSC 时间补偿&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt; (AAD_HIDE_TIMING)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="645" y="225" width="260" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="rdtsc_detect" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;反调试检测:&lt;/b&gt;&lt;br&gt;RDTSC/RDTSCP 测量&lt;br&gt;代码执行时间差&lt;br&gt;调试暂停 → TSC 跳变&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="645" y="248" width="125" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="rdtsc_fake" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;伪造策略:&lt;/b&gt;&lt;br&gt;TSC -= TscOffset&lt;br&gt;减去累计暂停时间&lt;br&gt;Pause: 记录开始 TSC&lt;br&gt;Resume: 累加差值&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="785" y="248" width="120" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="rdtsc_arrow" style="rounded=1;html=1;strokeColor=#e53935;strokeWidth=1.5;" edge="1" source="rdtsc_detect" target="rdtsc_fake" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Exception -->
+        <mxCell id="exc_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#e53935;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="930" y="220" width="280" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="exc_title" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;④ 异常行为标准化&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt; (AAD_HIDE_EXCEPTIONS)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="940" y="225" width="260" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="exc_detect" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;反调试检测:&lt;/b&gt;&lt;br&gt;INT 2D / INT 3 行为差异&lt;br&gt;#DB / #BP 异常处理&lt;br&gt;在调试器下表现不同&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="940" y="248" width="125" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="exc_fake" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;伪造策略:&lt;/b&gt;&lt;br&gt;拦截 → 重新注入&lt;br&gt;VM-Entry Injection&lt;br&gt;让 Guest SEH/VEH&lt;br&gt;正常处理异常&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="248" width="120" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="exc_arrow" style="rounded=1;html=1;strokeColor=#e53935;strokeWidth=1.5;" edge="1" source="exc_detect" target="exc_fake" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- MSR (IA32_DEBUGCTL) -->
+        <mxCell id="msr_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#e53935;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1225" y="220" width="280" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="msr_title" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;⑤ MSR 调试控制伪造&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt; (IA32_DEBUGCTL)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1235" y="225" width="260" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="msr_detect" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;反调试检测:&lt;/b&gt;&lt;br&gt;RDMSR IA32_DEBUGCTL&lt;br&gt;检查 LBR/BTF/TR 位&lt;br&gt;(调试器会启用这些)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1235" y="248" width="125" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="msr_fake" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;伪造策略:&lt;/b&gt;&lt;br&gt;Value &amp;= ~0x43&lt;br&gt;清除 bit 0 (LBR)&lt;br&gt;清除 bit 1 (BTF)&lt;br&gt;清除 bit 6 (TR)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1375" y="248" width="120" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="msr_arrow" style="rounded=1;html=1;strokeColor=#e53935;strokeWidth=1.5;" edge="1" source="msr_detect" target="msr_fake" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CR3 Process ID (shared) -->
+        <mxCell id="cr3_check" value="&lt;b&gt;VM-Exit 中 CR3 进程识别&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;每次 VM-Exit → 读取 Guest CR3&lt;br&gt;→ ProcessFindByCr3() → 检查 Flags 位&lt;br&gt;→ 只对目标进程启用伪造&lt;/font&gt;" style="shape=mxgraph.flowchart.decision;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=2;fontFamily=Segoe UI;fontSize=9;shadow=1;size=0.12;" vertex="1" parent="1">
+          <mxGeometry x="1535" y="235" width="200" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 1 mechanism label -->
+        <mxCell id="layer1_mech" value="&lt;table style=&quot;font-size:8px;font-family:Segoe UI;border-collapse:collapse;&quot;&gt;&lt;tr&gt;&lt;td style=&quot;background:#c62828;color:white;padding:3px 8px;&quot; colspan=3&gt;&lt;b&gt;VM-Exit 触发机制&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;CPUID&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;无条件 Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;AadHandleCpuid()&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;MOV DR&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;DR Exiting 位&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;AadHandleDrAccess()&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;RDTSC/P&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;RDTSC Exiting 位&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;AadHandleRdtsc()&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;#DB/#BP&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Exception Bitmap&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;AadHandleException()&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;RDMSR&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;MSR Bitmap&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;HandleRdmsrImpl()&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;align=left;verticalAlign=top;overflow=fill;" vertex="1" parent="1">
+          <mxGeometry x="45" y="380" width="350" height="115" as="geometry" />
+        </mxCell>
+
+        <mxCell id="layer1_note" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;🔑 Layer 1 特点:&lt;/b&gt;&lt;br&gt;• 硬件级拦截 — CPU 自动触发 VM-Exit&lt;br&gt;• 零延迟 — 无需代码修改，无 Hook&lt;br&gt;• 不可绕过 — Guest 无法跳过 VM-Exit&lt;br&gt;• 对 VMCS 配置的位设置决定拦截范围&lt;/font&gt;" style="shape=note;whiteSpace=wrap;html=1;size=10;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1535" y="380" width="270" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!--  Layer 2: EPT Hook (Ring -1 → Ring 0 API)                        -->
+        <!-- ================================================================ -->
+        <mxCell id="layer2_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#6a1b9a;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="555" width="1840" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2_title" value="&lt;font style=&quot;font-size:13px;&quot;&gt;&lt;b&gt;Layer 2: EPT Hook 拦截层&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#888&quot;&gt; — 通过 EPT Execute-Only 页分裂 Hook 4 个 Nt* 内核 API，对 PatchGuard 完全透明&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontColor=#6a1b9a;" vertex="1" parent="1">
+          <mxGeometry x="45" y="560" width="800" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- NtQueryInformationProcess -->
+        <mxCell id="nqip_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="45" y="590" width="430" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="nqip_title" value="&lt;font color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;⑥ NtQueryInformationProcess Hook&lt;/b&gt;&lt;/font&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt; (AAD_HIDE_DEBUGGER) — 最重要&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="55" y="595" width="410" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="nqip_class1" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;ProcessDebugPort&lt;/b&gt; (0x07)&lt;br&gt;检测: 返回非零 = 被调试&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;伪造: → 改为 0&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="620" width="130" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="nqip_class2" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;ProcessDebugObjHandle&lt;/b&gt; (0x1E)&lt;br&gt;检测: 返回成功 = 被调试&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;伪造: → STATUS_PORT_NOT_SET&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="195" y="620" width="140" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="nqip_class3" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;ProcessDebugFlags&lt;/b&gt; (0x1F)&lt;br&gt;检测: 返回 0 = 被调试&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;伪造: → 改为 1&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="345" y="620" width="120" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="nqip_flow" value="&lt;font style=&quot;font-size:8px;&quot;&gt;调用原函数获取真实结果 → 检查 PID &amp; Flag → 修改输出缓冲区&lt;/font&gt;" style="text;html=1;align=center;fontFamily=Segoe UI;fontColor=#6a1b9a;" vertex="1" parent="1">
+          <mxGeometry x="55" y="682" width="400" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="nqip_peb" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;+ PEB 修改&lt;/b&gt;&lt;br&gt;PEB.BeingDebugged = 0&lt;br&gt;PEB.NtGlobalFlag &amp;= ~0x70&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=8;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="55" y="700" width="130" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- NtQuerySystemInformation -->
+        <mxCell id="nqsi_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="490" y="590" width="290" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="nqsi_title" value="&lt;font color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;⑦ NtQuerySystemInformation&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;(AAD_HIDE_SYSINFO)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="500" y="595" width="270" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="nqsi_detail" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;SystemKernelDebuggerInfo&lt;/b&gt; (0x23)&lt;br&gt;&lt;br&gt;检测: KernelDebuggerEnabled = TRUE?&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;&lt;b&gt;伪造:&lt;/b&gt;&lt;br&gt;KernelDebuggerEnabled = FALSE&lt;br&gt;KernelDebuggerNotPresent = TRUE&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="500" y="628" width="195" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- NtSetInformationThread -->
+        <mxCell id="nsit_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="795" y="590" width="280" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="nsit_title" value="&lt;font color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;⑧ NtSetInformationThread&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;(AAD_HIDE_THREADINFO)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="805" y="595" width="260" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="nsit_detail" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;ThreadHideFromDebugger&lt;/b&gt; (0x11)&lt;br&gt;&lt;br&gt;检测: 设置后线程对调试器隐形&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;&lt;b&gt;伪造:&lt;/b&gt; 直接返回 STATUS_SUCCESS&lt;br&gt;但实际不执行该操作!&lt;br&gt;线程仍然对调试器可见&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="805" y="628" width="200" height="105" as="geometry" />
+        </mxCell>
+
+        <!-- NtClose -->
+        <mxCell id="ntclose_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1090" y="590" width="280" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="ntclose_title" value="&lt;font color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;⑨ NtClose 异常吞没&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;(AAD_HIDE_NTCLOSE)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="595" width="260" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="ntclose_detail" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;INVALID_HANDLE 异常&lt;/b&gt;&lt;br&gt;&lt;br&gt;检测: 关闭无效句柄 → 调试器下&lt;br&gt;抛出 EXCEPTION_INVALID_HANDLE&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;&lt;b&gt;伪造:&lt;/b&gt; __try { 调用原函数 }&lt;br&gt;__except { 吞掉异常 }&lt;br&gt;防止异常泄露调试状态&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="628" width="200" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- Heap Flags + Parent PID -->
+        <mxCell id="heap_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="590" width="220" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="heap_detail" value="&lt;font color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;⑩ Heap Flags 隐藏&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;(AAD_HIDE_HEAP)&lt;br&gt;PEB.ProcessHeap→Flags&lt;br&gt;PEB.ProcessHeap→ForceFlags&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;清除调试堆标志&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1395" y="595" width="210" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="parent_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=1.5;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="675" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="parent_detail" value="&lt;font color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;⑪ Parent PID 伪造&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;(AAD_HIDE_PARENT)&lt;br&gt;检测: 父进程 = 调试器?&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;伪造: 返回 explorer.exe PID&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1395" y="680" width="210" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Layer 2 mechanism -->
+        <mxCell id="layer2_mech" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;🔑 Layer 2 特点:&lt;/b&gt;&lt;br&gt;• EPT Execute-Only 页分裂 — 读取看原始代码，执行走 Hook&lt;br&gt;• PatchGuard 安全 — 内核代码页物理内存从未被修改&lt;br&gt;• 调用原函数 → 检查结果 → 修改输出 (Post-Call 模式)&lt;br&gt;• 每个 Hook 通过 Thunk Stub + AsmGenericHookDispatcher 分发&lt;/font&gt;" style="shape=note;whiteSpace=wrap;html=1;size=10;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1625" y="590" width="235" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ept_mech" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;EPT Hook 执行路径:&lt;/b&gt;&lt;br&gt;Guest 调用 NtQueryInfo...&lt;br&gt;→ CPU 取指: EPT X-Only → Hook Page&lt;br&gt;→ JMP Thunk → AsmDispatcher&lt;br&gt;→ GenericHookDecide (判断 PID)&lt;br&gt;→ 调用原函数 (Trampoline)&lt;br&gt;→ 修改输出 → 返回 Guest&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#3949ab;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;align=left;spacingLeft=8;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1625" y="700" width="235" height="112" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================ -->
+        <!--  Bottom: Summary / Comparison                                    -->
+        <!-- ================================================================ -->
+        <mxCell id="summary_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=2;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="30" y="915" width="1840" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="summary_title" value="&lt;b&gt;反调试检测 → VMX 拦截 → 伪造结果 全链路汇总&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=12;fontColor=#2e7d32;" vertex="1" parent="1">
+          <mxGeometry x="45" y="920" width="400" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="summary_table" value="&lt;table style=&quot;font-size:8px;font-family:Segoe UI;border-collapse:collapse;width:100%;&quot;&gt;&lt;tr style=&quot;background:#2e7d32;color:white;&quot;&gt;&lt;td style=&quot;padding:3px 6px;&quot;&gt;&lt;b&gt;#&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:3px 6px;&quot;&gt;&lt;b&gt;反调试检测手段&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:3px 6px;&quot;&gt;&lt;b&gt;Flag&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:3px 6px;&quot;&gt;&lt;b&gt;拦截层&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:3px 6px;&quot;&gt;&lt;b&gt;触发机制&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;padding:3px 6px;&quot;&gt;&lt;b&gt;伪造结果&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;①&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;CPUID HV Present&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;CPUID&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#ffebee;&quot;&gt;VM-Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;无条件 Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;ECX[31]=0, Leaf 40000000=0&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;②&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;硬件断点检测 (DR0-7)&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;HWBP&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#ffebee;&quot;&gt;VM-Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;MOV-DR Exiting&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;DR0-3=0, DR7=0x400&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;③&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;时间差检测 (RDTSC)&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;TIMING&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#ffebee;&quot;&gt;VM-Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;RDTSC Exiting&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;TSC -= 暂停累计时间&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;④&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;异常行为差异 (INT2D/3)&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;EXCEPTIONS&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#ffebee;&quot;&gt;VM-Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Exception Bitmap&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;重新注入给 Guest SEH&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;⑤&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;IA32_DEBUGCTL MSR&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;—&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#ffebee;&quot;&gt;VM-Exit&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;MSR Bitmap&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;清除 LBR/BTF/TR 位&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;⑥&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;NtQueryInformationProcess&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;DEBUGGER&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#f3e5f5;&quot;&gt;EPT Hook&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Execute-Only 页&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;DebugPort=0, Flags=1&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;⑦&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;NtQuerySystemInformation&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;SYSINFO&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#f3e5f5;&quot;&gt;EPT Hook&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Execute-Only 页&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;DebuggerEnabled=FALSE&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;⑧&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;NtSetInformationThread&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;THREADINFO&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#f3e5f5;&quot;&gt;EPT Hook&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Execute-Only 页&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;假装成功但不执行&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;⑨&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;NtClose 无效句柄异常&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;NTCLOSE&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#f3e5f5;&quot;&gt;EPT Hook&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Execute-Only 页&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;__except 吞掉异常&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;⑩⑪&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Heap Flags / Parent PID&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;HEAP/PARENT&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#f3e5f5;&quot;&gt;EPT Hook&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;Execute-Only 页&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;清除堆标志 / 伪造父 PID&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;align=left;verticalAlign=top;overflow=fill;" vertex="1" parent="1">
+          <mxGeometry x="45" y="945" width="1100" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#bbb;strokeWidth=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1060" width="1840" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="l1c" value="" style="rounded=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="50" y="1073" width="15" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="l1t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Layer 1: VM-Exit 拦截&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1068" width="130" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="l2c" value="" style="rounded=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="210" y="1073" width="15" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="l2t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Layer 2: EPT Hook 拦截&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="230" y="1068" width="130" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="l3c" value="" style="rounded=1;fillColor=#ffcdd2;strokeColor=#e53935;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="370" y="1073" width="15" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="l3t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;反调试检测手段&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1068" width="90" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="l4c" value="" style="rounded=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="490" y="1073" width="15" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="l4t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;伪造策略&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="510" y="1068" width="60" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="l5c" value="" style="rounded=1;fillColor=#bbdefb;strokeColor=#1565c0;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="580" y="1073" width="15" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="l5t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;用户配置 (Flag 位)&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="600" y="1068" width="110" height="20" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

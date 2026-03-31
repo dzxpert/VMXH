@@ -1,0 +1,311 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram id="ssdt-shadow-ssdt" name="SSDT &amp; Shadow SSDT Framework">
+    <mxGraphModel dx="684" dy="395" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1400" background="#ffffff" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Segoe UI;fontColor=#1a1a2e;" value="&lt;font style=&quot;font-size:22px;&quot;&gt;&lt;b&gt;VMX Hypervisor Toolbox — SSDT &amp;amp; Shadow SSDT 监控框架架构&lt;/b&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="40" width="1300" x="250" y="15" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Segoe UI;" value="&lt;font color=&quot;#666666&quot; style=&quot;font-size:12px;&quot;&gt;基于 EPT/NPT Hook 的系统调用表发现、解析与透明 Hook 框架 — 两层发现策略 + 双表统一架构&lt;/font&gt;" vertex="1">
+          <mxGeometry height="25" width="1200" x="300" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ring3_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8edf5;strokeColor=#3a5a9c;strokeWidth=2;dashed=1;arcSize=6;" value="" vertex="1">
+          <mxGeometry height="175" width="520" x="40" y="85" as="geometry" />
+        </mxCell>
+        <mxCell id="ring3_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#3a5a9c;" value="&lt;b&gt;Ring 3 — User Mode (VMXToolbox.exe)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="20" width="280" x="55" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="cli_ssdt" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dce7f7;strokeColor=#3a5a9c;strokeWidth=2;fontFamily=Segoe UI;shadow=1;arcSize=10;align=left;spacingLeft=12;" value="&lt;b&gt;SSDT 命令&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; face=&quot;Consolas&quot;&gt;--ssdt-init&lt;br&gt;--ssdt-dump [start] [count]&lt;br&gt;--ssdt-hook &amp;lt;name/index&amp;gt;&lt;br&gt;--ssdt-unhook &amp;lt;id&amp;gt;&lt;br&gt;--ssdt-monitor &amp;lt;mode&amp;gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="105" width="220" x="55" y="118" as="geometry" />
+        </mxCell>
+        <mxCell id="cli_shadow" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dce7f7;strokeColor=#3a5a9c;strokeWidth=2;fontFamily=Segoe UI;shadow=1;arcSize=10;align=left;spacingLeft=12;" value="&lt;b&gt;Shadow SSDT 命令&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; face=&quot;Consolas&quot;&gt;--shadow-ssdt-init&lt;br&gt;--shadow-ssdt-dump [start] [count]&lt;br&gt;--shadow-ssdt-hook &amp;lt;name/index&amp;gt;&lt;br&gt;--shadow-ssdt-unhook &amp;lt;id&amp;gt;&lt;br&gt;--shadow-ssdt-monitor &amp;lt;mode&amp;gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="105" width="250" x="295" y="118" as="geometry" />
+        </mxCell>
+        <mxCell id="ioctl_arrow" edge="1" parent="1" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#3a5a9c;strokeColor=#3a5a9c;width=14;endSize=6;startSize=6;" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="290" y="275" as="sourcePoint" />
+            <mxPoint x="290" y="325" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ioctl_label" parent="1" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;fontColor=#3a5a9c;" value="&lt;font style=&quot;font-size:10px;&quot;&gt;&lt;b&gt;DeviceIoControl&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot; color=&quot;#888&quot;&gt;IOCTL 0x80D–0x813 (SSDT)&lt;br&gt;IOCTL 0x814–0x81A (Shadow SSDT)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="210" x="310" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8f0;strokeColor=#e67e22;strokeWidth=2;arcSize=5;" value="" vertex="1">
+          <mxGeometry height="540" width="830" x="40" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="ring0_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=12;fontColor=#e67e22;" value="&lt;b&gt;Ring 0 — Kernel Mode (VMXToolboxDrv.sys)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="22" width="350" x="55" y="335" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_mod_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3e2;strokeColor=#f57c00;strokeWidth=2;arcSize=6;" value="" vertex="1">
+          <mxGeometry height="480" width="380" x="55" y="370" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_mod_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#f57c00;" value="&lt;b&gt;SSDT Module (ssdt.c / ssdt.h)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;ntoskrnl 系统调用表&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="250" x="70" y="375" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_discovery_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1.5;arcSize=8;" value="" vertex="1">
+          <mxGeometry height="195" width="350" x="70" y="415" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_disc_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;fontColor=#f57c00;" value="&lt;b&gt;两层 SSDT 发现策略&lt;/b&gt;" vertex="1">
+          <mxGeometry height="18" width="180" x="85" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="tier1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;Tier 1 (首选): 磁盘映像&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;ZwCreateSection(SEC_IMAGE)&lt;br&gt;映射 ntoskrnl.exe → 遍历 PE 导出表&lt;br&gt;→ 定位 KeServiceDescriptorTable&lt;br&gt;&lt;font color=&quot;#2e7d32&quot;&gt;✓ 数据来自签名磁盘文件，零内存信任&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="320" x="85" y="445" as="geometry" />
+        </mxCell>
+        <mxCell id="tier2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;Tier 2 (后备): 内存读取&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;MmGetSystemRoutineAddress&lt;br&gt;→ KeServiceDescriptorTable&lt;br&gt;→ 读取 KiServiceTable 实时地址&lt;br&gt;&lt;font color=&quot;#c62828&quot;&gt;⚠ PatchGuard 保护，但启动前窗口期&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="70" width="320" x="85" y="530" as="geometry" />
+        </mxCell>
+        <mxCell id="e_tier1_tier2" edge="1" parent="1" source="tier1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#c62828;strokeWidth=1.5;dashed=1;" target="tier2" value="&lt;font style=&quot;font-size:8px;&quot; color=&quot;#c62828&quot;&gt;失败时降级&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ksdt" parent="1" style="shape=document;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=0.06;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;" value="&lt;b&gt;KSERVICE_TABLE_DESCRIPTOR&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot; face=&quot;Consolas&quot;&gt;+0x00 Base  → KiServiceTable (LONG[])&lt;br&gt;+0x08 Count → NULL (x64)&lt;br&gt;+0x10 Limit → 服务数量&lt;br&gt;+0x18 Number→ KiArgumentTable&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="220" x="85" y="620" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_names" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#5c6bc0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;名称解析&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;PE 导出表遍历&lt;br&gt;Nt* 前缀匹配 → NameCache[512]&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="180" x="85" y="720" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_resolve" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#5c6bc0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;地址解析&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; face=&quot;Consolas&quot;&gt;VA = KiServiceTable&lt;br&gt;  + (Entry &gt;&gt; 4)&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;→ ResolvedAddresses[512]&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="145" x="278" y="720" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_hook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffecd2;strokeColor=#f57c00;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;Hook 操作&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;SsdtHookByIndex()&lt;br&gt;SsdtHookByName()&lt;br&gt;SsdtUnhookByIndex()&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="145" x="85" y="795" as="geometry" />
+        </mxCell>
+        <mxCell id="ssdt_monitor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffecd2;strokeColor=#f57c00;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;Monitor 模式&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;OFF / ALL / FILTERED&lt;br&gt;按 PID + 索引过滤&lt;br&gt;批量 LOG_ONLY Hook&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="160" x="250" y="795" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_mod_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;strokeWidth=2;arcSize=6;" value="" vertex="1">
+          <mxGeometry height="480" width="395" x="460" y="370" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_mod_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#7b1fa2;" value="&lt;b&gt;Shadow SSDT Module (shadow_ssdt.c / shadow_ssdt.h)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;Win32k NtUser/NtGdi 系统调用表&lt;/font&gt;" vertex="1">
+          <mxGeometry height="32" width="360" x="475" y="375" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_discovery_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#9c27b0;strokeWidth=1.5;arcSize=8;" value="" vertex="1">
+          <mxGeometry height="290" width="365" x="475" y="415" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_disc_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;fontColor=#7b1fa2;" value="&lt;b&gt;Shadow SSDT 发现（多步骤）&lt;/b&gt;" vertex="1">
+          <mxGeometry height="18" width="200" x="490" y="420" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_step_a" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" value="&lt;b&gt;A. KTHREAD 偏移发现&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;扫描 PID=4 (System) 线程&lt;br&gt;KTHREAD.ServiceTable 总指向&lt;br&gt;KeServiceDescriptorTable&lt;br&gt;→ 动态确定偏移&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="175" x="490" y="445" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_step_b" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" value="&lt;b&gt;B. GUI 进程上下文切换&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;查找 GUI 线程 →&lt;br&gt;ServiceTable 指向&lt;br&gt;KeServiceDescriptorTableShadow&lt;br&gt;&lt;font face=&quot;Consolas&quot;&gt;KeStackAttachProcess()&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="78" width="175" x="490" y="535" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_step_c" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" value="&lt;b&gt;C. W32pServiceTable&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Shadow[1].Base →&lt;br&gt;win32k 系统调用地址表&lt;br&gt;Shadow[1].Limit → 服务数量&lt;/font&gt;" vertex="1">
+          <mxGeometry height="68" width="175" x="490" y="625" as="geometry" />
+        </mxCell>
+        <mxCell id="win32k_mods" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#ab47bc;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" value="&lt;b&gt;D. Win10+ 模块枚举&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;win32k.sys (stub)&lt;br&gt;win32kbase.sys&lt;br&gt;win32kfull.sys&lt;br&gt;&lt;font color=&quot;#7b1fa2&quot;&gt;遍历三个导出表解析名称&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="80" width="140" x="685" y="445" as="geometry" />
+        </mxCell>
+        <mxCell id="session_note" parent="1" style="shape=note;whiteSpace=wrap;html=1;size=10;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontFamily=Segoe UI;shadow=1;" value="&lt;font style=&quot;font-size:8px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;⚠ win32k 按 Session 映射&lt;/b&gt;&lt;br&gt;所有 W32pServiceTable 读取&lt;br&gt;必须在 GUI 进程上下文中&lt;/font&gt;" vertex="1">
+          <mxGeometry height="60" width="145" x="685" y="545" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_names" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#5c6bc0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;名称解析&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;NtUser* / NtGdi* 前缀&lt;br&gt;→ NameCache[2048]&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="165" x="490" y="720" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_hook" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;Hook 操作&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;ShadowSsdtHookByIndex()&lt;br&gt;ShadowSsdtHookByName()&lt;br&gt;ShadowSsdtUnhookByIndex()&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="170" x="490" y="795" as="geometry" />
+        </mxCell>
+        <mxCell id="shadow_monitor" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;Monitor 模式&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;OFF / ALL / FILTERED&lt;br&gt;按 PID + 索引过滤&lt;br&gt;批量 LOG_ONLY Hook&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="160" x="680" y="795" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sa_sb" edge="1" parent="1" source="shadow_step_a" style="rounded=1;html=1;strokeColor=#7b1fa2;strokeWidth=1.5;" target="shadow_step_b">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_sb_sc" edge="1" parent="1" source="shadow_step_b" style="rounded=1;html=1;strokeColor=#7b1fa2;strokeWidth=1.5;" target="shadow_step_c">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="mapping_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0f2f1;strokeColor=#00897b;strokeWidth=2;arcSize=8;" value="" vertex="1">
+          <mxGeometry height="65" width="575" x="165" y="885" as="geometry" />
+        </mxCell>
+        <mxCell id="mapping" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b2dfdb;strokeColor=#00897b;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;SSDT_HOOK_MAPPING 链表&lt;/b&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;　—　追踪 SyscallIndex ↔ GenericHookId 映射关系&lt;br&gt;&lt;font face=&quot;Consolas&quot;&gt;{ SyscallIndex, GenericHookId, IsMonitorHook } → Next → ...&lt;/font&gt;&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="555" x="175" y="892" as="geometry" />
+        </mxCell>
+        <mxCell id="e_ssdt_hook_map" edge="1" parent="1" source="ssdt_hook" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#00897b;strokeWidth=2;" target="mapping">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_shadow_hook_map" edge="1" parent="1" source="shadow_hook" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#00897b;strokeWidth=2;" target="mapping">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="generic_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;strokeWidth=2;arcSize=6;" value="" vertex="1">
+          <mxGeometry height="130" width="710" x="100" y="975" as="geometry" />
+        </mxCell>
+        <mxCell id="generic_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#c62828;" value="&lt;b&gt;Generic Hook Framework (hv_hook.c)&lt;/b&gt;&lt;font style=&quot;font-size:10px;&quot; color=&quot;#888&quot;&gt; — 统一 Hook 引擎&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="400" x="115" y="980" as="geometry" />
+        </mxCell>
+        <mxCell id="gen_install" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;GenericHookInstall&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;分配 Thunk → EPT Hook&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="155" x="120" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="gen_decide" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;GenericHookDecide&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;PID 过滤 + Action 决策&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="155" x="295" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="gen_thunks" parent="1" style="shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;fixedSize=1;fillColor=#e8f5e9;strokeColor=#43a047;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" value="&lt;b&gt;Thunk Stubs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Asm Dispatcher&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="130" x="475" y="1005" as="geometry" />
+        </mxCell>
+        <mxCell id="gen_events" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#e8eaf6;strokeColor=#5c6bc0;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" value="&lt;b&gt;Event Ring&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;HookLogEvent()&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="120" x="630" y="1005" as="geometry" />
+        </mxCell>
+        <mxCell id="e_map_gen" edge="1" parent="1" source="mapping" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#c62828;strokeWidth=2.5;" target="gen_install" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;委托 (Delegate)&lt;/b&gt;&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ringm1_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#b71c1c;strokeWidth=2;dashed=1;arcSize=5;" value="" vertex="1">
+          <mxGeometry height="305" width="475" x="905" y="330" as="geometry" />
+        </mxCell>
+        <mxCell id="ringm1_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#b71c1c;" value="&lt;b&gt;Ring -1 — VMX Root Mode (EPT/NPT)&lt;/b&gt;" vertex="1">
+          <mxGeometry height="20" width="300" x="920" y="335" as="geometry" />
+        </mxCell>
+        <mxCell id="hvops" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#8e24aa;strokeWidth=2;fontFamily=Segoe UI;shadow=1;arcSize=12;" value="&lt;b&gt;HV_OPS Vtable&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; face=&quot;Consolas&quot;&gt;g_HvOps→HookFunction()&lt;br&gt;g_HvOps→UnhookFunction()&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="185" x="935" y="365" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_split" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;EPT 2MB → 4KB 分裂&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;目标函数所在页&lt;br&gt;分裂为细粒度 PTE&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="155" x="935" y="440" as="geometry" />
+        </mxCell>
+        <mxCell id="page_exec" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffccbc;strokeColor=#e64a19;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" value="&lt;b&gt;Hook Page&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Execute-Only&lt;br&gt;含 JMP → Thunk&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="125" x="935" y="515" as="geometry" />
+        </mxCell>
+        <mxCell id="page_rw" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#43a047;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" value="&lt;b&gt;Original Page&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;R/W 不可执行&lt;br&gt;原始代码副本&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="125" x="1080" y="515" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_violation" parent="1" style="shape=mxgraph.flowchart.decision;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#b71c1c;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;size=0.12;" value="&lt;b&gt;EPT Violation Handler&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;读/写 → 切 Original 页&lt;br&gt;MTF 单步 → 切回 Hook 页&lt;/font&gt;" vertex="1">
+          <mxGeometry height="90" width="145" x="1215" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="e_hvops_split" edge="1" parent="1" source="hvops" style="rounded=1;html=1;strokeColor=#c62828;strokeWidth=1.5;" target="ept_split">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_split_exec" edge="1" parent="1" source="ept_split" style="rounded=1;html=1;strokeColor=#e64a19;strokeWidth=1.5;" target="page_exec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_split_rw" edge="1" parent="1" source="ept_split" style="rounded=1;html=1;strokeColor=#43a047;strokeWidth=1.5;" target="page_rw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_exec_rw" edge="1" parent="1" source="page_exec" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b71c1c;strokeWidth=1.5;dashed=1;startArrow=classic;endArrow=classic;" target="page_rw" value="&lt;font style=&quot;font-size:8px;&quot;&gt;EPT Violation&lt;br&gt;双页切换&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_gen_hvops" edge="1" parent="1" source="gen_install" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#8e24aa;strokeWidth=2.5;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="hvops" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="880" y="1031" />
+              <mxPoint x="880" y="393" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_gen_hvops_label" connectable="0" parent="e_gen_hvops" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontFamily=Consolas;fontColor=#8e24aa;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;HvHookFunction()&lt;/font&gt;" vertex="1">
+          <mxGeometry relative="1" x="0.6" as="geometry">
+            <mxPoint as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#0d47a1;strokeWidth=2;arcSize=6;" value="" vertex="1">
+          <mxGeometry height="460" width="475" x="905" y="660" as="geometry" />
+        </mxCell>
+        <mxCell id="flow_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=12;fontColor=#0d47a1;" value="&lt;b&gt;系统调用 Hook 执行流程&lt;/b&gt;" vertex="1">
+          <mxGeometry height="22" width="250" x="920" y="665" as="geometry" />
+        </mxCell>
+        <mxCell id="f1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;① 用户态 SYSCALL 指令&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Ring 3 → Ring 0 转换&lt;br&gt;RCX = 返回地址, EAX = 系统调用号&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="210" x="930" y="695" as="geometry" />
+        </mxCell>
+        <mxCell id="f2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;② KiSystemCall64&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;IA32_LSTAR → 系统调用分发&lt;br&gt;EAX &amp;gt; 0x1000? → Shadow SSDT&lt;br&gt;否则 → SSDT (KiServiceTable)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="65" width="215" x="930" y="765" as="geometry" />
+        </mxCell>
+        <mxCell id="f3_ssdt" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#f57c00;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;③a SSDT 分发&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;KiServiceTable[EAX]&lt;br&gt;→ Nt* 函数入口&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="150" x="930" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="f3_shadow" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;③b Shadow SSDT 分发&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;W32pServiceTable[EAX-0x1000]&lt;br&gt;→ NtUser*/NtGdi* 入口&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="165" x="1100" y="850" as="geometry" />
+        </mxCell>
+        <mxCell id="f4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffccbc;strokeColor=#e64a19;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;④ EPT: 执行重定向&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;函数入口在 Hook Page (Execute-Only)&lt;br&gt;CPU 执行 → 跳转到 Thunk Stub&lt;/font&gt;" vertex="1">
+          <mxGeometry height="55" width="220" x="970" y="925" as="geometry" />
+        </mxCell>
+        <mxCell id="f5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;⑤ AsmGenericHookDispatcher&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;GenericHookDecide() → 动作决策&lt;br&gt;&lt;font face=&quot;Consolas&quot;&gt;PASSTHROUGH | LOG | BLOCK | MODIFY&lt;/font&gt;&lt;br&gt;→ 调用 Trampoline (原函数) → PostCall 日志&lt;/font&gt;" vertex="1">
+          <mxGeometry height="68" width="260" x="930" y="1000" as="geometry" />
+        </mxCell>
+        <mxCell id="f6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" value="&lt;b&gt;⑥ 返回调用者&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;RAX = 最终返回值 (可能已被篡改)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="42" width="220" x="970" y="1085" as="geometry" />
+        </mxCell>
+        <mxCell id="ef12" edge="1" parent="1" source="f1" style="rounded=1;html=1;strokeColor=#0d47a1;strokeWidth=2;" target="f2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ef2_3a" edge="1" parent="1" source="f2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#f57c00;strokeWidth=1.5;exitX=0;exitY=1;exitDx=0;exitDy=0;" target="f3_ssdt" value="&lt;font style=&quot;font-size:8px;&quot;&gt;EAX &amp;lt; 0x1000&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ef2_3b" edge="1" parent="1" source="f2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#7b1fa2;strokeWidth=1.5;exitX=1;exitY=1;exitDx=0;exitDy=0;" target="f3_shadow" value="&lt;font style=&quot;font-size:8px;&quot;&gt;EAX ≥ 0x1000&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ef3a_4" edge="1" parent="1" source="f3_ssdt" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#e64a19;strokeWidth=1.5;" target="f4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ef3b_4" edge="1" parent="1" source="f3_shadow" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#e64a19;strokeWidth=1.5;" target="f4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ef45" edge="1" parent="1" source="f4" style="rounded=1;html=1;strokeColor=#0d47a1;strokeWidth=2;" target="f5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ef56" edge="1" parent="1" source="f5" style="rounded=1;html=1;strokeColor=#0d47a1;strokeWidth=2;" target="f6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#9e9e9e;strokeWidth=1.5;arcSize=6;" value="" vertex="1">
+          <mxGeometry height="145" width="830" x="40" y="1135" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_label" parent="1" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#555;" value="&lt;b&gt;SSDT vs Shadow SSDT 对比&lt;/b&gt;" vertex="1">
+          <mxGeometry height="20" width="200" x="55" y="1140" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_ssdt" parent="1" style="text;html=1;align=left;verticalAlign=top;overflow=fill;" value="&lt;table style=&quot;font-size:9px;font-family:Segoe UI;border-collapse:collapse;&quot;&gt;&lt;tr&gt;&lt;td colspan=2 style=&quot;background:#f57c00;color:white;padding:4px;text-align:center;&quot;&gt;&lt;b&gt;SSDT (nt!KiServiceTable)&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;表位置&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;KeServiceDescriptorTable[0]&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;导出&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;已导出 (ntoskrnl)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;最大服务数&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;512&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;函数前缀&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;Nt* (NtCreateFile...)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;发现方式&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;SEC_IMAGE / MmGetSystemRoutineAddress&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;映射特性&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;全局唯一&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" vertex="1">
+          <mxGeometry height="110" width="360" x="60" y="1162" as="geometry" />
+        </mxCell>
+        <mxCell id="cmp_shadow" parent="1" style="text;html=1;align=left;verticalAlign=top;overflow=fill;" value="&lt;table style=&quot;font-size:9px;font-family:Segoe UI;border-collapse:collapse;&quot;&gt;&lt;tr&gt;&lt;td colspan=2 style=&quot;background:#7b1fa2;color:white;padding:4px;text-align:center;&quot;&gt;&lt;b&gt;Shadow SSDT (win32k!W32pServiceTable)&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;表位置&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;KeServiceDescriptorTableShadow[1]&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;导出&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;未导出 (需 KTHREAD 扫描)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;最大服务数&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;2048 (Win11 ~1400)&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;函数前缀&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;NtUser* / NtGdi*&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;发现方式&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;KTHREAD 偏移 + GUI 进程 Attach&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;映射特性&lt;/td&gt;&lt;td style=&quot;padding:2px 6px;border:1px solid #ddd;&quot;&gt;按 Session 映射 (需上下文切换)&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" vertex="1">
+          <mxGeometry height="110" width="400" x="440" y="1162" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_bg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#bbb;strokeWidth=1;arcSize=10;" value="" vertex="1">
+          <mxGeometry height="45" width="830" x="40" y="1300" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1" parent="1" style="rounded=1;fillColor=#dce7f7;strokeColor=#3a5a9c;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="55" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg1t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Ring 3&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="45" x="75" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2" parent="1" style="rounded=1;fillColor=#ffecd2;strokeColor=#f57c00;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="130" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg2t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;SSDT&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="40" x="150" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3" parent="1" style="rounded=1;fillColor=#e1bee7;strokeColor=#7b1fa2;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="200" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg3t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Shadow SSDT&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="75" x="220" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4" parent="1" style="rounded=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="305" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg4t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Hook 引擎&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="60" x="325" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg5" parent="1" style="rounded=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="395" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg5t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;运行时流程&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="65" x="415" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg6" parent="1" style="rounded=1;fillColor=#b2dfdb;strokeColor=#00897b;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="490" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg6t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Hook 映射&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="60" x="510" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg7" parent="1" style="rounded=1;fillColor=#e1bee7;strokeColor=#8e24aa;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="580" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg7t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;HV_OPS 抽象&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="75" x="600" y="1309" as="geometry" />
+        </mxCell>
+        <mxCell id="lg8" parent="1" style="rounded=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;" value="" vertex="1">
+          <mxGeometry height="11" width="16" x="685" y="1314" as="geometry" />
+        </mxCell>
+        <mxCell id="lg8t" parent="1" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" value="&lt;font style=&quot;font-size:9px;&quot;&gt;安全 / 可信数据源&lt;/font&gt;" vertex="1">
+          <mxGeometry height="20" width="100" x="705" y="1309" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

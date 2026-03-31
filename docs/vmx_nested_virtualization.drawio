@@ -1,0 +1,651 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-03-31T00:00:00.000Z" agent="Claude" version="24.0.0" type="device">
+  <diagram id="vmx-nested-virt" name="VMX &amp; Nested Virtualization">
+    <mxGraphModel dx="1800" dy="1600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1800" background="#ffffff" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ================================================================== -->
+        <!--  Title                                                              -->
+        <!-- ================================================================== -->
+        <mxCell id="title" value="&lt;font style=&quot;font-size:24px;&quot;&gt;&lt;b&gt;Intel VT-x (VMX) 虚拟化原理 &amp;amp; Hyper-V 嵌套虚拟化架构&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Segoe UI;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="250" y="15" width="1500" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="&lt;font color=&quot;#666&quot; style=&quot;font-size:12px;&quot;&gt;从硬件辅助虚拟化到 L0/L1/L2 三层嵌套 — Blue Pill Hypervisor 运行原理&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="400" y="55" width="1200" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================== -->
+        <!--  PART 1: VMX Architecture (Left Half)                               -->
+        <!-- ================================================================== -->
+        <mxCell id="part1_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#37474f;strokeWidth=2;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="30" y="90" width="935" height="860" as="geometry" />
+        </mxCell>
+        <mxCell id="part1_title" value="&lt;font style=&quot;font-size:16px;&quot; color=&quot;#0d47a1&quot;&gt;&lt;b&gt;Part 1: Intel VT-x (VMX) 虚拟化架构&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="50" y="98" width="400" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- =================== CPU Privilege Rings =================== -->
+        <mxCell id="rings_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="135" width="430" height="390" as="geometry" />
+        </mxCell>
+        <mxCell id="rings_title" value="&lt;b&gt;x86-64 特权级模型 (有 VMX 扩展)&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#1565c0;" vertex="1" parent="1">
+          <mxGeometry x="65" y="140" width="280" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Ring -1 -->
+        <mxCell id="ring_m1" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=2.5;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="80" y="170" width="370" height="340" as="geometry" />
+        </mxCell>
+        <mxCell id="ring_m1_label" value="&lt;font style=&quot;font-size:11px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;Ring -1 (VMX Root Mode)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Hypervisor / VMM&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="150" y="178" width="230" height="32" as="geometry" />
+        </mxCell>
+
+        <!-- Ring 0 -->
+        <mxCell id="ring_0" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2;opacity=40;" vertex="1" parent="1">
+          <mxGeometry x="130" y="220" width="270" height="260" as="geometry" />
+        </mxCell>
+        <mxCell id="ring_0_label" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#e65100&quot;&gt;&lt;b&gt;Ring 0 (Kernel)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;OS Kernel / Driver&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="190" y="232" width="150" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- Ring 3 -->
+        <mxCell id="ring_3" value="" style="ellipse;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=2;opacity=50;" vertex="1" parent="1">
+          <mxGeometry x="175" y="275" width="180" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="ring_3_label" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#2e7d32&quot;&gt;&lt;b&gt;Ring 3 (User)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Applications&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="215" y="330" width="100" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Privilege arrow -->
+        <mxCell id="priv_arrow" value="" style="shape=flexArrow;endArrow=classic;startArrow=none;html=1;fillColor=#546e7a;strokeColor=#546e7a;width=6;endSize=4;startSize=4;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="92" y="480" as="sourcePoint" />
+            <mxPoint x="92" y="190" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="priv_label" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#546e7a&quot;&gt;&lt;b&gt;特权级递增&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;rotation=-90;" vertex="1" parent="1">
+          <mxGeometry x="45" y="320" width="80" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- =================== VMX Operations =================== -->
+        <mxCell id="vmx_ops_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="505" y="135" width="445" height="390" as="geometry" />
+        </mxCell>
+        <mxCell id="vmx_ops_title" value="&lt;b&gt;VMX 操作模式与转换&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#c62828;" vertex="1" parent="1">
+          <mxGeometry x="520" y="140" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- VMX Root -->
+        <mxCell id="vmx_root_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#d32f2f;strokeWidth=2;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="520" y="168" width="200" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="vmx_root_title" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;VMX Root Mode&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;(Host / Hypervisor)&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="530" y="175" width="180" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmx_root_ops" value="&lt;font style=&quot;font-size:9px;&quot;&gt;• VMXON 开启 VMX 操作&lt;br&gt;• 完全控制硬件资源&lt;br&gt;• 拦截 Guest 敏感操作&lt;br&gt;• 管理 VMCS 结构&lt;br&gt;• 处理 VM-Exit 事件&lt;br&gt;• EPT 页表管理&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="530" y="210" width="180" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- VMX Non-Root -->
+        <mxCell id="vmx_nonroot_box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=2;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="735" y="168" width="200" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="vmx_nonroot_title" value="&lt;font color=&quot;#2e7d32&quot;&gt;&lt;b&gt;VMX Non-Root Mode&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#888&quot;&gt;(Guest / VM)&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="745" y="175" width="180" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmx_nonroot_ops" value="&lt;font style=&quot;font-size:9px;&quot;&gt;• 受限执行环境&lt;br&gt;• 敏感指令触发 VM-Exit&lt;br&gt;• 感知不到 Hypervisor 存在&lt;br&gt;• OS + Apps 正常运行&lt;br&gt;• 使用影子/翻译页表&lt;br&gt;• I/O 可被拦截&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="745" y="210" width="180" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- VM-Entry Arrow -->
+        <mxCell id="vmentry_arrow" value="" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#2e7d32;strokeColor=#2e7d32;width=10;endSize=5;startSize=5;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="720" y="220" as="sourcePoint" />
+            <mxPoint x="735" y="220" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="vmentry_label" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#2e7d32&quot;&gt;&lt;b&gt;VM-Entry&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot; color=&quot;#666&quot;&gt;VMLAUNCH&lt;br&gt;VMRESUME&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="697" y="340" width="70" height="42" as="geometry" />
+        </mxCell>
+
+        <!-- VM-Exit Arrow -->
+        <mxCell id="vmexit_arrow" value="" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#c62828;strokeColor=#c62828;width=10;endSize=5;startSize=5;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="735" y="280" as="sourcePoint" />
+            <mxPoint x="720" y="280" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="vmexit_label" value="&lt;font style=&quot;font-size:10px;&quot; color=&quot;#c62828&quot;&gt;&lt;b&gt;VM-Exit&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot; color=&quot;#666&quot;&gt;敏感操作&lt;br&gt;触发退出&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="697" y="385" width="70" height="42" as="geometry" />
+        </mxCell>
+
+        <!-- Bidirectional curved arrows for VM-Entry/Exit -->
+        <mxCell id="vm_transition" value="" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;html=1;strokeColor=#2e7d32;strokeWidth=2;exitX=1;exitY=0.25;entryX=0;entryY=0.25;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="720" y="210" as="sourcePoint" />
+            <mxPoint x="735" y="210" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="vm_transition2" value="" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;html=1;strokeColor=#c62828;strokeWidth=2;exitX=0;exitY=0.75;entryX=1;entryY=0.75;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="735" y="290" as="sourcePoint" />
+            <mxPoint x="720" y="290" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- VMCS Structure -->
+        <mxCell id="vmcs_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#283593;strokeWidth=2;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="520" y="348" width="415" height="165" as="geometry" />
+        </mxCell>
+        <mxCell id="vmcs_title" value="&lt;b&gt;VMCS (Virtual Machine Control Structure)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#666&quot;&gt;每个逻辑 CPU 一个 VMCS，4KB 对齐，硬件自动读写&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;fontColor=#283593;" vertex="1" parent="1">
+          <mxGeometry x="535" y="353" width="380" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmcs_guest" value="&lt;b&gt;Guest State Area&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;CR0/CR3/CR4, RIP, RSP&lt;br&gt;RFLAGS, CS/SS/DS/ES&lt;br&gt;GDTR, IDTR, LDTR, TR&lt;br&gt;IA32_EFER, IA32_PAT&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c5cae9;strokeColor=#283593;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="535" y="385" width="130" height="78" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmcs_host" value="&lt;b&gt;Host State Area&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;CR0/CR3/CR4, RIP, RSP&lt;br&gt;CS/SS/DS/ES/FS/GS/TR&lt;br&gt;GDTR, IDTR base&lt;br&gt;IA32_EFER, IA32_PAT&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c5cae9;strokeColor=#283593;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="675" y="385" width="130" height="78" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmcs_ctrl" value="&lt;b&gt;VM-Execution Controls&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Pin-Based / Proc-Based&lt;br&gt;Exception Bitmap&lt;br&gt;I/O Bitmap, MSR Bitmap&lt;br&gt;&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;EPT Pointer (EPTP)&lt;/b&gt;&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c5cae9;strokeColor=#283593;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="535" y="470" width="130" height="78" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmcs_exit_info" value="&lt;b&gt;Exit Information&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Exit Reason&lt;br&gt;Exit Qualification&lt;br&gt;Guest-Physical Addr&lt;br&gt;Instruction Length&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c5cae9;strokeColor=#283593;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="675" y="470" width="130" height="78" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vmcs_entry" value="&lt;b&gt;Entry / Exit&lt;br&gt;Controls&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Event Injection&lt;br&gt;MSR Load/Store&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c5cae9;strokeColor=#283593;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="815" y="385" width="110" height="78" as="geometry" />
+        </mxCell>
+
+        <!-- =================== VM-Exit Reasons =================== -->
+        <mxCell id="exit_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="545" width="430" height="185" as="geometry" />
+        </mxCell>
+        <mxCell id="exit_title" value="&lt;b&gt;常见 VM-Exit 原因&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#e65100;" vertex="1" parent="1">
+          <mxGeometry x="65" y="550" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_cpuid" value="&lt;b&gt;CPUID&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;CPU 信息查询&lt;br&gt;可隐藏 HV 特征&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="65" y="578" width="95" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_cr" value="&lt;b&gt;CR Access&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;CR0/CR3/CR4&lt;br&gt;控制寄存器访问&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="170" y="578" width="95" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_msr" value="&lt;b&gt;MSR R/W&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;RDMSR/WRMSR&lt;br&gt;模型特定寄存器&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="275" y="578" width="95" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_io" value="&lt;b&gt;I/O Instruction&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;IN/OUT 端口操作&lt;br&gt;设备虚拟化&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="380" y="578" width="90" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_ept" value="&lt;b&gt;EPT Violation&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;GPA → HPA 访问违规&lt;br&gt;&lt;font color=&quot;#c62828&quot;&gt;Hook 框架核心机制&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffccbc;strokeColor=#d84315;strokeWidth=2;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="65" y="645" width="125" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_rdtsc" value="&lt;b&gt;RDTSC/RDTSCP&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;时间戳读取&lt;br&gt;&lt;font color=&quot;#c62828&quot;&gt;反调试计时&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="200" y="645" width="110" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="exit_exception" value="&lt;b&gt;Exception/NMI&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;#DB/#BP/INT 2D&lt;br&gt;&lt;font color=&quot;#c62828&quot;&gt;调试异常拦截&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="320" y="645" width="110" height="55" as="geometry" />
+        </mxCell>
+
+        <!-- =================== EPT (Extended Page Tables) =================== -->
+        <mxCell id="ept_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#b71c1c;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="505" y="545" width="445" height="295" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_title" value="&lt;b&gt;EPT (Extended Page Tables) — 二级地址翻译&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#b71c1c;" vertex="1" parent="1">
+          <mxGeometry x="520" y="550" width="380" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Address translation flow -->
+        <mxCell id="addr_gva" value="&lt;b&gt;GVA&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Guest Virtual&lt;br&gt;Address&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="525" y="580" width="85" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="addr_gpa" value="&lt;b&gt;GPA&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Guest Physical&lt;br&gt;Address&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="680" y="580" width="85" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="addr_hpa" value="&lt;b&gt;HPA&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Host Physical&lt;br&gt;Address&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="835" y="580" width="85" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Translation arrows -->
+        <mxCell id="e_gva_gpa" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;Guest CR3&lt;/b&gt;&lt;br&gt;Guest 页表&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" source="addr_gva" target="addr_gpa" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_gpa_hpa" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;EPT 页表&lt;/b&gt;&lt;br&gt;Hypervisor 控制&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#c62828;strokeWidth=2;" edge="1" source="addr_gpa" target="addr_hpa" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- EPT 4-level -->
+        <mxCell id="ept_walk" value="&lt;b&gt;EPT 4级页表遍历&lt;/b&gt;" style="text;html=1;align=left;fontFamily=Segoe UI;fontSize=10;fontColor=#b71c1c;" vertex="1" parent="1">
+          <mxGeometry x="525" y="645" width="150" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ept_pml4" value="&lt;b&gt;PML4&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="525" y="668" width="75" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_pdpt" value="&lt;b&gt;PDPT&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="615" y="668" width="75" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_pd" value="&lt;b&gt;PD&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;2MB 大页&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="705" y="668" width="75" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_pt" value="&lt;b&gt;PT&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:7px;&quot;&gt;4KB 页&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1;fontFamily=Segoe UI;fontSize=9;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="795" y="668" width="75" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- EPT walk arrows -->
+        <mxCell id="e_pml4_pdpt" style="rounded=1;html=1;strokeColor=#c62828;strokeWidth=1.5;" edge="1" source="ept_pml4" target="ept_pdpt" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pdpt_pd" style="rounded=1;html=1;strokeColor=#c62828;strokeWidth=1.5;" edge="1" source="ept_pdpt" target="ept_pd" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pd_pt" style="rounded=1;html=1;strokeColor=#c62828;strokeWidth=1.5;" edge="1" source="ept_pd" target="ept_pt" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- EPT permissions -->
+        <mxCell id="ept_perms" value="&lt;table style=&quot;font-size:8px;font-family:Segoe UI;border-collapse:collapse;&quot;&gt;&lt;tr&gt;&lt;td style=&quot;background:#b71c1c;color:white;padding:3px 6px;&quot; colspan=4&gt;&lt;b&gt;EPT PTE 权限位&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;R&lt;/b&gt; (bit 0)&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;W&lt;/b&gt; (bit 1)&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;X&lt;/b&gt; (bit 2)&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;&quot;&gt;&lt;b&gt;Memory Type&lt;/b&gt;&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#e8f5e9;&quot;&gt;Read&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#fff3e0;&quot;&gt;Write&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#ffccbc;&quot;&gt;Execute&lt;/td&gt;&lt;td style=&quot;padding:2px 5px;border:1px solid #ddd;background:#e8eaf6;&quot;&gt;WB/UC/...&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;align=left;verticalAlign=top;overflow=fill;" vertex="1" parent="1">
+          <mxGeometry x="525" y="710" width="350" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- Hook key insight -->
+        <mxCell id="hook_insight" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;🔑 EPT Hook 核心原理:&lt;/b&gt;&lt;br&gt;同一 GPA 设置不同权限 →&lt;br&gt;执行时: X-only (Hook Page, 含 JMP)&lt;br&gt;读写时: RW-only (Original Page)&lt;br&gt;→ 代码修改对 Guest 完全不可见&lt;/font&gt;" style="shape=note;whiteSpace=wrap;html=1;size=12;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=2;fontFamily=Segoe UI;shadow=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="525" y="778" width="250" height="85" as="geometry" />
+        </mxCell>
+
+        <!-- Blue Pill note -->
+        <mxCell id="bluepill" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;💊 Blue Pill (Type-2) Hypervisor:&lt;/b&gt;&lt;br&gt;在已运行的 OS 之下注入 Hypervisor，&lt;br&gt;OS 成为 Guest 但毫无感知。&lt;br&gt;VMXToolbox 即采用此架构。&lt;/font&gt;" style="shape=note;whiteSpace=wrap;html=1;size=12;fillColor=#e8eaf6;strokeColor=#3949ab;strokeWidth=2;fontFamily=Segoe UI;shadow=1;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="790" y="778" width="230" height="78" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================== -->
+        <!--  PART 2: Nested Virtualization (Right Half)                          -->
+        <!-- ================================================================== -->
+        <mxCell id="part2_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#37474f;strokeWidth=2;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="990" y="90" width="960" height="860" as="geometry" />
+        </mxCell>
+        <mxCell id="part2_title" value="&lt;font style=&quot;font-size:16px;&quot; color=&quot;#6a1b9a&quot;&gt;&lt;b&gt;Part 2: Hyper-V 嵌套虚拟化 (Nested Virtualization)&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="98" width="550" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- =================== 3-Layer Stack =================== -->
+        <mxCell id="nest_stack_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#6a1b9a;strokeWidth=1.5;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="135" width="560" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="nest_stack_title" value="&lt;b&gt;嵌套虚拟化三层模型 (L0 / L1 / L2)&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#6a1b9a;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="140" width="300" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- L0: Physical Hardware + Hyper-V -->
+        <mxCell id="L0_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffebee;strokeColor=#b71c1c;strokeWidth=2.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="170" width="530" height="118" as="geometry" />
+        </mxCell>
+        <mxCell id="L0_badge" value="&lt;font style=&quot;font-size:12px;&quot; color=&quot;white&quot;&gt;&lt;b&gt;L0&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b71c1c;strokeColor=#b71c1c;strokeWidth=0;fontFamily=Segoe UI;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1035" y="178" width="35" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="L0_label" value="&lt;b&gt;物理主机 Hypervisor (Hyper-V / KVM)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#666&quot;&gt;真正的 VMX Root Mode — 直接控制硬件&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;fontColor=#b71c1c;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="175" width="350" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L0_hw" value="&lt;b&gt;物理 CPU&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;VT-x / VMX&lt;br&gt;EPT 硬件支持&lt;br&gt;VMCS Shadowing&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="210" width="110" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L0_vmcs" value="&lt;b&gt;L0 VMCS&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;真正的硬件 VMCS&lt;br&gt;控制 L1 Guest&lt;br&gt;管理 EPT-01&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1165" y="210" width="110" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L0_ept01" value="&lt;b&gt;EPT-01&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;L1 GPA → HPA&lt;br&gt;物理页表映射&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1290" y="210" width="100" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L0_shadow" value="&lt;b&gt;VMCS Shadowing&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;虚拟化 L1 的&lt;br&gt;VMREAD/VMWRITE&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#c62828;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1405" y="210" width="135" height="65" as="geometry" />
+        </mxCell>
+
+        <!-- L1: Guest OS + Nested Hypervisor -->
+        <mxCell id="L1_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#e65100;strokeWidth=2.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="305" width="530" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="L1_badge" value="&lt;font style=&quot;font-size:12px;&quot; color=&quot;white&quot;&gt;&lt;b&gt;L1&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e65100;strokeColor=#e65100;strokeWidth=0;fontFamily=Segoe UI;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1035" y="313" width="35" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="L1_label" value="&lt;b&gt;L1 Guest OS (Windows VM) + 嵌套 Hypervisor&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#666&quot;&gt;VMX Non-Root (对 L0)，但自认为是 VMX Root (对 L2)&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;fontColor=#e65100;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="310" width="450" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L1_os" value="&lt;b&gt;Windows Guest&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Ring 0 Kernel&lt;br&gt;NT / Win32k&lt;br&gt;Drivers&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="345" width="100" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L1_vmxtoolbox" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;VMXToolboxDrv.sys&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Blue Pill Hypervisor&lt;br&gt;执行 VMXON/VMLAUNCH&lt;br&gt;设置 &quot;L1 VMCS&quot; (虚拟)&lt;br&gt;配置 &quot;EPT-12&quot; (虚拟)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffccbc;strokeColor=#d84315;strokeWidth=2;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1160" y="345" width="145" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L1_vmcs_virtual" value="&lt;b&gt;&quot;L1 VMCS&quot;&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;L1 认为这是真实 VMCS&lt;br&gt;实际被 L0 Shadow&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1320" y="345" width="120" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L1_ept12" value="&lt;b&gt;&quot;EPT-12&quot;&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;L1 配置的 EPT&lt;br&gt;L2 GPA → L1 GPA&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1455" y="345" width="90" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L1_note" value="&lt;font style=&quot;font-size:8px;&quot; color=&quot;#e65100&quot;&gt;⚡ L1 的 VMXON/VMLAUNCH&lt;br&gt;会触发 VM-Exit 到 L0&lt;br&gt;L0 模拟这些指令&lt;/font&gt;" style="text;html=1;align=left;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="420" width="165" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- L2: Nested Guest -->
+        <mxCell id="L2_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=2.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="478" width="530" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="L2_badge" value="&lt;font style=&quot;font-size:12px;&quot; color=&quot;white&quot;&gt;&lt;b&gt;L2&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2e7d32;strokeColor=#2e7d32;strokeWidth=0;fontFamily=Segoe UI;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="1035" y="486" width="35" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="L2_label" value="&lt;b&gt;L2 Guest (被 VMXToolbox 虚拟化的 OS)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot; color=&quot;#666&quot;&gt;L1 Hypervisor 的 Guest — 实际由 L0 直接调度执行&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=10;fontColor=#2e7d32;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="483" width="430" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L2_kernel" value="&lt;b&gt;Guest Kernel&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;受 L1 VMX 保护&lt;br&gt;EPT Hook 隐形&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="518" width="110" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L2_apps" value="&lt;b&gt;Applications&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;用户态进程&lt;br&gt;被调试目标&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="518" width="100" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="L2_ept_merged" value="&lt;b&gt;EPT-02 (合并)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;L0 合并 EPT-01 + EPT-12&lt;br&gt;L2 GPA → HPA 直通&lt;br&gt;&lt;font color=&quot;#c62828&quot;&gt;包含 Hook 页分裂&lt;/font&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=2;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1295" y="518" width="140" height="58" as="geometry" />
+        </mxCell>
+
+        <!-- L-level transition arrows -->
+        <mxCell id="e_L0_L1_entry" value="" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#e65100;strokeColor=#e65100;width=8;endSize=4;startSize=4;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1565" y="288" as="sourcePoint" />
+            <mxPoint x="1565" y="305" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_L1_L0_exit" value="" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#b71c1c;strokeColor=#b71c1c;width=8;endSize=4;startSize=4;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1585" y="305" as="sourcePoint" />
+            <mxPoint x="1585" y="288" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trans_L01_label" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;font color=&quot;#e65100&quot;&gt;VM-Entry&lt;/font&gt; / &lt;font color=&quot;#b71c1c&quot;&gt;VM-Exit&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=center;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="287" width="100" height="15" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_L1_L2_entry" value="" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#2e7d32;strokeColor=#2e7d32;width=8;endSize=4;startSize=4;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1565" y="460" as="sourcePoint" />
+            <mxPoint x="1565" y="478" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_L2_L1_exit" value="" style="shape=flexArrow;endArrow=classic;html=1;fillColor=#e65100;strokeColor=#e65100;width=8;endSize=4;startSize=4;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1585" y="478" as="sourcePoint" />
+            <mxPoint x="1585" y="460" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="trans_L12_label" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;font color=&quot;#2e7d32&quot;&gt;虚拟 VM-Entry&lt;/font&gt; /&lt;br&gt;&lt;font color=&quot;#e65100&quot;&gt;虚拟 VM-Exit&lt;/font&gt;&lt;/font&gt;" style="text;html=1;align=center;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="1600" y="455" width="100" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- =================== EPT Composition =================== -->
+        <mxCell id="ept_comp_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#880e4f;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="670" width="560" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_comp_title" value="&lt;b&gt;嵌套 EPT 合并 — 三级地址翻译&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#880e4f;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="675" width="300" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ept_l2gva" value="&lt;b&gt;L2 GVA&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1025" y="705" width="80" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_l2gpa" value="&lt;b&gt;L2 GPA&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1150" y="705" width="80" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_l1gpa" value="&lt;b&gt;L1 GPA&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1290" y="705" width="80" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="ept_hpa" value="&lt;b&gt;HPA&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#b71c1c;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=10;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="1430" y="705" width="80" height="35" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_l2gva_l2gpa" value="&lt;font style=&quot;font-size:7px;&quot;&gt;L2 CR3&lt;/font&gt;" style="rounded=1;html=1;strokeColor=#2e7d32;strokeWidth=2;" edge="1" source="ept_l2gva" target="ept_l2gpa" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_l2gpa_l1gpa" value="&lt;font style=&quot;font-size:7px;&quot;&gt;EPT-12&lt;br&gt;(L1 配置)&lt;/font&gt;" style="rounded=1;html=1;strokeColor=#e65100;strokeWidth=2;" edge="1" source="ept_l2gpa" target="ept_l1gpa" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_l1gpa_hpa" value="&lt;font style=&quot;font-size:7px;&quot;&gt;EPT-01&lt;br&gt;(L0 配置)&lt;/font&gt;" style="rounded=1;html=1;strokeColor=#b71c1c;strokeWidth=2;" edge="1" source="ept_l1gpa" target="ept_hpa" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Merged shortcut -->
+        <mxCell id="ept_merged_arrow" value="" style="edgeStyle=orthogonalEdgeStyle;curved=1;rounded=1;html=1;strokeColor=#880e4f;strokeWidth=2.5;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=1;" edge="1" source="ept_l2gpa" target="ept_hpa" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1190" y="775" />
+              <mxPoint x="1470" y="775" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ept_merged_label" value="&lt;font style=&quot;font-size:9px;&quot; color=&quot;#880e4f&quot;&gt;&lt;b&gt;EPT-02 (L0 优化合并: L2 GPA → HPA 直通)&lt;/b&gt;&lt;/font&gt;" style="edgeLabel;html=1;align=center;verticalAlign=middle;fontFamily=Segoe UI;" vertex="1" connectable="0" parent="ept_merged_arrow">
+          <mxGeometry x="-0.05" relative="1" as="geometry">
+            <mxPoint y="5" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- =================== Nested VMX Flow =================== -->
+        <mxCell id="flow_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#0d47a1;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="1595" y="135" width="340" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="flow_title" value="&lt;b&gt;嵌套 VM-Exit 处理流程&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#0d47a1;" vertex="1" parent="1">
+          <mxGeometry x="1610" y="140" width="200" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fl1" value="&lt;b&gt;① L2 Guest 执行&lt;br&gt;敏感指令&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;CPUID / CR 访问 /&lt;br&gt;EPT Violation / ...&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1630" y="170" width="150" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fl2" value="&lt;b&gt;② VM-Exit → L0&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;硬件自动退出到&lt;br&gt;L0 Hypervisor&lt;br&gt;(跳过 L1!)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#b71c1c;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1630" y="248" width="150" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fl3" value="&lt;b&gt;③ L0 判断:&lt;br&gt;该由谁处理?&lt;/b&gt;" style="shape=mxgraph.flowchart.decision;whiteSpace=wrap;html=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;size=0.15;" vertex="1" parent="1">
+          <mxGeometry x="1645" y="328" width="120" height="68" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fl4a" value="&lt;b&gt;④a L0 自行处理&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;EPT-02 违规、&lt;br&gt;硬件级事件&lt;br&gt;→ 直接修复&lt;br&gt;→ VM-Resume L2&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#b71c1c;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1790" y="333" width="130" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fl4b" value="&lt;b&gt;④b 注入给 L1&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;L1 关注的事件&lt;br&gt;→ 模拟 VM-Exit 给 L1&lt;br&gt;→ L1 Hypervisor 处理&lt;br&gt;→ L1 执行 VMRESUME&lt;br&gt;→ L0 恢复 L2&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1630" y="420" width="140" height="85" as="geometry" />
+        </mxCell>
+
+        <mxCell id="fl5" value="&lt;b&gt;⑤ L2 恢复执行&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;VMRESUME → L2&lt;br&gt;L2 毫不知情&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1630" y="525" width="150" height="50" as="geometry" />
+        </mxCell>
+
+        <!-- Flow arrows -->
+        <mxCell id="efl12" style="rounded=1;html=1;strokeColor=#b71c1c;strokeWidth=2;" edge="1" source="fl1" target="fl2" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="efl23" style="rounded=1;html=1;strokeColor=#0d47a1;strokeWidth=2;" edge="1" source="fl2" target="fl3" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="efl3_4a" value="&lt;font style=&quot;font-size:8px;&quot;&gt;L0 事件&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#b71c1c;strokeWidth=1.5;exitX=1;exitY=0.5;" edge="1" source="fl3" target="fl4a" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="efl3_4b" value="&lt;font style=&quot;font-size:8px;&quot;&gt;L1 事件&lt;/font&gt;" style="rounded=1;html=1;strokeColor=#e65100;strokeWidth=1.5;" edge="1" source="fl3" target="fl4b" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="efl4a_5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#2e7d32;strokeWidth=1.5;" edge="1" source="fl4a" target="fl5" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1855" y="560" />
+              <mxPoint x="1780" y="560" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="efl4b_5" style="rounded=1;html=1;strokeColor=#2e7d32;strokeWidth=1.5;" edge="1" source="fl4b" target="fl5" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- =================== Hyper-V Specific Features =================== -->
+        <mxCell id="hyperv_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0f7fa;strokeColor=#006064;strokeWidth=1.5;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="1595" y="670" width="340" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="hyperv_title" value="&lt;b&gt;Hyper-V 嵌套虚拟化关键技术&lt;/b&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;fontSize=11;fontColor=#006064;" vertex="1" parent="1">
+          <mxGeometry x="1610" y="675" width="280" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hv_feat1" value="&lt;b&gt;VMCS Shadowing&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;硬件加速 L1 的&lt;br&gt;VMREAD/VMWRITE&lt;br&gt;减少 VM-Exit 开销&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b2ebf2;strokeColor=#006064;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1610" y="700" width="120" height="62" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hv_feat2" value="&lt;b&gt;Enlightenments&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;半虚拟化接口&lt;br&gt;L1 可感知嵌套&lt;br&gt;优化 TLB/IPI&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b2ebf2;strokeColor=#006064;strokeWidth=1.5;fontFamily=Segoe UI;fontSize=9;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1745" y="700" width="100" height="62" as="geometry" />
+        </mxCell>
+
+        <mxCell id="hv_perf" value="&lt;font style=&quot;font-size:8px;&quot; color=&quot;#006064&quot;&gt;&lt;b&gt;性能:&lt;/b&gt; L2 执行 ~85-95% 原生速度&lt;br&gt;EPT-02 合并避免多级 TLB miss&lt;/font&gt;" style="text;html=1;align=left;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="1610" y="770" width="300" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================== -->
+        <!--  Bottom: VMXToolbox in Nested Scenario                              -->
+        <!-- ================================================================== -->
+        <mxCell id="scenario_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#f57f17;strokeWidth=2;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="975" width="1920" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="scenario_title" value="&lt;font style=&quot;font-size:14px;&quot; color=&quot;#f57f17&quot;&gt;&lt;b&gt;VMXToolbox 在 Hyper-V 嵌套虚拟化中的运行场景&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontFamily=Segoe UI;" vertex="1" parent="1">
+          <mxGeometry x="50" y="982" width="500" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_host" value="&lt;b&gt;物理主机&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Windows + Hyper-V&lt;br&gt;(L0 Hypervisor)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffcdd2;strokeColor=#b71c1c;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1015" width="130" height="58" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_vm" value="&lt;b&gt;Hyper-V VM&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;Windows Guest&lt;br&gt;嵌套虚拟化已启用&lt;br&gt;(L1 Guest)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="260" y="1012" width="140" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_vmxtoolbox" value="&lt;font color=&quot;#c62828&quot;&gt;&lt;b&gt;VMXToolboxDrv.sys&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;在 L1 VM 内加载&lt;br&gt;成为 L1 Hypervisor&lt;br&gt;创建 L2 执行环境&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffccbc;strokeColor=#d84315;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="475" y="1012" width="155" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_ept_hook" value="&lt;b&gt;EPT Hook 框架&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;配置 &quot;EPT-12&quot; 页分裂&lt;br&gt;L0 合并为 EPT-02&lt;br&gt;→ 透明函数 Hook&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#880e4f;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="705" y="1012" width="145" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_target" value="&lt;b&gt;被保护进程 (L2)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;反反调试保护&lt;br&gt;SSDT/Shadow SSDT 监控&lt;br&gt;内存读写 (CR3 Walk)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=2;fontFamily=Segoe UI;fontSize=10;shadow=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="925" y="1012" width="165" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_features" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;生效能力:&lt;/b&gt;&lt;br&gt;✅ Anti-Anti-Debug (PEB/DR/RDTSC/CPUID...)&lt;br&gt;✅ EPT/NPT Hook (SSDT/函数级)&lt;br&gt;✅ 物理地址内存读写&lt;br&gt;✅ SSDT &amp;amp; Shadow SSDT 监控&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;arcSize=8;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="1160" y="1010" width="280" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sc_req" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;嵌套虚拟化要求:&lt;/b&gt;&lt;br&gt;• 宿主: Intel VT-x + EPT (Haswell+)&lt;br&gt;• Hyper-V: Set-VMProcessor -ExposeVirtualizationExtensions $true&lt;br&gt;• Guest: bcdedit /set testsigning on&lt;br&gt;• 性能开销: VM-Exit 增加 ~1.5-3x 延迟&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1.5;fontFamily=Segoe UI;shadow=1;arcSize=8;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="1005" width="410" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- Scenario arrows -->
+        <mxCell id="esc12" style="rounded=1;html=1;strokeColor=#546e7a;strokeWidth=2;" edge="1" source="sc_host" target="sc_vm" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="esc23" style="rounded=1;html=1;strokeColor=#546e7a;strokeWidth=2;" edge="1" source="sc_vm" target="sc_vmxtoolbox" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="esc34" style="rounded=1;html=1;strokeColor=#546e7a;strokeWidth=2;" edge="1" source="sc_vmxtoolbox" target="sc_ept_hook" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="esc45" style="rounded=1;html=1;strokeColor=#546e7a;strokeWidth=2;" edge="1" source="sc_ept_hook" target="sc_target" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ================================================================== -->
+        <!--  Legend                                                              -->
+        <!-- ================================================================== -->
+        <mxCell id="legend_bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#bbb;strokeWidth=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1120" width="1920" height="42" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc1" value="" style="rounded=1;fillColor=#ffcdd2;strokeColor=#b71c1c;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="50" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc1t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;L0 / VMX Root / Hypervisor&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1129" width="160" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc2" value="" style="rounded=1;fillColor=#ffe0b2;strokeColor=#e65100;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="240" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc2t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;L1 / Ring 0 / Guest Kernel&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="260" y="1129" width="155" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc3" value="" style="rounded=1;fillColor=#c8e6c9;strokeColor=#2e7d32;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="425" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc3t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;L2 / Ring 3 / Guest Apps&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="445" y="1129" width="145" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc4" value="" style="rounded=1;fillColor=#c5cae9;strokeColor=#283593;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc4t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;VMCS 结构&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="620" y="1129" width="70" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc5" value="" style="rounded=1;fillColor=#ffccbc;strokeColor=#d84315;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="700" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc5t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;EPT Hook / 页分裂&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="720" y="1129" width="110" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc6" value="" style="rounded=1;fillColor=#bbdefb;strokeColor=#0d47a1;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="840" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc6t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;执行流程&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="860" y="1129" width="55" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc7" value="" style="rounded=1;fillColor=#b2ebf2;strokeColor=#006064;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="925" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc7t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Hyper-V 优化&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="945" y="1129" width="80" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lgc8" value="" style="rounded=1;fillColor=#fff9c4;strokeColor=#f9a825;strokeWidth=1;" vertex="1" parent="1">
+          <mxGeometry x="1035" y="1134" width="16" height="11" as="geometry" />
+        </mxCell>
+        <mxCell id="lgc8t" value="&lt;font style=&quot;font-size:9px;&quot;&gt;关键洞察 / 提示&lt;/font&gt;" style="text;html=1;fontFamily=Segoe UI;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="1055" y="1129" width="95" height="20" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
