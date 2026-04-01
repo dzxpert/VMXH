@@ -67,7 +67,7 @@ VMXToolbox.exe --ssdt-list
 ### 1.5 查看 Hook 事件日志
 
 ```cmd
-VMXToolbox.exe --get-hook-events
+VMXToolbox.exe --hook-events
 ```
 
 ### 1.6 移除 Hook
@@ -201,7 +201,7 @@ VMXToolbox.exe --ssdt-hook NtWriteFile --action log_only --pid <PID>
 
 :: 让目标进程运行一段时间...
 
-VMXToolbox.exe --get-hook-events
+VMXToolbox.exe --hook-events
 VMXToolbox.exe --ssdt-unhook-all
 ```
 
@@ -223,7 +223,7 @@ VMXToolbox.exe --ssdt-init
 VMXToolbox.exe --ssdt-monitor all --pid <PID>
 
 :: 等待...
-VMXToolbox.exe --get-hook-events
+VMXToolbox.exe --hook-events
 VMXToolbox.exe --log
 
 VMXToolbox.exe --ssdt-monitor off
@@ -238,7 +238,7 @@ VMXToolbox.exe --shadow-ssdt-hook NtUserGetMessage --action log_only --pid <GUI_
 VMXToolbox.exe --shadow-ssdt-hook NtUserPeekMessage --action log_only --pid <GUI_PID>
 
 :: 等待...
-VMXToolbox.exe --get-hook-events
+VMXToolbox.exe --hook-events
 VMXToolbox.exe --shadow-ssdt-unhook-all
 ```
 
