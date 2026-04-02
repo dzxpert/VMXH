@@ -391,8 +391,8 @@ static NTSTATUS HandleIoctlInit(PIRP Irp, PIO_STACK_LOCATION IoStack)
     /* Check if already initialized based on backend */
     if ((g_CpuVendor == CPU_VENDOR_INTEL && g_VmxState.Initialized) ||
         (g_CpuVendor == CPU_VENDOR_AMD && g_SvmState.Initialized)) {
-        LOG_WARN("Hypervisor already initialized");
-        return STATUS_ALREADY_REGISTERED;
+        LOG_INFO("Hypervisor already initialized, skipping");
+        return STATUS_SUCCESS;
     }
 
     LOG_INFO("Initializing %s on all processors...", g_HvOps->Name);

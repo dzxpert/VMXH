@@ -44,21 +44,13 @@ typedef struct _SSDT_STATE {
     /* Address cache: pre-resolved function VAs (indexed by syscall#) */
     ULONG64     ResolvedAddresses[SSDT_MAX_SERVICES];
 
-    /* File-mapped ntoskrnl image for clean SSDT resolution */
-    PVOID       FileImageBase;          /* SEC_IMAGE mapped view, NULL if unavailable */
-    SIZE_T      FileImageViewSize;      /* Size of mapped view */
-    HANDLE      FileImageSection;       /* Section handle (for cleanup) */
-
     /* Name cache: resolved Nt* export names */
     WCHAR       NameCache[SSDT_MAX_SERVICES][SSDT_MAX_NAME_LEN];
     BOOLEAN     NamesPopulated;
 
-    /* ntoskrnl base for PE export walk (live in-memory) */
+    /* ntoskrnl base for address range validation */
     ULONG64     NtoskrnlBase;
     ULONG       NtoskrnlSize;
-
-    /* Full path of ntoskrnl on disk (for file mapping) */
-    WCHAR       NtoskrnlPath[260];
 
     /* SSDT hook mapping list */
     PSSDT_HOOK_MAPPING  HookListHead;

@@ -2,17 +2,14 @@
  * ssdt.c - VMX Hypervisor Toolbox
  * SSDT (System Service Descriptor Table) Monitoring & Hook Framework
  *
- * Two-tier discovery + address resolution:
+ * SSDT discovery: Resolve several well-known Zw/Nt function pairs via
+ * MmGetSystemRoutineAddress, extract the syscall index from each Zw stub's
+ * `mov eax, imm32` instruction, then scan ntoskrnl's read-only data section
+ * for the LONG array where entry decoding matches all known pairs.
  *
- *   Tier 1 (primary): Map ntoskrnl.exe from disk via ZwCreateSection(SEC_IMAGE),
- *     walk its PE export table to locate KeServiceDescriptorTable, read the
- *     SSDT entries directly from the mapped image. Every byte comes from the
- *     digitally-signed on-disk file — zero in-memory data is trusted.
- *
- *   Tier 2 (fallback): MmGetSystemRoutineAddress("KeServiceDescriptorTable")
- *     to get the live in-memory table pointer, then read entries from the
- *     PatchGuard-protected KiServiceTable. Reliable on x64, but theoretically
- *     touchable in the narrow window before PG activates.
+ * This approach is independent of IA32_LSTAR / KiSystemCall64 code layout
+ * and works reliably across all x64 Windows versions (Vista through Win11),
+ * including systems with KPTI, VBS, and Hyper-V nested virtualization.
  *
  * All hook mechanics delegate to GenericHookInstall() / GenericHookRemove().
  */
@@ -22,10 +19,6 @@
 #include "log.h"
 #include <ntstrsafe.h>
 #include <ntimage.h>
-
-#ifndef SEC_IMAGE
-#define SEC_IMAGE 0x1000000
-#endif
 
 /* ========================================================================= */
 /*  Pool tag                                                                 */
@@ -44,42 +37,12 @@ SSDT_STATE g_SsdtState = { 0 };
 /* ========================================================================= */
 
 static NTSTATUS SsdtGetNtoskrnlBase(VOID);
-static NTSTATUS SsdtMapNtoskrnlFromDisk(VOID);
-static VOID     SsdtUnmapFileImage(VOID);
-static NTSTATUS SsdtDiscoverAndResolveFromDisk(VOID);
-static NTSTATUS SsdtDiscoverAndResolveFromMemory(VOID);
+static NTSTATUS SsdtDiscoverByZwStubReverse(VOID);
 static PSSDT_HOOK_MAPPING SsdtFindMappingByIndex(ULONG Index);
 static PSSDT_HOOK_MAPPING SsdtFindMappingByHookId(ULONG HookId);
 
 /* ========================================================================= */
-/*  KeServiceDescriptorTable structure (stable across all x64 NT)            */
-/* ========================================================================= */
-
-/*
- * Layout (undocumented but binary-stable since x64 Windows XP):
- *
- *   +0x00  PLONG   Base     ->  KiServiceTable (array of relative offsets)
- *   +0x08  PULONG  Count    ->  unused on x64 (always NULL)
- *   +0x10  ULONG64 Limit    ->  number of services (pointer-width storage)
- *   +0x18  PUCHAR  Number   ->  argument byte-count table (KiArgumentTable)
- *
- * KeServiceDescriptorTable[0] = ntoskrnl SSDT
- * KeServiceDescriptorTable[1] = win32k shadow SSDT (not used here)
- *
- * In the SEC_IMAGE mapping, the struct contents are unrelocated:
- *   - Base contains the RVA (relative to ntoskrnl ImageBase), not a live VA
- *   - Limit is an absolute count, position-independent
- */
-
-typedef struct _KSERVICE_TABLE_DESCRIPTOR {
-    PLONG       Base;
-    PULONG      Count;
-    ULONG64     Limit;
-    PUCHAR      Number;
-} KSERVICE_TABLE_DESCRIPTOR, *PKSERVICE_TABLE_DESCRIPTOR;
-
-/* ========================================================================= */
-/*  3a. ntoskrnl Base Discovery + Disk Path                                  */
+/*  2a. ntoskrnl Base Discovery                                              */
 /* ========================================================================= */
 
 /*
@@ -113,20 +76,16 @@ typedef struct _RTL_PROCESS_MODULES {
 } RTL_PROCESS_MODULES, *PRTL_PROCESS_MODULES;
 
 /*
- * SsdtGetNtoskrnlBase - Get ntoskrnl load address, size, and disk path.
+ * SsdtGetNtoskrnlBase - Get ntoskrnl load address and size.
  *
- * The disk path (FullPathName) is needed for file-image mapping.
- * The path comes in DOS device form (e.g. "\SystemRoot\system32\ntoskrnl.exe"
- * or "\??\C:\Windows\system32\ntoskrnl.exe") — we normalise it to an
- * NT object path for ZwOpenFile.
+ * Uses ZwQuerySystemInformation(SystemModuleInformation).  The first
+ * module returned is always ntoskrnl.exe.
  */
 static NTSTATUS SsdtGetNtoskrnlBase(VOID)
 {
     NTSTATUS    Status;
     ULONG       Size = 0;
     PRTL_PROCESS_MODULES Modules = NULL;
-    const char *FullPath;
-    ULONG       PathLen, k;
 
     Status = ZwQuerySystemInformation(SystemModuleInformation, NULL, 0, &Size);
     if (Size == 0) {
@@ -153,394 +112,354 @@ static NTSTATUS SsdtGetNtoskrnlBase(VOID)
     g_SsdtState.NtoskrnlBase = (ULONG64)Modules->Modules[0].ImageBase;
     g_SsdtState.NtoskrnlSize = Modules->Modules[0].ImageSize;
 
-    /*
-     * Store disk path.  SystemModuleInformation returns paths like:
-     *   \SystemRoot\system32\ntoskrnl.exe
-     *   \??\C:\WINDOWS\system32\ntoskrnl.exe
-     *
-     * We convert to an NT path usable by ZwOpenFile:
-     *   \SystemRoot\... → already valid NT path, use as-is
-     *   \??\...         → already valid NT path, use as-is
-     *   Otherwise       → prepend \SystemRoot\system32\ + filename
-     */
-    FullPath = (const char *)Modules->Modules[0].FullPathName;
-    PathLen = (ULONG)strlen(FullPath);
-
-    if (PathLen > 12 && FullPath[0] == '\\' &&
-        FullPath[1] == 'D' && FullPath[2] == 'e' && FullPath[3] == 'v' &&
-        FullPath[4] == 'i' && FullPath[5] == 'c' && FullPath[6] == 'e' &&
-        FullPath[7] == '\\') {
-        /*
-         * \Device\HarddiskVolumeN\Windows\system32\ntoskrnl.exe
-         * ZwOpenFile cannot open \Device\ paths directly.
-         * Extract the relative path after the volume (look for \Windows\)
-         * and prepend \SystemRoot to form a valid NT path.
-         *
-         * Search for "\Windows\" (case-insensitive) or "\WINDOWS\".
-         */
-        const char *WinDir = NULL;
-        ULONG j;
-        for (j = 8; j + 9 < PathLen; j++) {
-            if (FullPath[j] == '\\' &&
-                (FullPath[j+1] == 'W' || FullPath[j+1] == 'w') &&
-                (FullPath[j+2] == 'i' || FullPath[j+2] == 'I') &&
-                (FullPath[j+3] == 'n' || FullPath[j+3] == 'N') &&
-                (FullPath[j+4] == 'd' || FullPath[j+4] == 'D') &&
-                (FullPath[j+5] == 'o' || FullPath[j+5] == 'O') &&
-                (FullPath[j+6] == 'w' || FullPath[j+6] == 'W') &&
-                (FullPath[j+7] == 's' || FullPath[j+7] == 'S') &&
-                FullPath[j+8] == '\\') {
-                WinDir = &FullPath[j];  /* points to "\Windows\..." */
-                break;
-            }
-        }
-        if (WinDir) {
-            /* Build \SystemRoot\system32\ntoskrnl.exe from \Windows\system32\ntoskrnl.exe */
-            WCHAR Prefix[] = L"\\SystemRoot";
-            ULONG PrefixLen = (ULONG)wcslen(Prefix);
-            const char *Remainder = WinDir + 8; /* skip "\Windows", keep "\system32\..." */
-            ULONG RemLen = (ULONG)strlen(Remainder);
-
-            RtlCopyMemory(g_SsdtState.NtoskrnlPath, Prefix, PrefixLen * sizeof(WCHAR));
-            for (k = 0; k < RemLen && (PrefixLen + k) < 259; k++) {
-                g_SsdtState.NtoskrnlPath[PrefixLen + k] = (WCHAR)(UCHAR)Remainder[k];
-            }
-            g_SsdtState.NtoskrnlPath[PrefixLen + k] = L'\0';
-            LOG_INFO("SSDT: Converted \\Device path to %ws", g_SsdtState.NtoskrnlPath);
-        } else {
-            /* \Device\ path but no \Windows\ found — use as-is and hope for the best */
-            for (k = 0; k < PathLen && k < 259; k++) {
-                g_SsdtState.NtoskrnlPath[k] = (WCHAR)(UCHAR)FullPath[k];
-            }
-            g_SsdtState.NtoskrnlPath[k] = L'\0';
-            LOG_WARN("SSDT: \\Device path without \\Windows\\: %ws", g_SsdtState.NtoskrnlPath);
-        }
-    } else if (PathLen > 0 && FullPath[0] == '\\') {
-        /* Already an NT-style path (\SystemRoot\... or \??\...) */
-        for (k = 0; k < PathLen && k < 259; k++) {
-            g_SsdtState.NtoskrnlPath[k] = (WCHAR)(UCHAR)FullPath[k];
-        }
-        g_SsdtState.NtoskrnlPath[k] = L'\0';
-    } else {
-        /* Bare filename or relative — build full path from SystemRoot */
-        USHORT FileOffset = Modules->Modules[0].OffsetToFileName;
-        const char *FileName = (const char *)Modules->Modules[0].FullPathName + FileOffset;
-        WCHAR Prefix[] = L"\\SystemRoot\\system32\\";
-        ULONG PrefixLen = (ULONG)wcslen(Prefix);
-        ULONG NameLen = (ULONG)strlen(FileName);
-
-        RtlCopyMemory(g_SsdtState.NtoskrnlPath, Prefix, PrefixLen * sizeof(WCHAR));
-        for (k = 0; k < NameLen && (PrefixLen + k) < 259; k++) {
-            g_SsdtState.NtoskrnlPath[PrefixLen + k] = (WCHAR)(UCHAR)FileName[k];
-        }
-        g_SsdtState.NtoskrnlPath[PrefixLen + k] = L'\0';
-    }
-
-    LOG_INFO("SSDT: ntoskrnl base=0x%llX size=0x%X path=%ws",
-             g_SsdtState.NtoskrnlBase, g_SsdtState.NtoskrnlSize,
-             g_SsdtState.NtoskrnlPath);
+    LOG_INFO("SSDT: ntoskrnl base=0x%llX size=0x%X",
+             g_SsdtState.NtoskrnlBase, g_SsdtState.NtoskrnlSize);
 
     ExFreePoolWithTag(Modules, SSDT_TAG);
     return STATUS_SUCCESS;
 }
 
-/* ========================================================================= */
-/*  3b. SEC_IMAGE Mapping                                                    */
-/* ========================================================================= */
-
-/*
- * SsdtMapNtoskrnlFromDisk - Map ntoskrnl.exe from disk as SEC_IMAGE.
- *
- * Uses ZwCreateSection(SEC_IMAGE) + ZwMapViewOfSection to let the memory
- * manager load the PE with proper section alignment. This means:
- *   - All sections are laid out at their VirtualAddress offsets
- *   - RVAs can be used directly as offsets from the mapping base
- *   - No manual RVA-to-file-offset conversion needed
- *   - Relocations are NOT applied (the image is mapped at an arbitrary VA),
- *     but we only read SSDT relative offsets which are position-independent
- *
- * The mapping is done into System process address space (kernel VA).
- */
-static NTSTATUS SsdtMapNtoskrnlFromDisk(VOID)
-{
-    NTSTATUS            Status;
-    UNICODE_STRING      FilePath;
-    OBJECT_ATTRIBUTES   ObjAttrs;
-    IO_STATUS_BLOCK     IoStatus;
-    HANDLE              FileHandle = NULL;
-    HANDLE              SectionHandle = NULL;
-    PVOID               ViewBase = NULL;
-    SIZE_T              ViewSize = 0;
-
-    if (g_SsdtState.NtoskrnlPath[0] == L'\0') {
-        return STATUS_NOT_FOUND;
-    }
-
-    /* Open the file */
-    RtlInitUnicodeString(&FilePath, g_SsdtState.NtoskrnlPath);
-    InitializeObjectAttributes(&ObjAttrs, &FilePath,
-                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
-                               NULL, NULL);
-
-    Status = ZwOpenFile(&FileHandle,
-                        FILE_READ_DATA | FILE_EXECUTE | SYNCHRONIZE,
-                        &ObjAttrs,
-                        &IoStatus,
-                        FILE_SHARE_READ,
-                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
-    if (!NT_SUCCESS(Status)) {
-        LOG_WARN("SSDT: ZwOpenFile(%ws) failed: 0x%08X", g_SsdtState.NtoskrnlPath, Status);
-        return Status;
-    }
-
-    /*
-     * Create an image section. SEC_IMAGE tells the memory manager to parse
-     * the PE headers and lay out sections at their VirtualAddress offsets,
-     * just like a normal image load — but without executing DllMain or
-     * applying relocations (we don't need those).
-     */
-    InitializeObjectAttributes(&ObjAttrs, NULL,
-                               OBJ_KERNEL_HANDLE, NULL, NULL);
-
-    Status = ZwCreateSection(&SectionHandle,
-                             SECTION_MAP_READ,
-                             &ObjAttrs,
-                             NULL,              /* MaximumSize = file size */
-                             PAGE_READONLY,
-                             SEC_IMAGE,         /* Key: image mapping */
-                             FileHandle);
-    ZwClose(FileHandle);
-    FileHandle = NULL;
-
-    if (!NT_SUCCESS(Status)) {
-        LOG_WARN("SSDT: ZwCreateSection(SEC_IMAGE) failed: 0x%08X", Status);
-        return Status;
-    }
-
-    /*
-     * Map the section into System process address space.
-     * ViewUnmap type = ViewShare so it's automatically cleaned up.
-     */
-    Status = ZwMapViewOfSection(SectionHandle,
-                                ZwCurrentProcess(),
-                                &ViewBase,
-                                0,              /* ZeroBits */
-                                0,              /* CommitSize */
-                                NULL,           /* SectionOffset */
-                                &ViewSize,
-                                ViewShare,
-                                0,              /* AllocationType */
-                                PAGE_READONLY);
-    if (!NT_SUCCESS(Status)) {
-        LOG_WARN("SSDT: ZwMapViewOfSection failed: 0x%08X", Status);
-        ZwClose(SectionHandle);
-        return Status;
-    }
-
-    /* Basic PE validation on the mapped image */
-    __try {
-        PIMAGE_DOS_HEADER Dos = (PIMAGE_DOS_HEADER)ViewBase;
-        PIMAGE_NT_HEADERS64 Nt;
-
-        if (Dos->e_magic != IMAGE_DOS_SIGNATURE) {
-            ZwUnmapViewOfSection(ZwCurrentProcess(), ViewBase);
-            ZwClose(SectionHandle);
-            return STATUS_INVALID_IMAGE_FORMAT;
-        }
-
-        Nt = (PIMAGE_NT_HEADERS64)((PUCHAR)ViewBase + Dos->e_lfanew);
-        if (Nt->Signature != IMAGE_NT_SIGNATURE) {
-            ZwUnmapViewOfSection(ZwCurrentProcess(), ViewBase);
-            ZwClose(SectionHandle);
-            return STATUS_INVALID_IMAGE_FORMAT;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        ZwUnmapViewOfSection(ZwCurrentProcess(), ViewBase);
-        ZwClose(SectionHandle);
-        return STATUS_ACCESS_VIOLATION;
-    }
-
-    g_SsdtState.FileImageBase = ViewBase;
-    g_SsdtState.FileImageViewSize = ViewSize;
-    g_SsdtState.FileImageSection = SectionHandle;
-
-    LOG_INFO("SSDT: Mapped ntoskrnl from disk via SEC_IMAGE: base=%p, size=0x%llX",
-             ViewBase, (ULONG64)ViewSize);
-    return STATUS_SUCCESS;
-}
-
-static VOID SsdtUnmapFileImage(VOID)
-{
-    if (g_SsdtState.FileImageBase) {
-        ZwUnmapViewOfSection(ZwCurrentProcess(), g_SsdtState.FileImageBase);
-        g_SsdtState.FileImageBase = NULL;
-        g_SsdtState.FileImageViewSize = 0;
-    }
-    if (g_SsdtState.FileImageSection) {
-        ZwClose(g_SsdtState.FileImageSection);
-        g_SsdtState.FileImageSection = NULL;
-    }
-}
 
 /* ========================================================================= */
-/*  3c. Tier 1: Discover + Resolve from disk                                 */
+/*  2b. Discover by Zw* stub reverse engineering                             */
 /* ========================================================================= */
 
 /*
- * SsdtDiscoverAndResolveFromDisk - Walk mapped PE exports to find
- * KeServiceDescriptorTable, read SSDT entries from the clean on-disk image.
- *
- * Because SEC_IMAGE mapping lays out sections at their VirtualAddress offsets,
- * RVAs are direct offsets from the mapping base. The KSERVICE_TABLE_DESCRIPTOR
- * is unrelocated in the mapped image:
- *   - Base contains PreferredBase + RVA (the linker-assigned VA)
- *   - We subtract PreferredBase (from OptionalHeader.ImageBase) to get TableRva
- *   - Limit is position-independent (just a count)
- *
- * x64 SSDT entry format (identical on-disk and in-memory):
- *   LONG entry = KiServiceTable[index]
- *   FunctionVA = KiServiceTableVA + (entry >> 4)
- *   ArgCount   = entry & 0xF
- *
- * We read the LONG entries from the mapped image, then rebase the computed
- * addresses to the live NtoskrnlBase, giving us guaranteed-clean function VAs.
+ * Well-known Zw/Nt function pairs for index extraction.
+ * These are exported on every x64 Windows version from Vista through Win11.
+ * We only need a handful; more pairs = stronger validation.
  */
-static NTSTATUS SsdtDiscoverAndResolveFromDisk(VOID)
+typedef struct _ZW_NT_PAIR {
+    const WCHAR *ZwName;
+    const WCHAR *NtName;
+} ZW_NT_PAIR;
+
+static const ZW_NT_PAIR g_ZwNtPairs[] = {
+    { L"ZwClose",               L"NtClose" },
+    { L"ZwOpenProcess",         L"NtOpenProcess" },
+    { L"ZwReadFile",            L"NtReadFile" },
+    { L"ZwWriteFile",           L"NtWriteFile" },
+    { L"ZwCreateFile",          L"NtCreateFile" },
+    { L"ZwQueryInformationProcess", L"NtQueryInformationProcess" },
+    { L"ZwAllocateVirtualMemory",   L"NtAllocateVirtualMemory" },
+    { L"ZwFreeVirtualMemory",       L"NtFreeVirtualMemory" },
+};
+
+#define ZW_NT_PAIR_COUNT  (sizeof(g_ZwNtPairs) / sizeof(g_ZwNtPairs[0]))
+
+/*
+ * Minimum number of (Index, FuncVa) pairs we need to successfully extract
+ * before attempting the brute-force scan. 3 is enough for a unique match;
+ * we require at least 3 to proceed.
+ */
+#define ZW_MIN_PAIRS  3
+
+/*
+ * SsdtExtractIndexFromZwStub - Scan the first bytes of a Zw* kernel stub
+ * for `mov eax, imm32` (B8 xx xx 00 00) to extract the syscall index.
+ *
+ * x64 Zw stubs have this instruction within the first ~30 bytes.
+ * Returns TRUE on success, with *OutIndex set.
+ */
+static BOOLEAN SsdtExtractIndexFromZwStub(ULONG64 ZwFuncVa, PULONG OutIndex)
 {
-    PUCHAR                  MapBase;
+    PUCHAR Code;
+    ULONG  i;
+
+    if (!MmIsAddressValid((PVOID)ZwFuncVa)) return FALSE;
+
+    Code = (PUCHAR)ZwFuncVa;
+
+    /*
+     * Scan up to 30 bytes for B8 xx xx 00 00 (mov eax, imm32 with
+     * upper 16 bits zero — syscall indices are < 0x10000).
+     * Also accept B8 xx xx xx 00 for future-proofing (up to 16M services).
+     */
+    for (i = 0; i < 30; i++) {
+        if (!MmIsAddressValid((PVOID)(ZwFuncVa + i + 4))) return FALSE;
+
+        if (Code[i] == 0xB8 && Code[i + 3] == 0x00 && Code[i + 4] == 0x00) {
+            ULONG Index = *(PUSHORT)(&Code[i + 1]);
+            if (Index < SSDT_MAX_SERVICES) {
+                *OutIndex = Index;
+                return TRUE;
+            }
+        }
+    }
+
+    return FALSE;
+}
+
+/*
+ * SsdtFindRdataSection - Locate the .rdata (or INITKDBG, PAGE, etc.)
+ * section in ntoskrnl that contains read-only data.
+ *
+ * KiServiceTable lives in a read-only data section. We look for sections
+ * with IMAGE_SCN_CNT_INITIALIZED_DATA and !IMAGE_SCN_MEM_WRITE.
+ * If no .rdata found, falls back to full ntoskrnl range.
+ */
+static BOOLEAN SsdtFindRdataSection(
+    PUCHAR NtBase, ULONG NtSize,
+    PULONG64 OutStart, PULONG64 OutEnd)
+{
     PIMAGE_DOS_HEADER       Dos;
     PIMAGE_NT_HEADERS64     Nt;
-    PIMAGE_EXPORT_DIRECTORY Export;
-    PULONG                  Names;
-    PULONG                  Functions;
-    PUSHORT                 Ordinals;
-    ULONG64                 PreferredBase;
-    ULONG                   i;
+    PIMAGE_SECTION_HEADER   Sec;
+    USHORT                  i, NumSections;
     BOOLEAN                 Found = FALSE;
-    ULONG                   TableRva = 0;
-    ULONG                   ServiceCount = 0;
-    ULONG64                 LiveTableVa;
-    PLONG                   MappedEntries;
-    ULONG                   ValidCount = 0;
+    ULONG64                 BestStart = 0, BestEnd = 0;
 
-    if (!g_SsdtState.FileImageBase || g_SsdtState.NtoskrnlBase == 0) {
+    if (!MmIsAddressValid(NtBase)) return FALSE;
+
+    Dos = (PIMAGE_DOS_HEADER)NtBase;
+    if (Dos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+
+    Nt = (PIMAGE_NT_HEADERS64)(NtBase + Dos->e_lfanew);
+    if (!MmIsAddressValid((PVOID)Nt)) return FALSE;
+    if (Nt->Signature != IMAGE_NT_SIGNATURE) return FALSE;
+
+    NumSections = Nt->FileHeader.NumberOfSections;
+    Sec = IMAGE_FIRST_SECTION(Nt);
+
+    for (i = 0; i < NumSections; i++) {
+        if (!MmIsAddressValid((PVOID)&Sec[i])) break;
+
+        /*
+         * Look for initialized data sections that are not writable.
+         * KiServiceTable is typically in a section with these characteristics.
+         * We take the largest such section to maximize coverage.
+         */
+        if ((Sec[i].Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) &&
+            !(Sec[i].Characteristics & IMAGE_SCN_MEM_WRITE))
+        {
+            ULONG64 SecStart = (ULONG64)NtBase + Sec[i].VirtualAddress;
+            ULONG64 SecEnd   = SecStart + Sec[i].Misc.VirtualSize;
+
+            if (SecEnd > (ULONG64)NtBase + NtSize) {
+                SecEnd = (ULONG64)NtBase + NtSize;
+            }
+
+            if (!Found || (SecEnd - SecStart) > (BestEnd - BestStart)) {
+                BestStart = SecStart;
+                BestEnd   = SecEnd;
+                Found = TRUE;
+            }
+        }
+    }
+
+    if (Found) {
+        *OutStart = BestStart;
+        *OutEnd   = BestEnd;
+    }
+    return Found;
+}
+
+/*
+ * SsdtDiscoverByZwStubReverse - Tier 2: Reverse-engineer KiServiceTable
+ * location from known Zw/Nt function pairs.
+ *
+ * Algorithm:
+ *   1. For each well-known Zw/Nt pair, resolve both via MmGetSystemRoutineAddress.
+ *   2. Extract the syscall index from the Zw stub's `mov eax, imm32`.
+ *   3. This gives us (Index, NtFuncVa) tuples.
+ *   4. Scan ntoskrnl's read-only data section for a LONG array where
+ *      CandidateBase + (Entry[Index] >> 4) == NtFuncVa for all known pairs.
+ *   5. Once found, determine ServiceCount by walking entries forward.
+ */
+static NTSTATUS SsdtDiscoverByZwStubReverse(VOID)
+{
+    /* Collected (Index, NtFuncVa) pairs */
+    ULONG   PairIndex[ZW_NT_PAIR_COUNT];
+    ULONG64 PairNtVa[ZW_NT_PAIR_COUNT];
+    ULONG   PairCount = 0;
+    ULONG   k;
+
+    ULONG64 ScanStart, ScanEnd;
+    ULONG64 CandidateBase;
+    BOOLEAN Found = FALSE;
+    ULONG   ServiceCount = 0;
+    ULONG   ValidCount = 0;
+    ULONG   i;
+
+    if (g_SsdtState.NtoskrnlBase == 0 || g_SsdtState.NtoskrnlSize == 0) {
+        LOG_WARN("SSDT: ZwReverse: ntoskrnl base/size not set");
         return STATUS_UNSUCCESSFUL;
     }
 
-    MapBase = (PUCHAR)g_SsdtState.FileImageBase;
+    /*
+     * Phase 1: Extract (Index, NtFuncVa) pairs from Zw/Nt exports.
+     */
+    for (k = 0; k < ZW_NT_PAIR_COUNT; k++) {
+        UNICODE_STRING ZwName, NtName;
+        ULONG64 ZwVa, NtVa;
+        ULONG   Index;
 
-    __try {
-        /* Parse PE headers */
-        Dos = (PIMAGE_DOS_HEADER)MapBase;
-        if (Dos->e_magic != IMAGE_DOS_SIGNATURE) {
-            return STATUS_INVALID_IMAGE_FORMAT;
+        RtlInitUnicodeString(&ZwName, g_ZwNtPairs[k].ZwName);
+        RtlInitUnicodeString(&NtName, g_ZwNtPairs[k].NtName);
+
+        ZwVa = (ULONG64)MmGetSystemRoutineAddress(&ZwName);
+        NtVa = (ULONG64)MmGetSystemRoutineAddress(&NtName);
+
+        if (!ZwVa || !NtVa) {
+            LOG_DEBUG("SSDT: ZwReverse: %wZ or %wZ not found, skipping",
+                      &ZwName, &NtName);
+            continue;
         }
 
-        Nt = (PIMAGE_NT_HEADERS64)(MapBase + Dos->e_lfanew);
-        if (Nt->Signature != IMAGE_NT_SIGNATURE) {
-            return STATUS_INVALID_IMAGE_FORMAT;
+        if (!SsdtExtractIndexFromZwStub(ZwVa, &Index)) {
+            LOG_DEBUG("SSDT: ZwReverse: Failed to extract index from %wZ stub",
+                      &ZwName);
+            continue;
         }
 
-        PreferredBase = Nt->OptionalHeader.ImageBase;
-
-        /* Locate export directory */
-        if (Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress == 0) {
-            LOG_WARN("SSDT: No export directory in mapped ntoskrnl");
-            return STATUS_NOT_FOUND;
+        /* Sanity: NtFuncVa must be within ntoskrnl */
+        if (NtVa < g_SsdtState.NtoskrnlBase ||
+            NtVa >= g_SsdtState.NtoskrnlBase + g_SsdtState.NtoskrnlSize)
+        {
+            continue;
         }
 
-        Export = (PIMAGE_EXPORT_DIRECTORY)(MapBase +
-            Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+        PairIndex[PairCount] = Index;
+        PairNtVa[PairCount]  = NtVa;
+        PairCount++;
 
-        Names     = (PULONG)(MapBase + Export->AddressOfNames);
-        Functions = (PULONG)(MapBase + Export->AddressOfFunctions);
-        Ordinals  = (PUSHORT)(MapBase + Export->AddressOfNameOrdinals);
+        LOG_INFO("SSDT: ZwReverse: %wZ -> index=%u, %wZ -> VA=0x%llX",
+                 &ZwName, Index, &NtName, NtVa);
+    }
 
-        /* Walk exports to find KeServiceDescriptorTable */
-        for (i = 0; i < Export->NumberOfNames; i++) {
-            const char *Name = (const char *)(MapBase + Names[i]);
-            ULONG FuncRva;
-            PKSERVICE_TABLE_DESCRIPTOR Desc;
+    if (PairCount < ZW_MIN_PAIRS) {
+        LOG_WARN("SSDT: ZwReverse: Only extracted %u pairs (need %u), aborting",
+                 PairCount, (ULONG)ZW_MIN_PAIRS);
+        return STATUS_UNSUCCESSFUL;
+    }
 
-            /* strcmp inline — looking for "KeServiceDescriptorTable" exactly */
-            if (Name[0]  != 'K' || Name[1]  != 'e' || Name[2]  != 'S' ||
-                Name[3]  != 'e' || Name[4]  != 'r' || Name[5]  != 'v' ||
-                Name[6]  != 'i' || Name[7]  != 'c' || Name[8]  != 'e' ||
-                Name[9]  != 'D' || Name[10] != 'e' || Name[11] != 's' ||
-                Name[12] != 'c' || Name[13] != 'r' || Name[14] != 'i' ||
-                Name[15] != 'p' || Name[16] != 't' || Name[17] != 'o' ||
-                Name[18] != 'r' || Name[19] != 'T' || Name[20] != 'a' ||
-                Name[21] != 'b' || Name[22] != 'l' || Name[23] != 'e' ||
-                Name[24] != '\0') {
+    LOG_INFO("SSDT: ZwReverse: Extracted %u (Index, NtVa) pairs", PairCount);
+
+    /*
+     * Phase 2: Determine scan range.
+     * Prefer the read-only data section; fall back to entire ntoskrnl.
+     */
+    if (!SsdtFindRdataSection((PUCHAR)g_SsdtState.NtoskrnlBase,
+                               g_SsdtState.NtoskrnlSize,
+                               &ScanStart, &ScanEnd))
+    {
+        LOG_INFO("SSDT: ZwReverse: Could not locate .rdata, scanning full ntoskrnl");
+        ScanStart = g_SsdtState.NtoskrnlBase;
+        ScanEnd   = g_SsdtState.NtoskrnlBase + g_SsdtState.NtoskrnlSize;
+    } else {
+        LOG_INFO("SSDT: ZwReverse: Scanning .rdata [0x%llX, 0x%llX) (%u KB)",
+                 ScanStart, ScanEnd,
+                 (ULONG)((ScanEnd - ScanStart) / 1024));
+    }
+
+    /*
+     * Phase 3: Brute-force scan for KiServiceTable.
+     *
+     * For each 4-byte-aligned candidate address within the scan range,
+     * check whether all known (Index, NtVa) pairs decode correctly:
+     *   CandidateBase + (*(LONG*)(CandidateBase + Index*4) >> 4) == NtVa
+     *
+     * The highest Index among our pairs determines the minimum table size
+     * the candidate must accommodate.
+     */
+    {
+        ULONG MaxIndex = 0;
+        for (k = 0; k < PairCount; k++) {
+            if (PairIndex[k] > MaxIndex) MaxIndex = PairIndex[k];
+        }
+
+        for (CandidateBase = ScanStart;
+             CandidateBase + (ULONG64)(MaxIndex + 1) * sizeof(LONG) <= ScanEnd;
+             CandidateBase += sizeof(LONG))
+        {
+            PLONG   Table;
+            ULONG   MatchCount = 0;
+
+            /* Quick check: first candidate entry page must be mapped */
+            if (!MmIsAddressValid((PVOID)CandidateBase)) {
+                /* Skip ahead to the next page boundary */
+                CandidateBase = (CandidateBase + 0x1000) & ~0xFFFULL;
+                CandidateBase -= sizeof(LONG);  /* loop will add sizeof(LONG) */
                 continue;
             }
 
-            FuncRva = Functions[Ordinals[i]];
+            Table = (PLONG)CandidateBase;
 
-            /*
-             * In the mapped image, KeServiceDescriptorTable is at MapBase+FuncRva.
-             * Its .Base field contains an unrelocated pointer:
-             *   UnrelocatedBase = PreferredBase + KiServiceTableRva
-             * So: TableRva = (ULONG)((ULONG64)Desc->Base - PreferredBase)
-             */
-            Desc = (PKSERVICE_TABLE_DESCRIPTOR)(MapBase + FuncRva);
+            for (k = 0; k < PairCount; k++) {
+                ULONG64 EntryAddr = CandidateBase + (ULONG64)PairIndex[k] * sizeof(LONG);
+                LONG    Entry;
+                ULONG64 DecodedVa;
 
-            {
-                ULONG64 UnrelocatedBase = (ULONG64)Desc->Base;
-                ULONG   Limit;
+                if (!MmIsAddressValid((PVOID)EntryAddr)) break;
 
-                if (UnrelocatedBase < PreferredBase) {
-                    LOG_WARN("SSDT: Disk: UnrelocatedBase 0x%llX < PreferredBase 0x%llX",
-                             UnrelocatedBase, PreferredBase);
-                    return STATUS_UNSUCCESSFUL;
+                Entry = *(PLONG)EntryAddr;
+                DecodedVa = CandidateBase + (LONG64)(Entry >> 4);
+
+                if (DecodedVa == PairNtVa[k]) {
+                    MatchCount++;
                 }
-
-                TableRva = (ULONG)(UnrelocatedBase - PreferredBase);
-                Limit = (ULONG)(Desc->Limit & 0xFFFFFFFF);
-
-                if (Limit == 0 || Limit > SSDT_MAX_SERVICES) {
-                    LOG_WARN("SSDT: Disk: Limit=%u out of range", Limit);
-                    return STATUS_UNSUCCESSFUL;
-                }
-
-                ServiceCount = Limit;
             }
 
-            Found = TRUE;
-            LOG_INFO("SSDT: Disk: KeServiceDescriptorTable at RVA 0x%X, "
-                     "TableRva=0x%X, Limit=%u", FuncRva, TableRva, ServiceCount);
-            break;
+            if (MatchCount >= PairCount) {
+                Found = TRUE;
+                LOG_INFO("SSDT: ZwReverse: Found KiServiceTable at 0x%llX "
+                         "(%u/%u pairs matched)",
+                         CandidateBase, MatchCount, PairCount);
+                break;
+            }
+        }
+    }
+
+    if (!Found) {
+        LOG_WARN("SSDT: ZwReverse: KiServiceTable not found in scan range "
+                 "[0x%llX, 0x%llX)", ScanStart, ScanEnd);
+        return STATUS_NOT_FOUND;
+    }
+
+    /*
+     * Phase 4: Determine ServiceCount by walking entries forward until
+     * decoded VA falls outside ntoskrnl.
+     */
+    {
+        PLONG Table = (PLONG)CandidateBase;
+
+        for (ServiceCount = 0; ServiceCount < SSDT_MAX_SERVICES; ServiceCount++) {
+            ULONG64 EntryAddr = CandidateBase + (ULONG64)ServiceCount * sizeof(LONG);
+            LONG    Entry;
+            ULONG64 FuncVa;
+
+            if (!MmIsAddressValid((PVOID)EntryAddr)) break;
+
+            Entry  = Table[ServiceCount];
+            FuncVa = CandidateBase + (LONG64)(Entry >> 4);
+
+            if (FuncVa < g_SsdtState.NtoskrnlBase ||
+                FuncVa >= g_SsdtState.NtoskrnlBase + g_SsdtState.NtoskrnlSize)
+            {
+                break;
+            }
         }
 
-        if (!Found) {
-            LOG_WARN("SSDT: Disk: KeServiceDescriptorTable export not found");
-            return STATUS_NOT_FOUND;
+        if (ServiceCount < 100) {
+            LOG_WARN("SSDT: ZwReverse: Only found %u entries by walking, "
+                     "too few, aborting", ServiceCount);
+            return STATUS_UNSUCCESSFUL;
         }
 
-        /* Bounds check: SSDT entries must fit within the mapped view */
-        if ((ULONG64)TableRva + (ULONG64)ServiceCount * sizeof(LONG)
-            > g_SsdtState.FileImageViewSize)
-        {
-            LOG_WARN("SSDT: Disk: Table RVA 0x%X + entries exceed mapped view (0x%llX)",
-                     TableRva, (ULONG64)g_SsdtState.FileImageViewSize);
-            return STATUS_INVALID_IMAGE_FORMAT;
-        }
+        LOG_INFO("SSDT: ZwReverse: Determined %u services by table walk",
+                 ServiceCount);
+    }
 
-        MappedEntries = (PLONG)(MapBase + TableRva);
+    /*
+     * Phase 5: Decode all SSDT entries into ResolvedAddresses[].
+     */
+    {
+        PLONG Table = (PLONG)CandidateBase;
 
-        /*
-         * Compute the live VA of KiServiceTable for entry decoding.
-         * KiServiceTableVa = NtoskrnlBase + TableRva
-         */
-        LiveTableVa = g_SsdtState.NtoskrnlBase + (ULONG64)TableRva;
-
-        /* Resolve each entry: rebase on-disk data to live addresses */
         for (i = 0; i < ServiceCount; i++) {
-            LONG    Entry = MappedEntries[i];
-            ULONG64 FuncVa = LiveTableVa + (LONG64)(Entry >> 4);
+            LONG    Entry = Table[i];
+            ULONG64 FuncVa = CandidateBase + (LONG64)(Entry >> 4);
 
-            /* Sanity: function must be within ntoskrnl range */
             if (FuncVa >= g_SsdtState.NtoskrnlBase &&
                 FuncVa <  g_SsdtState.NtoskrnlBase + g_SsdtState.NtoskrnlSize) {
                 g_SsdtState.ResolvedAddresses[i] = FuncVa;
@@ -550,89 +469,12 @@ static NTSTATUS SsdtDiscoverAndResolveFromDisk(VOID)
             }
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_WARN("SSDT: Disk: Exception during discover+resolve");
-        return STATUS_ACCESS_VIOLATION;
-    }
 
-    /* Commit results to global state */
-    g_SsdtState.KiServiceTableVa = g_SsdtState.NtoskrnlBase + (ULONG64)TableRva;
+    /* Commit results */
+    g_SsdtState.KiServiceTableVa = CandidateBase;
     g_SsdtState.ServiceCount = ServiceCount;
 
-    LOG_INFO("SSDT: Disk: Resolved %u / %u addresses from clean on-disk image",
-             ValidCount, ServiceCount);
-    return STATUS_SUCCESS;
-}
-
-/* ========================================================================= */
-/*  3d. Tier 2: Discover + Resolve from memory                               */
-/* ========================================================================= */
-
-/*
- * SsdtDiscoverAndResolveFromMemory - Fallback: use MmGetSystemRoutineAddress
- * to find KeServiceDescriptorTable in live memory, then read KiServiceTable
- * entries directly.
- *
- * On x64 with PatchGuard active, these addresses are still trustworthy
- * (PG guards KiServiceTable integrity).
- */
-static NTSTATUS SsdtDiscoverAndResolveFromMemory(VOID)
-{
-    UNICODE_STRING                  Name;
-    PKSERVICE_TABLE_DESCRIPTOR      KeSDT;
-    PLONG                           Table;
-    ULONG                           Limit;
-    ULONG                           i;
-
-    /* Resolve KeServiceDescriptorTable export */
-    RtlInitUnicodeString(&Name, L"KeServiceDescriptorTable");
-    KeSDT = (PKSERVICE_TABLE_DESCRIPTOR)MmGetSystemRoutineAddress(&Name);
-    if (!KeSDT) {
-        LOG_ERROR("SSDT: Memory: KeServiceDescriptorTable not found. "
-                  "This should never happen on x64 Windows.");
-        return STATUS_NOT_FOUND;
-    }
-
-    __try {
-        if (!KeSDT->Base) {
-            LOG_ERROR("SSDT: Memory: KeServiceDescriptorTable.Base is NULL");
-            return STATUS_NOT_FOUND;
-        }
-
-        g_SsdtState.KiServiceTableVa = (ULONG64)KeSDT->Base;
-
-        Limit = (ULONG)(KeSDT->Limit & 0xFFFFFFFF);
-        if (Limit == 0 || Limit > SSDT_MAX_SERVICES) {
-            LOG_ERROR("SSDT: Memory: KeServiceDescriptorTable.Limit=%u out of range", Limit);
-            return STATUS_UNSUCCESSFUL;
-        }
-        g_SsdtState.ServiceCount = Limit;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("SSDT: Memory: Exception reading KeServiceDescriptorTable at %p", KeSDT);
-        return STATUS_ACCESS_VIOLATION;
-    }
-
-    LOG_INFO("SSDT: Memory: KiServiceTable=0x%llX, ServiceCount=%u",
-             g_SsdtState.KiServiceTableVa, g_SsdtState.ServiceCount);
-
-    /* Read live KiServiceTable entries */
-    Table = (PLONG)g_SsdtState.KiServiceTableVa;
-
-    __try {
-        for (i = 0; i < g_SsdtState.ServiceCount; i++) {
-            LONG Entry = Table[i];
-            g_SsdtState.ResolvedAddresses[i] =
-                g_SsdtState.KiServiceTableVa + (LONG64)(Entry >> 4);
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_WARN("SSDT: Memory: Exception resolving entries at index ~%u", i);
-        return STATUS_ACCESS_VIOLATION;
-    }
-
-    LOG_INFO("SSDT: Memory: Resolved %u addresses from live memory (PG-protected)",
-             g_SsdtState.ServiceCount);
+    LOG_INFO("SSDT: ZwReverse: Resolved %u / %u addresses", ValidCount, ServiceCount);
     return STATUS_SUCCESS;
 }
 
@@ -669,7 +511,7 @@ ULONG64 SsdtResolveAddress(ULONG Index)
 }
 
 /* ========================================================================= */
-/*  3e. Name Resolution                                                      */
+/*  2c. Name Resolution                                                      */
 /* ========================================================================= */
 
 /*
@@ -1216,52 +1058,27 @@ NTSTATUS SsdtInitialize(VOID)
     NTSTATUS Status;
 
     if (g_SsdtState.Initialized) {
-        LOG_WARN("SSDT: Already initialized");
-        return STATUS_ALREADY_REGISTERED;
+        LOG_INFO("SSDT: Already initialized, skipping");
+        return STATUS_SUCCESS;
     }
 
     RtlZeroMemory(&g_SsdtState, sizeof(SSDT_STATE));
     KeInitializeSpinLock(&g_SsdtState.HookLock);
 
-    /* Read LSTAR for informational/diagnostic purposes */
-    g_SsdtState.KiSystemCall64Va = __readmsr(0xC0000082);
-    if (g_SsdtState.KiSystemCall64Va != 0) {
-        LOG_INFO("SSDT: KiSystemCall64 at 0x%llX", g_SsdtState.KiSystemCall64Va);
-    }
-
-    /* Get ntoskrnl base address and disk path */
+    /* Get ntoskrnl base address */
     Status = SsdtGetNtoskrnlBase();
     if (!NT_SUCCESS(Status)) {
         LOG_ERROR("SSDT: Failed to get ntoskrnl base: 0x%08X", Status);
         return Status;
     }
 
-    /* Tier 1: Map ntoskrnl from disk and resolve SSDT from clean image */
-    Status = SsdtMapNtoskrnlFromDisk();
-    if (NT_SUCCESS(Status)) {
-        Status = SsdtDiscoverAndResolveFromDisk();
-        SsdtUnmapFileImage();
-
-        if (NT_SUCCESS(Status)) {
-            LOG_INFO("SSDT: Tier 1 (disk) discovery succeeded");
-            goto resolved;
-        }
-        LOG_WARN("SSDT: Tier 1 (disk) resolve failed: 0x%08X, trying Tier 2", Status);
-    } else {
-        LOG_WARN("SSDT: Tier 1 (disk) map failed: 0x%08X, trying Tier 2", Status);
-    }
-
-    /* Tier 2: Discover + resolve from live memory */
-    Status = SsdtDiscoverAndResolveFromMemory();
+    /* Discover KiServiceTable by reverse-engineering Zw/Nt stub pairs */
+    Status = SsdtDiscoverByZwStubReverse();
     if (!NT_SUCCESS(Status)) {
-        LOG_ERROR("SSDT: Both Tier 1 and Tier 2 discovery failed. "
-                  "Last error: 0x%08X", Status);
+        LOG_ERROR("SSDT: Discovery failed: 0x%08X", Status);
         return Status;
     }
 
-    LOG_INFO("SSDT: Tier 2 (memory) discovery succeeded");
-
-resolved:
     /* Resolve names (best-effort, don't fail on this) */
     SsdtPopulateNames();
 
@@ -1281,9 +1098,6 @@ VOID SsdtCleanup(VOID)
 
     /* Remove all SSDT hooks */
     SsdtUnhookAll();
-
-    /* Free file image if still mapped */
-    SsdtUnmapFileImage();
 
     g_SsdtState.Initialized = FALSE;
     LOG_INFO("SSDT: Cleanup complete");
