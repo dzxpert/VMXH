@@ -166,7 +166,56 @@ static NTSTATUS SsdtGetNtoskrnlBase(VOID)
     FullPath = (const char *)Modules->Modules[0].FullPathName;
     PathLen = (ULONG)strlen(FullPath);
 
-    if (PathLen > 0 && FullPath[0] == '\\') {
+    if (PathLen > 12 && FullPath[0] == '\\' &&
+        FullPath[1] == 'D' && FullPath[2] == 'e' && FullPath[3] == 'v' &&
+        FullPath[4] == 'i' && FullPath[5] == 'c' && FullPath[6] == 'e' &&
+        FullPath[7] == '\\') {
+        /*
+         * \Device\HarddiskVolumeN\Windows\system32\ntoskrnl.exe
+         * ZwOpenFile cannot open \Device\ paths directly.
+         * Extract the relative path after the volume (look for \Windows\)
+         * and prepend \SystemRoot to form a valid NT path.
+         *
+         * Search for "\Windows\" (case-insensitive) or "\WINDOWS\".
+         */
+        const char *WinDir = NULL;
+        ULONG j;
+        for (j = 8; j + 9 < PathLen; j++) {
+            if (FullPath[j] == '\\' &&
+                (FullPath[j+1] == 'W' || FullPath[j+1] == 'w') &&
+                (FullPath[j+2] == 'i' || FullPath[j+2] == 'I') &&
+                (FullPath[j+3] == 'n' || FullPath[j+3] == 'N') &&
+                (FullPath[j+4] == 'd' || FullPath[j+4] == 'D') &&
+                (FullPath[j+5] == 'o' || FullPath[j+5] == 'O') &&
+                (FullPath[j+6] == 'w' || FullPath[j+6] == 'W') &&
+                (FullPath[j+7] == 's' || FullPath[j+7] == 'S') &&
+                FullPath[j+8] == '\\') {
+                WinDir = &FullPath[j];  /* points to "\Windows\..." */
+                break;
+            }
+        }
+        if (WinDir) {
+            /* Build \SystemRoot\system32\ntoskrnl.exe from \Windows\system32\ntoskrnl.exe */
+            WCHAR Prefix[] = L"\\SystemRoot";
+            ULONG PrefixLen = (ULONG)wcslen(Prefix);
+            const char *Remainder = WinDir + 8; /* skip "\Windows", keep "\system32\..." */
+            ULONG RemLen = (ULONG)strlen(Remainder);
+
+            RtlCopyMemory(g_SsdtState.NtoskrnlPath, Prefix, PrefixLen * sizeof(WCHAR));
+            for (k = 0; k < RemLen && (PrefixLen + k) < 259; k++) {
+                g_SsdtState.NtoskrnlPath[PrefixLen + k] = (WCHAR)(UCHAR)Remainder[k];
+            }
+            g_SsdtState.NtoskrnlPath[PrefixLen + k] = L'\0';
+            LOG_INFO("SSDT: Converted \\Device path to %ws", g_SsdtState.NtoskrnlPath);
+        } else {
+            /* \Device\ path but no \Windows\ found — use as-is and hope for the best */
+            for (k = 0; k < PathLen && k < 259; k++) {
+                g_SsdtState.NtoskrnlPath[k] = (WCHAR)(UCHAR)FullPath[k];
+            }
+            g_SsdtState.NtoskrnlPath[k] = L'\0';
+            LOG_WARN("SSDT: \\Device path without \\Windows\\: %ws", g_SsdtState.NtoskrnlPath);
+        }
+    } else if (PathLen > 0 && FullPath[0] == '\\') {
         /* Already an NT-style path (\SystemRoot\... or \??\...) */
         for (k = 0; k < PathLen && k < 259; k++) {
             g_SsdtState.NtoskrnlPath[k] = (WCHAR)(UCHAR)FullPath[k];
