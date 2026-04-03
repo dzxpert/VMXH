@@ -928,7 +928,7 @@ static VOID VmxOpsSetEntryInstructionLength(ULONG Length)
 
 static NTSTATUS VmxOpsSetupPageTables(VOID) { return EptInitialize(); }
 static VOID VmxOpsCleanupPageTables(VOID) { EptCleanup(); }
-static VOID VmxOpsInvalidatePageTables(VOID) { EptInvalidateAllContexts(); }
+static VOID VmxOpsInvalidatePageTables(VOID) { EptInvalidateFromGuest(); }
 
 static NTSTATUS VmxOpsHookFunction(ULONG64 TargetVa, PVOID HookFunc, PVOID *OrigFunc)
 {

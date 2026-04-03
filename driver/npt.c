@@ -37,7 +37,7 @@ NPT_STATE       g_NptState = { 0 };
 NPT_HOOK_STATE  g_NptHookState = { 0 };
 
 /* Page directory and split page pools (same as EPT) */
-#define NPT_MAX_SPLIT_PAGES    32
+#define NPT_MAX_SPLIT_PAGES    128
 #define NPT_MAX_PD_PAGES       512
 
 typedef struct _NPT_SPLIT_PAGE {
@@ -288,6 +288,7 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 {
     KIRQL               OldIrql;
     PEPT_HOOK_ENTRY     Hook = NULL;
+    PEPT_HOOK_ENTRY     PageOwner = NULL;
     ULONG64             TargetPa;
     ULONG64             PageBase;
     ULONG               PageOffset;
@@ -324,6 +325,17 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
         }
     }
 
+    /* Check if another hook already exists on the same physical page */
+    for (i = 0; i < NPT_MAX_HOOKS; i++) {
+        if (g_NptHookState.Hooks[i].Active &&
+            g_NptHookState.Hooks[i].TargetPhysicalAddr == PageBase &&
+            g_NptHookState.Hooks[i].OwnsPages)
+        {
+            PageOwner = &g_NptHookState.Hooks[i];
+            break;
+        }
+    }
+
     /* Find free slot */
     for (i = 0; i < NPT_MAX_HOOKS; i++) {
         if (!g_NptHookState.Hooks[i].Active) {
@@ -346,29 +358,48 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
         return STATUS_UNSUCCESSFUL;
     }
 
-    /* Allocate pages */
-    Hook->OriginalPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, SVM_TAG);
-    Hook->HookPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, SVM_TAG);
-    Hook->TrampolineVa = ExAllocatePoolWithTag(NonPagedPool, 64, SVM_TAG);
+    if (PageOwner) {
+        /* Shared page path */
+        Hook->OriginalPageVa = PageOwner->OriginalPageVa;
+        Hook->HookPageVa     = PageOwner->HookPageVa;
+        Hook->HookPagePa     = PageOwner->HookPagePa;
+        Hook->OwnsPages       = FALSE;
+    } else {
+        /* First hook on this page */
+        Hook->OriginalPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, SVM_TAG);
+        Hook->HookPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, SVM_TAG);
 
-    if (!Hook->OriginalPageVa || !Hook->HookPageVa || !Hook->TrampolineVa) {
-        if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
-        if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
-        if (Hook->TrampolineVa)   ExFreePoolWithTag(Hook->TrampolineVa, SVM_TAG);
+        if (!Hook->OriginalPageVa || !Hook->HookPageVa) {
+            if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
+            if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
+            KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        TargetPageVa = (PVOID)(TargetVa & ~0xFFFULL);
+        RtlCopyMemory(Hook->OriginalPageVa, TargetPageVa, PAGE_SIZE);
+        RtlCopyMemory(Hook->HookPageVa, TargetPageVa, PAGE_SIZE);
+
+        Hook->HookPagePa = NptVaToPhysical(Hook->HookPageVa);
+        Hook->OwnsPages   = TRUE;
+    }
+
+    /* Allocate trampoline (always per-hook) */
+    Hook->TrampolineVa = ExAllocatePoolWithTag(NonPagedPool, 64, SVM_TAG);
+    if (!Hook->TrampolineVa) {
+        if (Hook->OwnsPages) {
+            ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
+            ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
+        }
         KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-
-    /* Copy pages */
-    TargetPageVa = (PVOID)(TargetVa & ~0xFFFULL);
-    RtlCopyMemory(Hook->OriginalPageVa, TargetPageVa, PAGE_SIZE);
-    RtlCopyMemory(Hook->HookPageVa, TargetPageVa, PAGE_SIZE);
 
     /* Save original bytes */
     Hook->OriginalBytesSize = 14;
     RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, Hook->OriginalBytesSize);
 
-    /* Build hook page: 14-byte absolute JMP */
+    /* Build hook page: 14-byte absolute JMP at our offset */
     HookPoint = (PUCHAR)Hook->HookPageVa + PageOffset;
     HookPoint[0] = 0xFF;
     HookPoint[1] = 0x25;
@@ -387,18 +418,11 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
     Hook->TargetVirtualAddr = TargetVa;
     Hook->TargetPhysicalAddr = PageBase;
     Hook->TargetPageOffset = PageOffset;
-    Hook->HookPagePa = NptVaToPhysical(Hook->HookPageVa);
     Hook->HookFunction = HookFunction;
     Hook->TargetPte = Pte;
     Hook->Active = TRUE;
     g_NptHookState.HookCount++;
 
-    /*
-     * Set NPT PTE:
-     * AMD NPT doesn't support Execute-Only, so we use Read+Execute (no Write).
-     * Map to the hook page so execution hits our JMP.
-     * Writes will trigger NPF where we temporarily show original page.
-     */
     Pte->Read = 1;
     Pte->Write = 0;
     Pte->Execute = 1;
@@ -412,8 +436,9 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 
     NptInvalidateAll();
 
-    LOG_INFO("NPT Hook installed: VA=0x%llX -> Hook=0x%p, Trampoline=0x%p",
-             TargetVa, HookFunction, Hook->TrampolineVa);
+    LOG_INFO("NPT Hook installed: VA=0x%llX -> Hook=0x%p, Trampoline=0x%p%s",
+             TargetVa, HookFunction, Hook->TrampolineVa,
+             PageOwner ? " (shared page)" : "");
 
     return STATUS_SUCCESS;
 }
@@ -429,16 +454,44 @@ NTSTATUS NptUnhookFunction(ULONG64 TargetVa)
         PEPT_HOOK_ENTRY Hook = &g_NptHookState.Hooks[i];
 
         if (Hook->Active && Hook->TargetVirtualAddr == TargetVa) {
-            if (Hook->TargetPte) {
-                Hook->TargetPte->Read = 1;
-                Hook->TargetPte->Write = 1;
-                Hook->TargetPte->Execute = 1;
-                Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
+            ULONG64 PageBase = Hook->TargetPhysicalAddr;
+            BOOLEAN OtherHooksOnPage = FALSE;
+            ULONG   j;
+
+            /* Restore original bytes on shared HookPage */
+            if (Hook->HookPageVa) {
+                PUCHAR HookPoint = (PUCHAR)Hook->HookPageVa + Hook->TargetPageOffset;
+                RtlCopyMemory(HookPoint, Hook->OriginalBytes, Hook->OriginalBytesSize);
             }
 
-            if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
-            if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
-            if (Hook->TrampolineVa)   ExFreePoolWithTag(Hook->TrampolineVa, SVM_TAG);
+            /* Check if other hooks share this page */
+            for (j = 0; j < NPT_MAX_HOOKS; j++) {
+                if (j != i &&
+                    g_NptHookState.Hooks[j].Active &&
+                    g_NptHookState.Hooks[j].TargetPhysicalAddr == PageBase)
+                {
+                    OtherHooksOnPage = TRUE;
+                    break;
+                }
+            }
+
+            if (!OtherHooksOnPage) {
+                if (Hook->TargetPte) {
+                    Hook->TargetPte->Read = 1;
+                    Hook->TargetPte->Write = 1;
+                    Hook->TargetPte->Execute = 1;
+                    Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
+                }
+                if (Hook->OwnsPages) {
+                    if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
+                    if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
+                }
+            } else if (Hook->OwnsPages) {
+                PEPT_HOOK_ENTRY NewOwner = &g_NptHookState.Hooks[j];
+                NewOwner->OwnsPages = TRUE;
+            }
+
+            if (Hook->TrampolineVa) ExFreePoolWithTag(Hook->TrampolineVa, SVM_TAG);
 
             RtlZeroMemory(Hook, sizeof(EPT_HOOK_ENTRY));
             g_NptHookState.HookCount--;
@@ -473,9 +526,12 @@ VOID NptUnhookAll(VOID)
                 Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
             }
 
-            if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
-            if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
-            if (Hook->TrampolineVa)   ExFreePoolWithTag(Hook->TrampolineVa, SVM_TAG);
+            if (Hook->OwnsPages) {
+                if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, SVM_TAG);
+                if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, SVM_TAG);
+            }
+
+            if (Hook->TrampolineVa) ExFreePoolWithTag(Hook->TrampolineVa, SVM_TAG);
 
             RtlZeroMemory(Hook, sizeof(EPT_HOOK_ENTRY));
         }

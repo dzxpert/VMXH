@@ -66,6 +66,9 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         InterlockedIncrement64(&g_VmxState.CpuContexts[CpuIndex].ExitCount);
     }
 
+    /* Check if Guest requested an EPT TLB flush */
+    EptCheckPendingInvept();
+
     /* Check for VM-Entry failure (bit 31) */
     if (ExitReason & 0x80000000) {
         LOG_ERROR("VM-Entry failure! Reason: %u, Qualification: 0x%llX",

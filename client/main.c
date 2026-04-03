@@ -557,7 +557,7 @@ static int CmdRemoveHook(HANDLE hDevice, DWORD HookId)
  */
 static int CmdListHooks(HANDLE hDevice)
 {
-    DWORD BufferSize = sizeof(VMX_HOOK_LIST) + sizeof(VMX_HOOK_INFO) * 64;
+    DWORD BufferSize = sizeof(VMX_HOOK_LIST) + sizeof(VMX_HOOK_INFO) * 1024;
     VMX_HOOK_LIST *Buffer = (VMX_HOOK_LIST *)malloc(BufferSize);
     DWORD BytesReturned = 0;
     ULONG i;

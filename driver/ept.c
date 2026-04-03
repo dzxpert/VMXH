@@ -15,13 +15,25 @@ EPT_STATE       g_EptState = { 0 };
 EPT_HOOK_STATE  g_EptHookState = { 0 };
 
 /*
+ * Global flag: Guest code sets this after modifying EPT PTEs.
+ * Each CPU checks it at every VM-Exit and executes INVEPT if non-zero.
+ *
+ * We use a generation counter instead of a simple flag: the Guest
+ * increments it, and each CPU tracks the last generation it has seen.
+ * This way every CPU eventually executes INVEPT, not just the first
+ * one to notice the change.
+ */
+volatile LONG   g_EptInveptGeneration = 0;
+static LONG     g_EptInveptCpuGen[64] = { 0 };  /* per-CPU last-seen generation */
+
+/*
  * Dynamically allocated page directory and page table pages.
  * For a full identity map we use 2MB large pages by default,
  * and split to 4KB only when we need fine-grained EPT hooks.
  */
 
 /* Pool of split page tables (for 2MB -> 4KB splitting) */
-#define MAX_SPLIT_PAGES     32
+#define MAX_SPLIT_PAGES     128
 
 typedef struct _EPT_SPLIT_PAGE {
     DECLSPEC_ALIGN(PAGE_SIZE) EPT_PTE Pte[EPT_PTE_COUNT];
@@ -329,6 +341,7 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 {
     KIRQL               OldIrql;
     PEPT_HOOK_ENTRY     Hook = NULL;
+    PEPT_HOOK_ENTRY     PageOwner = NULL;
     ULONG64             TargetPa;
     ULONG64             PageBase;
     ULONG               PageOffset;
@@ -367,6 +380,20 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
         }
     }
 
+    /*
+     * Check if another hook already exists on the same physical page.
+     * If so, we share its HookPage and OriginalPage instead of allocating new ones.
+     */
+    for (i = 0; i < MAX_EPT_HOOKS; i++) {
+        if (g_EptHookState.Hooks[i].Active &&
+            g_EptHookState.Hooks[i].TargetPhysicalAddr == PageBase &&
+            g_EptHookState.Hooks[i].OwnsPages)
+        {
+            PageOwner = &g_EptHookState.Hooks[i];
+            break;
+        }
+    }
+
     /* Find free hook slot */
     for (i = 0; i < MAX_EPT_HOOKS; i++) {
         if (!g_EptHookState.Hooks[i].Active) {
@@ -392,47 +419,68 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
         return STATUS_UNSUCCESSFUL;
     }
 
-    /* Allocate original page copy */
-    Hook->OriginalPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, VMX_TAG);
-    if (!Hook->OriginalPageVa) {
-        KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (PageOwner) {
+        /*
+         * Shared page path: another hook already owns the pages for this
+         * physical page. Reuse its HookPage/OriginalPage and just add
+         * our JMP patch at our offset.
+         */
+        Hook->OriginalPageVa = PageOwner->OriginalPageVa;
+        Hook->HookPageVa     = PageOwner->HookPageVa;
+        Hook->HookPagePa     = PageOwner->HookPagePa;
+        Hook->OwnsPages       = FALSE;
+    } else {
+        /*
+         * First hook on this page: allocate fresh copies.
+         */
+        Hook->OriginalPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, VMX_TAG);
+        if (!Hook->OriginalPageVa) {
+            KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        Hook->HookPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, VMX_TAG);
+        if (!Hook->HookPageVa) {
+            ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
+            KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        /*
+         * Copy the original page content.
+         * Both OriginalPage (for EPT R/W violations) and HookPage (base for patches)
+         * start as copies of the original code page.
+         */
+        TargetPageVa = (PVOID)(TargetVa & PAGE_MASK_4KB);
+        RtlCopyMemory(Hook->OriginalPageVa, TargetPageVa, PAGE_SIZE);
+        RtlCopyMemory(Hook->HookPageVa, TargetPageVa, PAGE_SIZE);
+
+        Hook->HookPagePa = VaToPhysical(Hook->HookPageVa);
+        Hook->OwnsPages   = TRUE;
     }
 
-    /* Allocate hook page */
-    Hook->HookPageVa = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, VMX_TAG);
-    if (!Hook->HookPageVa) {
-        ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
-        KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    /* Allocate trampoline */
+    /* Allocate trampoline (always per-hook, not shared) */
     Hook->TrampolineVa = ExAllocatePoolWithTag(NonPagedPool, 64, VMX_TAG);
     if (!Hook->TrampolineVa) {
-        ExFreePoolWithTag(Hook->HookPageVa, VMX_TAG);
-        ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
+        if (Hook->OwnsPages) {
+            ExFreePoolWithTag(Hook->HookPageVa, VMX_TAG);
+            ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
+        }
         KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-
-    /*
-     * Copy the original page content.
-     * We need to map the physical address to read it since the
-     * EPT identity mapping means VA == PA for kernel addresses.
-     */
-    TargetPageVa = (PVOID)(TargetVa & PAGE_MASK_4KB);
-    RtlCopyMemory(Hook->OriginalPageVa, TargetPageVa, PAGE_SIZE);
-    RtlCopyMemory(Hook->HookPageVa, TargetPageVa, PAGE_SIZE);
 
     /* Save original bytes at hook point */
     Hook->OriginalBytesSize = 14;  /* Size of an absolute JMP (FF 25 00000000 + 8-byte addr) */
     RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, Hook->OriginalBytesSize);
 
     /*
-     * Build the hook page: patch in a JMP to our hook function
+     * Patch the shared HookPage at our offset with a JMP to our hook function.
      * Using: FF 25 00000000 [8-byte absolute address]
-     * This is a 14-byte absolute indirect JMP
+     * This is a 14-byte absolute indirect JMP.
+     *
+     * Because the HookPage is shared, each hook on the same page accumulates
+     * its JMP patch at a different offset — they don't overwrite each other.
      */
     HookPoint = (PUCHAR)Hook->HookPageVa + PageOffset;
     HookPoint[0] = 0xFF;
@@ -454,14 +502,13 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
     Hook->TargetVirtualAddr = TargetVa;
     Hook->TargetPhysicalAddr = PageBase;
     Hook->TargetPageOffset = PageOffset;
-    Hook->HookPagePa = VaToPhysical(Hook->HookPageVa);
     Hook->HookFunction = HookFunction;
     Hook->TargetPte = Pte;
     Hook->Active = TRUE;
     g_EptHookState.HookCount++;
 
     /*
-     * Set EPT PTE to Execute-Only, pointing to the hook page.
+     * Set EPT PTE to Execute-Only, pointing to the (shared) hook page.
      * Reads/writes will cause EPT violation -> we show original page.
      * Execution goes to hook page -> our JMP gets executed.
      */
@@ -477,11 +524,12 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 
     KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
 
-    /* Invalidate EPT TLB */
-    EptInvalidateAllContexts();
+    /* Invalidate EPT TLB via VMCALL (we're in Guest/non-root mode) */
+    EptInvalidateFromGuest();
 
-    LOG_INFO("EPT Hook installed: VA=0x%llX -> Hook=0x%p, Trampoline=0x%p",
-             TargetVa, HookFunction, Hook->TrampolineVa);
+    LOG_INFO("EPT Hook installed: VA=0x%llX -> Hook=0x%p, Trampoline=0x%p%s",
+             TargetVa, HookFunction, Hook->TrampolineVa,
+             PageOwner ? " (shared page)" : "");
 
     return STATUS_SUCCESS;
 }
@@ -497,31 +545,62 @@ NTSTATUS EptUnhookFunction(ULONG64 TargetVa)
         PEPT_HOOK_ENTRY Hook = &g_EptHookState.Hooks[i];
 
         if (Hook->Active && Hook->TargetVirtualAddr == TargetVa) {
-            /* Restore original EPT mapping */
-            if (Hook->TargetPte) {
-                Hook->TargetPte->Read = 1;
-                Hook->TargetPte->Write = 1;
-                Hook->TargetPte->Execute = 1;
-                Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
+            ULONG64 PageBase = Hook->TargetPhysicalAddr;
+            BOOLEAN OtherHooksOnPage = FALSE;
+            ULONG   j;
+
+            /*
+             * Restore original bytes on the shared HookPage so this
+             * function's JMP patch is removed while other patches survive.
+             */
+            if (Hook->HookPageVa) {
+                PUCHAR HookPoint = (PUCHAR)Hook->HookPageVa + Hook->TargetPageOffset;
+                RtlCopyMemory(HookPoint, Hook->OriginalBytes, Hook->OriginalBytesSize);
             }
 
-            /* Free allocated pages */
-            if (Hook->OriginalPageVa) {
-                ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
+            /* Check if other active hooks share this page */
+            for (j = 0; j < MAX_EPT_HOOKS; j++) {
+                if (j != i &&
+                    g_EptHookState.Hooks[j].Active &&
+                    g_EptHookState.Hooks[j].TargetPhysicalAddr == PageBase)
+                {
+                    OtherHooksOnPage = TRUE;
+                    break;
+                }
             }
-            if (Hook->HookPageVa) {
-                ExFreePoolWithTag(Hook->HookPageVa, VMX_TAG);
+
+            if (!OtherHooksOnPage) {
+                /* Last hook on this page — restore EPT mapping and free pages */
+                if (Hook->TargetPte) {
+                    Hook->TargetPte->Read = 1;
+                    Hook->TargetPte->Write = 1;
+                    Hook->TargetPte->Execute = 1;
+                    Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
+                }
+
+                if (Hook->OwnsPages) {
+                    if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
+                    if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, VMX_TAG);
+                }
+            } else if (Hook->OwnsPages) {
+                /*
+                 * This hook owns the pages but other hooks still need them.
+                 * Transfer ownership to another hook on the same page.
+                 */
+                PEPT_HOOK_ENTRY NewOwner = &g_EptHookState.Hooks[j];
+                NewOwner->OwnsPages = TRUE;
+                /* NewOwner already points to the same pages */
             }
-            if (Hook->TrampolineVa) {
-                ExFreePoolWithTag(Hook->TrampolineVa, VMX_TAG);
-            }
+
+            /* Trampoline is always per-hook */
+            if (Hook->TrampolineVa) ExFreePoolWithTag(Hook->TrampolineVa, VMX_TAG);
 
             RtlZeroMemory(Hook, sizeof(EPT_HOOK_ENTRY));
             g_EptHookState.HookCount--;
 
             KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
 
-            EptInvalidateAllContexts();
+            EptInvalidateFromGuest();
 
             LOG_INFO("EPT Hook removed: VA=0x%llX", TargetVa);
             return STATUS_SUCCESS;
@@ -543,11 +622,15 @@ VOID EptUnhookAll(VOID)
 
     KeAcquireSpinLock(&g_EptHookState.Lock, &OldIrql);
 
+    /*
+     * First pass: restore all EPT PTEs and free page-owner resources.
+     * We restore PTE for each unique physical page only once.
+     */
     for (i = 0; i < MAX_EPT_HOOKS; i++) {
         PEPT_HOOK_ENTRY Hook = &g_EptHookState.Hooks[i];
 
         if (Hook->Active) {
-            /* Restore EPT mapping */
+            /* Restore EPT mapping (safe to do multiple times for same PTE) */
             if (Hook->TargetPte) {
                 Hook->TargetPte->Read = 1;
                 Hook->TargetPte->Write = 1;
@@ -555,9 +638,14 @@ VOID EptUnhookAll(VOID)
                 Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
             }
 
-            if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
-            if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, VMX_TAG);
-            if (Hook->TrampolineVa)   ExFreePoolWithTag(Hook->TrampolineVa, VMX_TAG);
+            /* Only page owners free the shared pages */
+            if (Hook->OwnsPages) {
+                if (Hook->OriginalPageVa) ExFreePoolWithTag(Hook->OriginalPageVa, VMX_TAG);
+                if (Hook->HookPageVa)     ExFreePoolWithTag(Hook->HookPageVa, VMX_TAG);
+            }
+
+            /* Trampoline is always per-hook */
+            if (Hook->TrampolineVa) ExFreePoolWithTag(Hook->TrampolineVa, VMX_TAG);
 
             RtlZeroMemory(Hook, sizeof(EPT_HOOK_ENTRY));
         }
@@ -690,6 +778,10 @@ BOOLEAN HandleEptViolation(PVOID GuestContext)
 /*  INVEPT Wrappers                                                          */
 /* ========================================================================= */
 
+/*
+ * EptInvalidateAllContexts - Execute INVEPT (all contexts).
+ * Must ONLY be called from VMX root mode (VM-Exit handlers).
+ */
 VOID EptInvalidateAllContexts(VOID)
 {
     INVEPT_DESCRIPTOR Desc = { 0 };
@@ -701,4 +793,35 @@ VOID EptInvalidateSingleContext(ULONG64 Eptp)
     INVEPT_DESCRIPTOR Desc = { 0 };
     Desc.EptPointer = Eptp;
     AsmVmxInvept(INVEPT_SINGLE_CONTEXT, &Desc);
+}
+
+/*
+ * EptInvalidateFromGuest - Request EPT TLB flush from Guest (VMX non-root).
+ *
+ * Bumps a generation counter. Each CPU compares its last-seen generation
+ * at every VM-Exit and executes INVEPT if behind.  This ensures all CPUs
+ * eventually flush, without relying on VMCALL (which VMware nested
+ * virtualization intercepts).
+ */
+VOID EptInvalidateFromGuest(VOID)
+{
+    InterlockedIncrement(&g_EptInveptGeneration);
+}
+
+/*
+ * EptCheckPendingInvept - Check and execute pending INVEPT.
+ *
+ * Called at the top of every VM-Exit handler (VMX root mode).
+ * Compares the current CPU's last-seen generation with the global
+ * generation counter.  If behind, executes INVEPT and updates.
+ */
+VOID EptCheckPendingInvept(VOID)
+{
+    ULONG CpuIndex = KeGetCurrentProcessorNumber();
+    LONG  CurrentGen = g_EptInveptGeneration;
+
+    if (CpuIndex < 64 && g_EptInveptCpuGen[CpuIndex] != CurrentGen) {
+        g_EptInveptCpuGen[CpuIndex] = CurrentGen;
+        EptInvalidateAllContexts();
+    }
 }

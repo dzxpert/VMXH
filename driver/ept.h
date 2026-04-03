@@ -36,8 +36,8 @@ struct _VMX_STATE;
 #define EPT_READ_WRITE_EXECUTE      (EPT_READ | EPT_WRITE | EPT_EXECUTE)
 #define EPT_EXECUTE_ONLY            (EPT_EXECUTE)
 
-/* Maximum number of EPT hooks */
-#define MAX_EPT_HOOKS               64
+/* Maximum number of EPT hooks (SSDT ~500 + Shadow SSDT ~500 + custom) */
+#define MAX_EPT_HOOKS               1024
 
 /* ========================================================================= */
 /*  EPT Structures                                                           */
@@ -167,13 +167,14 @@ typedef struct _EPT_HOOK_ENTRY {
 
     /* Target information */
     ULONG64     TargetVirtualAddr;      /* VA of the function to hook */
-    ULONG64     TargetPhysicalAddr;     /* PA of the target page */
+    ULONG64     TargetPhysicalAddr;     /* PA of the target page (4KB aligned) */
     ULONG64     TargetPageOffset;       /* Offset within the page */
 
-    /* Pages */
+    /* Pages (may be shared with other hooks on the same physical page) */
     PVOID       OriginalPageVa;         /* Copy of original page content */
-    PVOID       HookPageVa;             /* Modified page with JMP instruction */
-    ULONG64     HookPagePa;             /* PA of the hook page */
+    PVOID       HookPageVa;             /* Modified page with JMP instruction(s) */
+    ULONG64     HookPagePa;            /* PA of the hook page */
+    BOOLEAN     OwnsPages;              /* TRUE if this entry allocated the pages */
 
     /* Trampoline for calling original function */
     PVOID       TrampolineVa;           /* Saved original bytes + JMP back */
@@ -197,6 +198,13 @@ typedef struct _EPT_HOOK_STATE {
     KSPIN_LOCK      Lock;
     BOOLEAN         Initialized;
 } EPT_HOOK_STATE, *PEPT_HOOK_STATE;
+
+/*
+ * EPT invalidation generation counter: Guest increments this after
+ * modifying EPT PTEs.  Each CPU checks at every VM-Exit and executes
+ * INVEPT if its local generation is behind.
+ */
+extern volatile LONG g_EptInveptGeneration;
 
 /* ========================================================================= */
 /*  Function Declarations                                                    */
@@ -222,8 +230,10 @@ PEPT_PTE    EptGetPteForPhysicalAddress(ULONG64 PhysicalAddress);
 VOID        EptSplitLargePage(ULONG64 PhysicalAddress);
 
 /* INVEPT helpers */
-VOID        EptInvalidateAllContexts(VOID);
-VOID        EptInvalidateSingleContext(ULONG64 Eptp);
+VOID        EptInvalidateAllContexts(VOID);     /* VMX root only */
+VOID        EptInvalidateSingleContext(ULONG64 Eptp); /* VMX root only */
+VOID        EptInvalidateFromGuest(VOID);        /* Safe from Guest (non-root) */
+VOID        EptCheckPendingInvept(VOID);          /* Called from VM-Exit handler */
 
 /* Find hook by physical address */
 PEPT_HOOK_ENTRY EptFindHookByPhysicalAddress(ULONG64 PhysicalAddress);
