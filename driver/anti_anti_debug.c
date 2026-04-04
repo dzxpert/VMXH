@@ -577,36 +577,33 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
     /* Execute real CPUID */
     __cpuidex(CpuInfo, Leaf, SubLeaf);
 
-    /* Spoof for target processes.
-     * In nested mode, skip CPUID hiding to avoid interfering with
-     * Hyper-V's own CPUID leaves (0x40000000+ range). */
-    if (!g_IsNestedMode && IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
-        switch (Leaf) {
-        case 1:
-            /*
-             * CPUID leaf 1, ECX bit 31: Hypervisor Present
-             * Clear this bit to hide our hypervisor
-             */
-            CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);
-            break;
+    /*
+     * Always hide hypervisor presence from ALL processes.
+     *
+     * If the physical CPU (or outer hypervisor like VMware) advertises
+     * the hypervisor-present bit in CPUID.1:ECX[31], Windows will use
+     * VMCALL/VMMCALL enlightenments (TLB flush, VP scheduling, etc.)
+     * in hot paths like SwapContext.  Since we are not Hyper-V and
+     * cannot handle those hypercalls, the OS would crash.
+     *
+     * We must clear bit 31 and zero the hypervisor leaves (0x40000000+)
+     * unconditionally so the OS treats us as bare metal.
+     */
+    if (Leaf == 1) {
+        CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);
+    }
+    else if (Leaf >= 0x40000000 && Leaf <= 0x40000006) {
+        CpuInfo[0] = 0;
+        CpuInfo[1] = 0;
+        CpuInfo[2] = 0;
+        CpuInfo[3] = 0;
+    }
 
-        case 0x40000000:
-        case 0x40000001:
-        case 0x40000002:
-        case 0x40000003:
-        case 0x40000004:
-        case 0x40000005:
-        case 0x40000006:
-            /*
-             * Hypervisor-specific leaves (0x40000000-0x400000FF)
-             * Return all zeros to appear as bare metal
-             */
-            CpuInfo[0] = 0;
-            CpuInfo[1] = 0;
-            CpuInfo[2] = 0;
-            CpuInfo[3] = 0;
-            break;
-        }
+    /* Additional spoofing for target processes with anti-anti-debug enabled.
+     * In nested mode, skip to avoid interfering with Hyper-V's own leaves. */
+    if (!g_IsNestedMode && IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
+        /* Leaf 1 and 0x40000000+ already handled above for all processes.
+         * Additional per-target spoofing can go here if needed. */
     }
 
     /* Return CPUID results */

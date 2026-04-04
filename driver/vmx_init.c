@@ -410,7 +410,8 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
     /* Pin-Based Controls */
     PinBased = VmxAdjustControls(
-        PIN_BASED_NMI_EXIT,
+        PIN_BASED_EXTERNAL_INT_EXIT |       /* Intercept external interrupts */
+        PIN_BASED_NMI_EXIT,                 /* Intercept NMIs */
         State->TrueControlsSupported ? State->TruePinBasedCap : State->PinBasedCap
     );
     VmxWrite(VMCS_CTRL_PIN_BASED_VM_EXEC, PinBased);
@@ -586,9 +587,18 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_HOST_IA32_SYSENTER_ESP, __readmsr(MSR_IA32_SYSENTER_ESP));
     VmxWrite(VMCS_HOST_IA32_SYSENTER_EIP, __readmsr(MSR_IA32_SYSENTER_EIP));
 
-    /* Host RSP: top of the host stack (stack grows down) */
-    VmxWrite(VMCS_HOST_RSP,
-             (ULONG64)CpuCtx->HostStackBase + CpuCtx->HostStackSize - 8);
+    /* Host RSP: top of the host stack, 16-byte aligned.
+     * x64 ABI requires RSP % 16 == 0 before CALL. VM-Exit delivers RSP directly,
+     * so we must ensure it's properly aligned from the start. The -8 simulates
+     * a "return address push" so that after sub rsp,N in the handler, the
+     * CALL VmxExitHandler has RSP % 16 == 0.
+     */
+    {
+        ULONG64 StackTop = (ULONG64)CpuCtx->HostStackBase + CpuCtx->HostStackSize;
+        StackTop &= ~0xFULL;   /* Align down to 16 bytes */
+        StackTop -= 8;         /* Simulate pushed return address (mod 16 = 8) */
+        VmxWrite(VMCS_HOST_RSP, StackTop);
+    }
 
     /* Host RIP: VM-Exit handler entry point */
     VmxWrite(VMCS_HOST_RIP, (ULONG64)AsmVmxExitHandler);
@@ -666,11 +676,19 @@ static VOID VmxDisableOnCpu(PVMX_CPU_CONTEXT CpuCtx)
         if (g_IsNestedMode && CpuCtx->VpAssistPageVa) {
             __writemsr(HV_X64_MSR_VP_ASSIST_PAGE, 0);
         }
-        __vmx_off();
+        /*
+         * Only execute vmxoff if the guest was never fully launched
+         * (VMXON succeeded but VMLAUNCH wasn't done or failed).
+         * If VmcsLaunched was TRUE, vmxoff was already executed by the
+         * VmxShutdown ASM path during VMCALL-based termination.
+         */
+        if (!CpuCtx->VmcsLaunched) {
+            __vmx_off();
+        }
         __writecr4(CpuCtx->OriginalCr4);
         CpuCtx->VmxEnabled = FALSE;
         CpuCtx->VmcsLaunched = FALSE;
-        LOG_INFO("VMXOFF executed on CPU %u", CpuCtx->ProcessorNumber);
+        LOG_INFO("VMX disabled on CPU %u", CpuCtx->ProcessorNumber);
     }
 }
 
@@ -713,16 +731,16 @@ static VOID VmxInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
      * VMLAUNCH via assembly helper.
      *
      * AsmVmxLaunch will:
-     *   1. Save current RSP/RIP context
-     *   2. Write Guest RSP = current RSP, Guest RIP = return address
+     *   1. Save non-volatile registers
+     *   2. Write Guest RSP = current RSP, Guest RIP = success label address
      *   3. Execute VMLAUNCH
-     *   4. If successful, CPU enters guest mode and resumes from return address
-     *   5. If failed, returns non-zero
+     *   4. If successful, CPU enters guest mode and resumes from success label
+     *   5. Returns 0 on success, 1 on failure
      *
      * On success, execution continues at the next line after AsmVmxLaunch()
-     * because AsmVmxLaunch sets Guest RIP to the return address on the stack.
+     * because AsmVmxLaunch sets Guest RIP to the return-success path.
      */
-    VmLaunchResult = __vmx_vmlaunch();
+    VmLaunchResult = AsmVmxLaunch();
 
     if (VmLaunchResult != 0) {
         /* VMLAUNCH failed */
@@ -765,14 +783,27 @@ static VOID VmxTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID A
 
     /*
      * Issue VMCALL to request VMX shutdown.
-     * The VM-Exit handler will execute VMXOFF.
+     * HandleVmcall returns FALSE → AsmVmxExitHandler's VmxShutdown path
+     * executes vmxoff and restores guest state, returning here.
+     *
+     * After VmxShutdown: CPU is no longer in VMX operation (vmxoff done).
+     * We must NOT call VmxDisableOnCpu which would try __vmx_off() again
+     * (causing #UD). Just restore CR4 to clear VMXE and update flags.
      */
     if (CpuCtx->VmcsLaunched) {
-        /* Magic VMCALL to signal shutdown */
-        AsmVmxVmcall();
-    }
+        AsmVmxVmcall(VMCALL_MAGIC_SHUTDOWN);
 
-    VmxDisableOnCpu(CpuCtx);
+        /* vmxoff already executed by VmxShutdown ASM path.
+         * Just restore original CR4 (clears VMXE) and update flags. */
+        __writecr4(CpuCtx->OriginalCr4);
+        CpuCtx->VmxEnabled = FALSE;
+        CpuCtx->VmcsLaunched = FALSE;
+        LOG_INFO("VMX shutdown complete on CPU %u", CpuNum);
+    } else {
+        /* CPU was never launched or already exited VMX (VM-Entry failure).
+         * Still need to clean up VMXON state if VmxEnabled. */
+        VmxDisableOnCpu(CpuCtx);
+    }
 
     KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
 }
@@ -826,18 +857,69 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
     }
 
     /*
-     * TODO: Enable VMX on each CPU via DPC.
-     * For now, mark as initialized after allocation succeeds.
-     * The actual VMLAUNCH will be done when the first target is set.
-     *
-     * In a full implementation, we would use KeSetTargetProcessorDpc
-     * to run VmxInitDpcRoutine on each CPU.
+     * Enable VMX on each CPU via DPC.
+     * KeSetTargetProcessorDpc + KeInsertQueueDpc ensures the DPC runs on
+     * the target processor.  We wait for completion via KEVENT before
+     * proceeding to the next CPU (serialized launch).
      */
+    for (i = 0; i < CpuCount; i++) {
+        KDPC            Dpc;
+        VMX_DPC_CONTEXT DpcCtx;
+
+        DpcCtx.State  = State;
+        DpcCtx.Status = STATUS_UNSUCCESSFUL;
+        KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
+
+        KeInitializeDpc(&Dpc, VmxInitDpcRoutine, &DpcCtx);
+        KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
+        KeSetImportanceDpc(&Dpc, HighImportance);
+
+        if (!KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+            LOG_ERROR("Failed to queue init DPC for CPU %u", i);
+            Status = STATUS_UNSUCCESSFUL;
+            goto InitFailed;
+        }
+
+        KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+
+        if (!NT_SUCCESS(DpcCtx.Status)) {
+            LOG_ERROR("VMX init failed on CPU %u: 0x%08X", i, DpcCtx.Status);
+            Status = DpcCtx.Status;
+            goto InitFailed;
+        }
+
+        LOG_INFO("CPU %u: VMX guest mode active", i);
+    }
 
     State->Initialized = TRUE;
-    LOG_INFO("VMX initialization complete");
+    LOG_INFO("VMX initialization complete: %u CPUs virtualized", CpuCount);
 
     return STATUS_SUCCESS;
+
+InitFailed:
+    /* Teardown any CPUs that were already launched */
+    for (j = 0; j < i; j++) {
+        if (State->CpuContexts[j].VmcsLaunched) {
+            KDPC            Dpc;
+            VMX_DPC_CONTEXT DpcCtx;
+            DpcCtx.State  = State;
+            DpcCtx.Status = STATUS_UNSUCCESSFUL;
+            KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
+            KeInitializeDpc(&Dpc, VmxTerminateDpcRoutine, &DpcCtx);
+            KeSetTargetProcessorDpc(&Dpc, (CCHAR)j);
+            KeSetImportanceDpc(&Dpc, HighImportance);
+            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+                KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+            }
+        }
+        VmxFreeCpuContext(&State->CpuContexts[j]);
+    }
+    /* Free remaining un-launched CPU contexts */
+    for (j = i; j < CpuCount; j++) {
+        VmxFreeCpuContext(&State->CpuContexts[j]);
+    }
+    EptCleanup();
+    return Status;
 }
 
 VOID VmxTerminate(PVMX_STATE State)
@@ -851,16 +933,38 @@ VOID VmxTerminate(PVMX_STATE State)
     LOG_INFO("Terminating VMX...");
 
     /*
-     * TODO: Execute VMXOFF on each CPU via DPC.
-     * For now, just clean up resources.
+     * First, exit VMX guest mode on each CPU via DPC.
+     * VmxTerminateDpcRoutine issues VMCALL(VMCALL_MAGIC_SHUTDOWN)
+     * which triggers HandleVmcall -> returns FALSE -> AsmVmxExitHandler
+     * executes VMXOFF, returning the CPU to normal (non-root) operation.
+     * We must do this BEFORE cleaning up EPT / freeing VMCS regions.
      */
+    for (i = 0; i < State->CpuCount; i++) {
+        if (State->CpuContexts[i].VmcsLaunched) {
+            KDPC            Dpc;
+            VMX_DPC_CONTEXT DpcCtx;
 
-    /* Cleanup EPT */
+            DpcCtx.State  = State;
+            DpcCtx.Status = STATUS_UNSUCCESSFUL;
+            KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
+
+            KeInitializeDpc(&Dpc, VmxTerminateDpcRoutine, &DpcCtx);
+            KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
+            KeSetImportanceDpc(&Dpc, HighImportance);
+
+            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+                KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+            }
+
+            LOG_INFO("CPU %u: VMX guest mode exited", i);
+        }
+    }
+
+    /* Now safe to clean up EPT (no CPU is using it anymore) */
     EptCleanup();
 
     /* Free per-CPU resources */
     for (i = 0; i < State->CpuCount; i++) {
-        VmxDisableOnCpu(&State->CpuContexts[i]);
         VmxFreeCpuContext(&State->CpuContexts[i]);
     }
 

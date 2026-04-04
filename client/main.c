@@ -1918,9 +1918,25 @@ int main(int argc, char *argv[])
             DoHookEvents = TRUE;
         }
         else if (strcmp(argv[i], "--action") == 0 && i + 1 < argc) {
-            HookRule.Action = (ULONG)atoi(argv[++i]);
+            const char *ActionStr = argv[++i];
+            /* Accept both numeric (0-3) and named (pass/log/block/modify) */
+            if (_stricmp(ActionStr, "pass") == 0 || _stricmp(ActionStr, "passthrough") == 0) {
+                HookRule.Action = HOOK_ACTION_PASSTHROUGH;
+            } else if (_stricmp(ActionStr, "log") == 0) {
+                HookRule.Action = HOOK_ACTION_LOG_ONLY;
+                HookRule.LogEnabled = TRUE;  /* --action log implies logging */
+            } else if (_stricmp(ActionStr, "block") == 0) {
+                HookRule.Action = HOOK_ACTION_BLOCK;
+            } else if (_stricmp(ActionStr, "modify") == 0) {
+                HookRule.Action = HOOK_ACTION_MODIFY_RETVAL;
+            } else {
+                HookRule.Action = (ULONG)atoi(ActionStr);
+                if (HookRule.Action == HOOK_ACTION_LOG_ONLY) {
+                    HookRule.LogEnabled = TRUE;
+                }
+            }
             if (HookRule.Action > HOOK_ACTION_MODIFY_RETVAL) {
-                fprintf(stderr, "[!] Invalid action %u. Must be 0-3.\n", HookRule.Action);
+                fprintf(stderr, "[!] Invalid action '%s'. Use: 0-3 or pass/log/block/modify\n", ActionStr);
                 return 1;
             }
         }

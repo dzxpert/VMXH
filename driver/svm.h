@@ -531,10 +531,12 @@ BOOLEAN     SvmIsSupported(VOID);
 BOOLEAN     SvmExitHandler(struct _GUEST_CONTEXT *GuestContext);
 
 /* svm_asm.asm */
-extern VOID AsmSvmVmrun(ULONG64 VmcbPa, struct _GUEST_CONTEXT *GuestContext);
-extern VOID AsmClgi(VOID);
-extern VOID AsmStgi(VOID);
-extern VOID AsmSvmExitHandler(VOID);
+extern VOID  AsmSvmVmrun(ULONG64 VmcbPa, struct _GUEST_CONTEXT *GuestContext);
+extern UCHAR AsmSvmLaunch(ULONG64 VmcbPa, PVOID VmcbVa);
+extern VOID  AsmSvmVmmcall(ULONG64 HypercallValue);
+extern VOID  AsmClgi(VOID);
+extern VOID  AsmStgi(VOID);
+extern VOID  AsmSvmExitHandler(VOID);
 
 /* SVM HV_OPS backend (registered in svm_init.c) */
 extern HV_OPS g_SvmOps;

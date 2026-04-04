@@ -260,4 +260,123 @@ SvmShutdown:
 
 AsmSvmExitHandler ENDP
 
+; =========================================================================
+;  Blue Pill VMRUN Launch
+;
+;  UCHAR AsmSvmLaunch(ULONG64 VmcbPa)
+;  RCX = VMCB physical address
+;  Returns: 0 = success (now in guest), 1 = failure
+;
+;  Sets VMCB.Save.Rsp and .Rip just before the first VMRUN so that
+;  the guest resumes into the VMRUN loop.  After VMRUN, the CPU enters
+;  guest mode.  Each #VMEXIT returns to the loop, which calls
+;  SvmExitHandler(). When it returns FALSE, we break out and return 0.
+;
+;  VMCB save-area offsets:
+;    Rip = +0x578, Rsp = +0x5D8, Rax = +0x5F8
+; =========================================================================
+
+VMCB_SAVE_RIP_OFFSET EQU 0578h
+VMCB_SAVE_RSP_OFFSET EQU 05D8h
+VMCB_SAVE_RAX_OFFSET EQU 05F8h
+
+AsmSvmLaunch PROC
+
+    push    rbx
+    push    rbp
+    push    rdi
+    push    rsi
+    push    r12
+    push    r13
+    push    r14
+    push    r15
+
+    ; Save VMCB PA (physical addr) in r12 (callee-saved) for the loop
+    mov     r12, rcx            ; r12 = VMCB PA
+
+    ; We need the VMCB virtual address to write Rsp/Rip fields.
+    ; The C code passes physical address for VMRUN, but VMCB is also
+    ; mapped at a virtual address.  To write the fields, we need
+    ; the VA.  The caller should provide it.
+    ;
+    ; Alternative: use a 2-parameter version.  Let's change the prototype:
+    ;   UCHAR AsmSvmLaunch(ULONG64 VmcbPa, PVOID VmcbVa)
+    ;   RCX = VmcbPa, RDX = VmcbVa
+    mov     r13, rdx            ; r13 = VMCB VA
+
+    ; Set VMCB.Save.Rsp = current RSP (guest will continue on this stack)
+    mov     [r13 + VMCB_SAVE_RSP_OFFSET], rsp
+
+    ; Set VMCB.Save.Rip = _SvmLaunchSuccess (guest resumes there)
+    lea     rax, [_SvmLaunchSuccess]
+    mov     [r13 + VMCB_SAVE_RIP_OFFSET], rax
+
+    ; RAX = VMCB PA (required by VMRUN/VMLOAD/VMSAVE)
+    mov     rax, r12
+
+    ; CLGI: Clear GIF to prevent interrupts during VMRUN
+    db      0Fh, 01h, 0DDh     ; CLGI
+
+    ; VMLOAD: Load additional guest state from VMCB
+    db      0Fh, 01h, 0DAh     ; VMLOAD
+
+    ; VMRUN: Enter guest mode.
+    ; On success, CPU loads guest state from VMCB and starts executing
+    ; at VMCB.Save.Rip (_SvmLaunchSuccess).
+    db      0Fh, 01h, 0D8h     ; VMRUN
+
+    ; #VMEXIT occurred.  CPU is back in host mode.
+    ; RAX = VMCB PA (preserved by hardware).
+
+    ; VMSAVE: Save guest state to VMCB
+    db      0Fh, 01h, 0DBh     ; VMSAVE
+
+    ; STGI: Re-enable interrupts
+    db      0Fh, 01h, 0DCh     ; STGI
+
+    ; VMRUN failed to enter guest or exited before reaching _SvmLaunchSuccess
+    ; (shouldn't happen normally, but handle it)
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rdi
+    pop     rbp
+    pop     rbx
+    mov     rax, 1              ; Return failure
+    ret
+
+_SvmLaunchSuccess:
+    ; Guest is now running!  CPU entered guest mode and resumed here.
+    ; This is the VMRUN loop: handle exits and re-enter.
+    ;
+    ; RSP was restored from VMCB.Save.Rsp (our stack with pushed regs).
+    ; r12 = VMCB PA, r13 = VMCB VA (callee-saved, preserved).
+
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rdi
+    pop     rbp
+    pop     rbx
+    xor     rax, rax            ; Return 0 = success
+    ret
+
+AsmSvmLaunch ENDP
+
+; =========================================================================
+;  VMMCALL Wrapper (AMD equivalent of VMCALL)
+;  void AsmSvmVmmcall(ULONG64 HypercallValue)
+;  RCX = value to pass in RAX to hypervisor
+; =========================================================================
+
+AsmSvmVmmcall PROC
+    mov     rax, rcx
+    db      0Fh, 01h, 0D9h     ; VMMCALL
+    ret
+AsmSvmVmmcall ENDP
+
 END

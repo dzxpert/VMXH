@@ -85,6 +85,21 @@ NTSTATUS EptInitialize(VOID)
     KeInitializeSpinLock(&g_EptHookState.Lock);
 
     /*
+     * Detect Execute-Only EPT support (IA32_VMX_EPT_VPID_CAP bit 0).
+     * Many nested hypervisors (VMware, Hyper-V) do NOT expose this bit,
+     * which means R=0,W=0,X=1 causes EPT Misconfiguration instead of
+     * working as an execute-only page.  When unsupported, we fall back
+     * to R=1,W=0,X=1 (read+execute) for hook pages.
+     */
+    {
+        ULONG64 EptVpidCap = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+        g_EptHookState.ExecuteOnlySupported = (EptVpidCap & 1) != 0;
+
+        LOG_INFO("EPT Execute-Only pages: %s",
+                 g_EptHookState.ExecuteOnlySupported ? "supported" : "NOT supported (fallback to R+X)");
+    }
+
+    /*
      * Allocate Page Directory pages.
      * We map the first 512GB using 2MB large pages (512 PDs * 512 entries * 2MB = 512GB).
      */
@@ -476,17 +491,25 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 
     /*
      * Patch the shared HookPage at our offset with a JMP to our hook function.
-     * Using: FF 25 00000000 [8-byte absolute address]
-     * This is a 14-byte absolute indirect JMP.
+     * Using: 48 B8 [imm64] + FF E0  (MOV RAX, imm64; JMP RAX)
+     * This is a 12-byte absolute JMP that encodes the target as an immediate,
+     * avoiding any data read from the page.  The old FF 25 encoding performed
+     * a RIP-relative memory read of the 8-byte target address, which caused an
+     * EPT violation on execute-only pages (R=0,W=0,X=1) and resulted in an
+     * infinite EPT-violation loop where the hook never fired.
+     *
+     * Clobbering RAX is safe: we are at function entry, RAX is volatile, and
+     * the hook dispatcher does not depend on RAX's incoming value.
      *
      * Because the HookPage is shared, each hook on the same page accumulates
      * its JMP patch at a different offset — they don't overwrite each other.
      */
     HookPoint = (PUCHAR)Hook->HookPageVa + PageOffset;
-    HookPoint[0] = 0xFF;
-    HookPoint[1] = 0x25;
-    *(PULONG)(HookPoint + 2) = 0;  /* RIP-relative offset = 0 */
-    *(PULONG64)(HookPoint + 6) = (ULONG64)HookFunction;
+    HookPoint[0] = 0x48;                                /* REX.W prefix       */
+    HookPoint[1] = 0xB8;                                /* MOV RAX, imm64     */
+    *(PULONG64)(HookPoint + 2) = (ULONG64)HookFunction; /* 8-byte immediate   */
+    HookPoint[10] = 0xFF;                               /* JMP RAX            */
+    HookPoint[11] = 0xE0;
 
     /*
      * Build trampoline: original bytes + JMP back to (Target + OriginalBytesSize)
@@ -508,14 +531,29 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
     g_EptHookState.HookCount++;
 
     /*
-     * Set EPT PTE to Execute-Only, pointing to the (shared) hook page.
-     * Reads/writes will cause EPT violation -> we show original page.
-     * Execution goes to hook page -> our JMP gets executed.
+     * Set EPT PTE pointing to the (shared) hook page.
+     *
+     * If Execute-Only is supported: R=0, W=0, X=1 (hook page)
+     *   - Reads/writes cause EPT violation -> we show original page
+     *   - Execution goes to hook page -> our JMP gets executed
+     *   - Most stealthy: integrity scans read original code
+     *
+     * If Execute-Only is NOT supported: R=0, W=0, X=0 (hook page)
+     *   - ALL accesses cause EPT violation
+     *   - In the handler, check Guest RIP to distinguish:
+     *     * RIP is within this page -> execution -> temporarily R+W+X with hook page + MTF
+     *     * RIP is elsewhere -> read/write -> temporarily R+W+X with original page + MTF
+     *   - PatchGuard reads see original (unpatched) code
      */
     Pte->Read = 0;
     Pte->Write = 0;
-    Pte->Execute = 1;
     Pte->PhysAddr = Hook->HookPagePa >> 12;
+
+    if (g_EptHookState.ExecuteOnlySupported) {
+        Pte->Execute = 1;
+    } else {
+        Pte->Execute = 0;
+    }
 
     /* Return trampoline as the "original function" */
     if (OriginalFunction) {
@@ -684,14 +722,17 @@ PEPT_HOOK_ENTRY EptFindHookByPhysicalAddress(ULONG64 PhysicalAddress)
 /*
  * Called from VM-Exit dispatcher when an EPT violation occurs.
  *
- * Strategy:
- * - If the violation is for EXECUTION on a hooked page:
- *   Switch EPT to execute the hook page (already set up)
+ * Strategy depends on Execute-Only support:
  *
- * - If the violation is for READ/WRITE on a hooked page:
- *   Temporarily restore RWX to original page, enable MTF (Monitor Trap Flag)
- *   After the read/write completes, MTF VM-Exit fires and we
- *   restore Execute-Only on the hook page.
+ * (A) Execute-Only supported (R=0,W=0,X=1 hook page):
+ *   - READ/WRITE violation: switch to original page (RW, no X), enable MTF
+ *   - EXEC violation: switch back to hook page (X-only)
+ *
+ * (B) Execute-Only NOT supported (R=0,W=0,X=0 hook page):
+ *   - ALL accesses fault; handler checks Guest RIP:
+ *     * RIP within hooked page -> execution -> show hook page (RWX) + MTF
+ *     * RIP elsewhere -> data access -> show original page (RWX) + MTF
+ *   - PatchGuard reads always see original (unpatched) code
  */
 BOOLEAN HandleEptViolation(PVOID GuestContext)
 {
@@ -734,40 +775,74 @@ BOOLEAN HandleEptViolation(PVOID GuestContext)
         return TRUE;
     }
 
-    if (IsRead || IsWrite) {
+    if (g_EptHookState.ExecuteOnlySupported) {
         /*
-         * Read/Write access on hooked page.
-         * Show the original page content (not the JMP-patched hook page).
-         * This prevents integrity checks from detecting our modification.
+         * Mode A: Execute-Only (R=0,W=0,X=1)
+         * EPT hardware distinguishes exec from data access.
          */
-        Hook->TargetPte->Read = 1;
-        Hook->TargetPte->Write = 1;
-        Hook->TargetPte->Execute = 0;
-        Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
+        if (IsRead || IsWrite) {
+            /* Data access: show original page */
+            Hook->TargetPte->Read = 1;
+            Hook->TargetPte->Write = 1;
+            Hook->TargetPte->Execute = 0;
+            Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
 
-        EptInvalidateAllContexts();
+            EptInvalidateAllContexts();
 
+            ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
+            ProcBased |= PROC_BASED_MONITOR_TRAP_FLAG;
+            VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+
+        } else if (IsExec) {
+            /* Exec after MTF restored RW mode: switch back to X-only hook page */
+            Hook->TargetPte->Read = 0;
+            Hook->TargetPte->Write = 0;
+            Hook->TargetPte->Execute = 1;
+            Hook->TargetPte->PhysAddr = Hook->HookPagePa >> 12;
+
+            EptInvalidateAllContexts();
+        }
+    } else {
         /*
-         * Enable Monitor Trap Flag to single-step one instruction.
-         * After that instruction completes, we get a MTF VM-Exit
-         * and restore the Execute-Only mapping.
+         * Mode B: No Execute-Only (R=0,W=0,X=0)
+         * ALL accesses fault.  Check Guest RIP to determine intent:
+         *   - RIP physical page == hooked page -> instruction fetch
+         *     -> show hook page (R+W+X) so JMP patch executes
+         *   - RIP elsewhere -> data read/write (e.g. PatchGuard scan)
+         *     -> show original page (R+W+X) so scanner sees clean code
+         * Then MTF to restore R=0,W=0,X=0 after one instruction.
          */
-        ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
-        ProcBased |= PROC_BASED_MONITOR_TRAP_FLAG;
-        VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+        {
+            PHYSICAL_ADDRESS RipPa;
+            ULONG64 GuestRipPagePa;
+            ULONG64 GuestRip = VmxRead(VMCS_GUEST_RIP);
 
-    } else if (IsExec) {
-        /*
-         * Execute access on hooked page.
-         * This means someone is trying to execute code in the hooked page
-         * while it's in read/write mode. Switch back to execute-only hook page.
-         */
-        Hook->TargetPte->Read = 0;
-        Hook->TargetPte->Write = 0;
-        Hook->TargetPte->Execute = 1;
-        Hook->TargetPte->PhysAddr = Hook->HookPagePa >> 12;
+            /*
+             * MmGetPhysicalAddress is safe at any IRQL for nonpaged kernel
+             * addresses.  Guest RIP should always be in kernel .text (nonpaged).
+             * If the translation fails (returns 0), assume data access to be safe.
+             */
+            RipPa = MmGetPhysicalAddress((PVOID)GuestRip);
+            GuestRipPagePa = RipPa.QuadPart & PAGE_MASK_4KB;
 
-        EptInvalidateAllContexts();
+            Hook->TargetPte->Read = 1;
+            Hook->TargetPte->Write = 1;
+            Hook->TargetPte->Execute = 1;
+
+            if (GuestRipPagePa == Hook->TargetPhysicalAddr) {
+                /* Execution: use hook page (with JMP patch) */
+                Hook->TargetPte->PhysAddr = Hook->HookPagePa >> 12;
+            } else {
+                /* Data access: use original page (clean code) */
+                Hook->TargetPte->PhysAddr = Hook->TargetPhysicalAddr >> 12;
+            }
+
+            EptInvalidateAllContexts();
+
+            ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
+            ProcBased |= PROC_BASED_MONITOR_TRAP_FLAG;
+            VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+        }
     }
 
     /* Don't advance RIP - re-execute the faulting instruction */

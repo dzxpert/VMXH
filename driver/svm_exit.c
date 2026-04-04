@@ -9,6 +9,7 @@
 
 #include "svm.h"
 #include "npt.h"
+#include "vmx.h"        /* For VMCALL_MAGIC_SHUTDOWN */
 #include "log.h"
 #include "process.h"
 #include "anti_anti_debug.h"
@@ -439,7 +440,7 @@ static BOOLEAN SvmHandleDbException(PGUEST_CONTEXT Ctx)
 /*  VMMCALL Handler                                                          */
 /* ========================================================================= */
 
-#define VMCALL_MAGIC_SHUTDOWN   0xDEADCAFE
+/* VMCALL_MAGIC_SHUTDOWN is defined in vmx.h */
 
 static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
 {
@@ -472,11 +473,13 @@ static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
         }
     }
 
-    /* Unknown VMMCALL - inject #UD */
-    {
-        PSVM_CPU_CONTEXT CpuCtx = &g_SvmState.CpuContexts[KeGetCurrentProcessorNumber()];
-        CpuCtx->VmcbVa->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | 6;
-    }
+    /*
+     * Unknown VMMCALL - not ours.
+     * Return HV_STATUS_INVALID_HYPERCALL_CODE in RAX and skip the instruction.
+     * Do NOT inject #UD - Windows uses VMMCALL for Hyper-V enlightenments.
+     */
+    Ctx->Rax = 0x0002;  /* HV_STATUS_INVALID_HYPERCALL_CODE */
+    HvAdvanceGuestRip();
     return TRUE;
 }
 

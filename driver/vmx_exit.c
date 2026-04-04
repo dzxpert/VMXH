@@ -73,6 +73,15 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
     if (ExitReason & 0x80000000) {
         LOG_ERROR("VM-Entry failure! Reason: %u, Qualification: 0x%llX",
                   ExitReason & 0xFFFF, VmxRead(VMCS_EXIT_QUALIFICATION));
+        /*
+         * Mark CPU as no longer in VMX operation.
+         * VmxShutdown ASM path will execute vmxoff and restore guest state.
+         * We must clear both flags so VmxTerminate won't try vmcall or vmxoff.
+         */
+        if (CpuIndex < MAX_PROCESSORS) {
+            g_VmxState.CpuContexts[CpuIndex].VmcsLaunched = FALSE;
+            g_VmxState.CpuContexts[CpuIndex].VmxEnabled = FALSE;
+        }
         return FALSE;   /* Shut down VMX */
     }
 
@@ -153,15 +162,78 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         break;
 
     case EXIT_REASON_EXTERNAL_INT:
-        /* External interrupt - acknowledged via ACK_INT_ON_EXIT, just resume */
+        /*
+         * External interrupt exit (with ACK_INT_ON_EXIT enabled).
+         *
+         * The CPU has acknowledged the interrupt and stored the vector in
+         * VMCS_EXIT_INTERRUPTION_INFO.  We must re-inject it into the guest.
+         *
+         * IMPORTANT: Intel SDM Vol. 3C, Section 26.2.1.3 - VM-Entry checks
+         * for event injection require RFLAGS.IF=1 for external interrupts.
+         * If guest had interrupts disabled (IF=0, e.g. inside a spinlock or
+         * CLI region), direct injection would cause VM-Entry failure.
+         *
+         * Solution: check RFLAGS.IF first.  If set, inject immediately.
+         * If clear, save the vector and request an interrupt-window exit.
+         * When the guest enables interrupts, we get EXIT_REASON_INT_WINDOW
+         * and inject the saved interrupt at that point.
+         */
+        {
+            ULONG64 IntInfo = VmxRead(VMCS_EXIT_INTERRUPTION_INFO);
+            if (IntInfo & INTERRUPT_INFO_VALID) {
+                ULONG Vector = (ULONG)(IntInfo & 0xFF);
+                ULONG64 GuestRflags = VmxRead(VMCS_GUEST_RFLAGS);
+
+                if (GuestRflags & (1ULL << 9)) {
+                    /* IF=1: safe to inject immediately */
+                    VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                             INTERRUPT_INFO_VALID |
+                             (INTERRUPT_TYPE_EXTERNAL << INTERRUPT_INFO_TYPE_SHIFT) |
+                             Vector);
+                } else {
+                    /* IF=0: defer injection until interrupt window opens */
+                    ULONG CpuIdx = KeGetCurrentProcessorNumber();
+                    if (CpuIdx < MAX_PROCESSORS) {
+                        g_VmxState.CpuContexts[CpuIdx].PendingInterrupt = TRUE;
+                        g_VmxState.CpuContexts[CpuIdx].PendingInterruptVector = Vector;
+                    }
+
+                    /* Request interrupt-window exit */
+                    {
+                        ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
+                        ProcBased |= PROC_BASED_INT_WINDOW_EXIT;
+                        VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+                    }
+                }
+            }
+        }
         break;
 
     case EXIT_REASON_INT_WINDOW:
-        /* Interrupt window - clear the interrupt-window exiting bit */
+        /*
+         * Interrupt window opened: guest RFLAGS.IF is now 1.
+         * Inject the pending interrupt that was deferred, then clear
+         * the interrupt-window exiting bit.
+         */
         {
+            ULONG CpuIdx = KeGetCurrentProcessorNumber();
             ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
+
+            /* Clear interrupt-window exiting */
             ProcBased &= ~PROC_BASED_INT_WINDOW_EXIT;
             VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+
+            /* Inject the saved interrupt */
+            if (CpuIdx < MAX_PROCESSORS &&
+                g_VmxState.CpuContexts[CpuIdx].PendingInterrupt) {
+                ULONG Vector = g_VmxState.CpuContexts[CpuIdx].PendingInterruptVector;
+                g_VmxState.CpuContexts[CpuIdx].PendingInterrupt = FALSE;
+
+                VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                         INTERRUPT_INFO_VALID |
+                         (INTERRUPT_TYPE_EXTERNAL << INTERRUPT_INFO_TYPE_SHIFT) |
+                         Vector);
+            }
         }
         break;
 
@@ -170,8 +242,13 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
                  ExitReason & 0xFFFF,
                  VmxRead(VMCS_EXIT_QUALIFICATION),
                  VmxRead(VMCS_GUEST_RIP));
-        /* Try to skip the instruction to avoid infinite loop */
-        VmxAdvanceGuestRip();
+        /*
+         * Do NOT advance RIP for unknown exits.
+         * Non-instruction exits (interrupts, preemption timer, etc.) have
+         * undefined VMCS_EXIT_INSTRUCTION_LENGTH. Blindly adding it to RIP
+         * causes the guest to jump to garbage addresses -> page corruption.
+         * Just resume; the guest will re-execute the same instruction.
+         */
         break;
     }
 
@@ -343,7 +420,7 @@ static BOOLEAN HandleEptMisconfig(PGUEST_CONTEXT Ctx)
 
 /*
  * Monitor Trap Flag - single-step completed.
- * Used by EPT hook engine to restore execute-only after a read/write.
+ * Used by EPT hook engine to restore hook page after a read/write.
  */
 static BOOLEAN HandleMtf(PGUEST_CONTEXT Ctx)
 {
@@ -358,20 +435,26 @@ static BOOLEAN HandleMtf(PGUEST_CONTEXT Ctx)
     VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
 
     /*
-     * Restore all EPT hooks to Execute-Only.
-     * The EPT violation handler temporarily set RW on the hooked page
-     * for a single instruction. Now we need to switch back.
+     * Restore all EPT hooks to their resting state.
+     *
+     * Execute-Only supported:     R=0, W=0, X=1 with hook page
+     * Execute-Only NOT supported: R=0, W=0, X=0 with hook page
      */
     for (i = 0; i < MAX_EPT_HOOKS; i++) {
         if (g_EptHookState.Hooks[i].Active && g_EptHookState.Hooks[i].TargetPte) {
             PEPT_PTE Pte = g_EptHookState.Hooks[i].TargetPte;
 
-            /* Only restore if currently in read/write mode */
+            /* Only restore if currently in permissive mode (was switched by violation handler) */
             if (Pte->Read || Pte->Write) {
                 Pte->Read = 0;
                 Pte->Write = 0;
-                Pte->Execute = 1;
                 Pte->PhysAddr = g_EptHookState.Hooks[i].HookPagePa >> 12;
+
+                if (g_EptHookState.ExecuteOnlySupported) {
+                    Pte->Execute = 1;
+                } else {
+                    Pte->Execute = 0;
+                }
             }
         }
     }
@@ -384,8 +467,8 @@ static BOOLEAN HandleMtf(PGUEST_CONTEXT Ctx)
 /*
  * VMCALL - Used for hypervisor control.
  * Magic value in RAX signals shutdown request.
+ * VMCALL_MAGIC_SHUTDOWN is defined in vmx.h.
  */
-#define VMCALL_MAGIC_SHUTDOWN   0xDEADCAFE
 
 static BOOLEAN HandleVmcall(PGUEST_CONTEXT Ctx)
 {
@@ -418,11 +501,20 @@ static BOOLEAN HandleVmcall(PGUEST_CONTEXT Ctx)
         }
     }
 
-    /* Unknown VMCALL - inject #UD (Invalid Opcode) */
-    VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
-             INTERRUPT_INFO_VALID |
-             (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) |
-             6);  /* #UD vector */
+    /*
+     * Unknown VMCALL - not ours.
+     *
+     * Windows issues VMCALL for Hyper-V enlightenments (TLB flush,
+     * VP scheduling hints, etc.) when it detects a hypervisor via
+     * CPUID.  VMware/KVM also trigger this.  We must NOT inject #UD
+     * or the OS will crash (e.g. SwapContext uses VMCALL for TLB flush).
+     *
+     * Return HV_STATUS_INVALID_HYPERCALL_CODE (0x0002) in RAX and
+     * advance RIP past the VMCALL instruction so the guest handles
+     * the failure gracefully.
+     */
+    Ctx->Rax = 0x0002;  /* HV_STATUS_INVALID_HYPERCALL_CODE */
+    VmxAdvanceGuestRip();
     return TRUE;
 }
 

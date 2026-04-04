@@ -197,6 +197,15 @@ typedef struct _EPT_HOOK_STATE {
     ULONG           HookCount;
     KSPIN_LOCK      Lock;
     BOOLEAN         Initialized;
+
+    /*
+     * TRUE if the CPU supports Execute-Only EPT pages (R=0,W=0,X=1).
+     * Detected from IA32_VMX_EPT_VPID_CAP bit 0 during EptInitialize().
+     * When FALSE, hooks fall back to R=1,W=0,X=1 (read+execute),
+     * which is less stealthy but functional on all EPT-capable CPUs
+     * including nested virtualization (VMware, Hyper-V, etc.).
+     */
+    BOOLEAN         ExecuteOnlySupported;
 } EPT_HOOK_STATE, *PEPT_HOOK_STATE;
 
 /*

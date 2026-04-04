@@ -399,12 +399,16 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
     Hook->OriginalBytesSize = 14;
     RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, Hook->OriginalBytesSize);
 
-    /* Build hook page: 14-byte absolute JMP at our offset */
+    /*
+     * Build hook page: MOV RAX, imm64; JMP RAX (12 bytes).
+     * Avoids a RIP-relative data read that would fault on execute-only pages.
+     */
     HookPoint = (PUCHAR)Hook->HookPageVa + PageOffset;
-    HookPoint[0] = 0xFF;
-    HookPoint[1] = 0x25;
-    *(PULONG)(HookPoint + 2) = 0;
-    *(PULONG64)(HookPoint + 6) = (ULONG64)HookFunction;
+    HookPoint[0] = 0x48;                                /* REX.W prefix       */
+    HookPoint[1] = 0xB8;                                /* MOV RAX, imm64     */
+    *(PULONG64)(HookPoint + 2) = (ULONG64)HookFunction; /* 8-byte immediate   */
+    HookPoint[10] = 0xFF;                               /* JMP RAX            */
+    HookPoint[11] = 0xE0;
 
     /* Build trampoline */
     Trampoline = (PUCHAR)Hook->TrampolineVa;

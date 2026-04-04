@@ -158,11 +158,12 @@
 #define VMCS_CTRL_PLE_WINDOW                    0x00004022
 
 /* 32-Bit Read-Only Data Fields */
-#define VMCS_EXIT_REASON                        0x00004400
-#define VMCS_EXIT_INTERRUPTION_INFO             0x00004402
-#define VMCS_EXIT_INTERRUPTION_ERRCODE          0x00004404
-#define VMCS_IDT_VECTORING_INFO                 0x00004406
-#define VMCS_IDT_VECTORING_ERRCODE              0x00004408
+#define VMCS_VM_INSTRUCTION_ERROR               0x00004400
+#define VMCS_EXIT_REASON                        0x00004402
+#define VMCS_EXIT_INTERRUPTION_INFO             0x00004404
+#define VMCS_EXIT_INTERRUPTION_ERRCODE          0x00004406
+#define VMCS_IDT_VECTORING_INFO                 0x00004408
+#define VMCS_IDT_VECTORING_ERRCODE              0x0000440A
 #define VMCS_EXIT_INSTRUCTION_LENGTH            0x0000440C
 #define VMCS_EXIT_INSTRUCTION_INFO              0x0000440E
 
@@ -463,6 +464,12 @@
 #define EPT_VIOLATION_EXECUTABLE            (1 << 5)
 
 /* ========================================================================= */
+/*  VMCALL Magic Values                                                      */
+/* ========================================================================= */
+
+#define VMCALL_MAGIC_SHUTDOWN               0xDEADCAFEULL
+
+/* ========================================================================= */
 /*  Interruption Info Field                                                  */
 /* ========================================================================= */
 
@@ -561,6 +568,10 @@ typedef struct _VMX_CPU_CONTEXT {
 
     /* Statistics */
     volatile LONG64 ExitCount;
+
+    /* Pending external interrupt (for deferred injection when RFLAGS.IF=0) */
+    BOOLEAN     PendingInterrupt;
+    ULONG       PendingInterruptVector;
 
     /* Enlightened VMCS (nested mode only, NULL on bare metal) */
     PVOID       VpAssistPageVa;
@@ -675,7 +686,7 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State);
 BOOLEAN  VmxExitHandler(PGUEST_CONTEXT GuestContext);
 
 /* vmx_asm.asm */
-extern VOID     AsmVmxLaunch(VOID);
+extern UCHAR    AsmVmxLaunch(VOID);
 extern VOID     AsmVmxResume(VOID);
 extern VOID     AsmVmxExitHandler(VOID);
 extern UCHAR    AsmVmxInvept(ULONG Type, PINVEPT_DESCRIPTOR Desc);
@@ -696,7 +707,7 @@ extern ULONG64  AsmGetRflags(VOID);
 extern VOID     AsmSaveHostState(PGUEST_CONTEXT Context);
 extern VOID     AsmRestoreGuestState(PGUEST_CONTEXT Context);
 extern VOID     AsmXsetbv(ULONG Index, ULONG64 Value);
-extern VOID     AsmVmxVmcall(VOID);
+extern VOID     AsmVmxVmcall(ULONG64 HypercallValue);
 
 /* Intrinsics wrappers — branch on g_IsNestedMode for Enlightened VMCS */
 #include "vmx_enlightened.h"

@@ -46,6 +46,10 @@ typedef struct _SVM_DPC_CONTEXT {
     KEVENT      Event;
 } SVM_DPC_CONTEXT, *PSVM_DPC_CONTEXT;
 
+/* Forward-declare DPC routines */
+static VOID SvmInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2);
+static VOID SvmTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2);
+
 /* ========================================================================= */
 /*  Aligned Memory Allocation                                                */
 /* ========================================================================= */
@@ -616,6 +620,89 @@ static VOID SvmDisableOnCpu(PSVM_CPU_CONTEXT CpuCtx)
 }
 
 /* ========================================================================= */
+/*  DPC Routines for Per-CPU Execution                                       */
+/* ========================================================================= */
+
+/*
+ * SvmInitDpcRoutine - Initialize SVM and launch guest on one CPU.
+ *
+ * AsmSvmLaunch writes VMCB.Save.Rsp/Rip then does CLGI + VMLOAD + VMRUN.
+ * On success, guest resumes at the success label and the function returns 0.
+ */
+static VOID SvmInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
+{
+    PSVM_DPC_CONTEXT    DpcCtx = (PSVM_DPC_CONTEXT)Context;
+    ULONG               CpuNum = KeGetCurrentProcessorNumber();
+    PSVM_CPU_CONTEXT    CpuCtx;
+    NTSTATUS            Status;
+    UCHAR               LaunchResult;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+
+    CpuCtx = &g_SvmState.CpuContexts[CpuNum];
+
+    /* Enable SVM on this CPU (set EFER.SVME, configure HSAVE PA) */
+    Status = SvmEnableOnCpu(CpuCtx);
+    if (!NT_SUCCESS(Status)) {
+        DpcCtx->Status = Status;
+        KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
+        return;
+    }
+
+    /*
+     * Launch into guest mode.
+     * AsmSvmLaunch(VmcbPa, VmcbVa) sets VMCB.Save.Rsp/Rip,
+     * then executes CLGI + VMLOAD + VMRUN.
+     */
+    LaunchResult = AsmSvmLaunch(CpuCtx->VmcbPa, CpuCtx->VmcbVa);
+    if (LaunchResult != 0) {
+        LOG_ERROR("SVM VMRUN failed on CPU %u", CpuNum);
+        SvmDisableOnCpu(CpuCtx);
+        DpcCtx->Status = STATUS_UNSUCCESSFUL;
+        KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
+        return;
+    }
+
+    CpuCtx->Common.GuestLaunched = TRUE;
+    DpcCtx->Status = STATUS_SUCCESS;
+    KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
+}
+
+/*
+ * SvmTerminateDpcRoutine - Shutdown SVM on one CPU.
+ * Issues VMMCALL with shutdown magic, causing SvmExitHandler to return FALSE.
+ */
+static VOID SvmTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
+{
+    PSVM_DPC_CONTEXT    DpcCtx = (PSVM_DPC_CONTEXT)Context;
+    ULONG               CpuNum = KeGetCurrentProcessorNumber();
+    PSVM_CPU_CONTEXT    CpuCtx;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+
+    CpuCtx = &g_SvmState.CpuContexts[CpuNum];
+
+    if (CpuCtx->Common.GuestLaunched) {
+        /* Issue VMMCALL with shutdown magic.
+         * svm_exit.c SvmHandleVmmcall checks for VMCALL_MAGIC_SHUTDOWN
+         * and returns FALSE, which makes the VMRUN loop in AsmSvmLaunch exit.
+         * AsmSvmLaunch then disables SVM (STGI) and returns.
+         *
+         * On AMD, VMMCALL is the equivalent of Intel's VMCALL.
+         */
+        AsmSvmVmmcall(VMCALL_MAGIC_SHUTDOWN);
+    }
+
+    SvmDisableOnCpu(CpuCtx);
+
+    KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
+}
+
+/* ========================================================================= */
 /*  Public Interface                                                         */
 /* ========================================================================= */
 
@@ -671,10 +758,66 @@ NTSTATUS SvmInitialize(VOID)
         SvmInitVmcb(&g_SvmState.CpuContexts[i]);
     }
 
+    /*
+     * Enable SVM and launch guest on each CPU via DPC.
+     * Serialized: one CPU at a time, wait for completion.
+     */
+    for (i = 0; i < CpuCount; i++) {
+        KDPC            Dpc;
+        SVM_DPC_CONTEXT DpcCtx;
+
+        DpcCtx.Status = STATUS_UNSUCCESSFUL;
+        KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
+
+        KeInitializeDpc(&Dpc, SvmInitDpcRoutine, &DpcCtx);
+        KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
+        KeSetImportanceDpc(&Dpc, HighImportance);
+
+        if (!KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+            LOG_ERROR("Failed to queue SVM init DPC for CPU %u", i);
+            Status = STATUS_UNSUCCESSFUL;
+            goto SvmInitFailed;
+        }
+
+        KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+
+        if (!NT_SUCCESS(DpcCtx.Status)) {
+            LOG_ERROR("SVM init failed on CPU %u: 0x%08X", i, DpcCtx.Status);
+            Status = DpcCtx.Status;
+            goto SvmInitFailed;
+        }
+
+        LOG_INFO("CPU %u: SVM guest mode active", i);
+    }
+
     g_SvmState.Initialized = TRUE;
-    LOG_INFO("SVM initialization complete");
+    LOG_INFO("SVM initialization complete: %u CPUs virtualized", CpuCount);
 
     return STATUS_SUCCESS;
+
+SvmInitFailed:
+    /* Teardown CPUs that were already launched */
+    for (j = 0; j < i; j++) {
+        if (g_SvmState.CpuContexts[j].Common.GuestLaunched) {
+            KDPC            Dpc;
+            SVM_DPC_CONTEXT DpcCtx;
+            DpcCtx.Status = STATUS_UNSUCCESSFUL;
+            KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
+            KeInitializeDpc(&Dpc, SvmTerminateDpcRoutine, &DpcCtx);
+            KeSetTargetProcessorDpc(&Dpc, (CCHAR)j);
+            KeSetImportanceDpc(&Dpc, HighImportance);
+            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+                KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+            }
+        }
+        SvmFreeCpuContext(&g_SvmState.CpuContexts[j]);
+    }
+    for (j = i; j < CpuCount; j++) {
+        SvmFreeCpuContext(&g_SvmState.CpuContexts[j]);
+    }
+    NptCleanup();
+    SvmFreeGlobalResources();
+    return Status;
 }
 
 VOID SvmTerminate(VOID)
@@ -687,12 +830,31 @@ VOID SvmTerminate(VOID)
 
     LOG_INFO("Terminating SVM...");
 
-    /* Cleanup NPT */
+    /* Exit guest mode on each CPU via DPC (before freeing resources) */
+    for (i = 0; i < g_SvmState.CpuCount; i++) {
+        if (g_SvmState.CpuContexts[i].Common.GuestLaunched) {
+            KDPC            Dpc;
+            SVM_DPC_CONTEXT DpcCtx;
+
+            DpcCtx.Status = STATUS_UNSUCCESSFUL;
+            KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
+
+            KeInitializeDpc(&Dpc, SvmTerminateDpcRoutine, &DpcCtx);
+            KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
+            KeSetImportanceDpc(&Dpc, HighImportance);
+
+            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+                KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+            }
+
+            LOG_INFO("CPU %u: SVM guest mode exited", i);
+        }
+    }
+
+    /* Now safe to clean up */
     NptCleanup();
 
-    /* Free per-CPU resources */
     for (i = 0; i < g_SvmState.CpuCount; i++) {
-        SvmDisableOnCpu(&g_SvmState.CpuContexts[i]);
         SvmFreeCpuContext(&g_SvmState.CpuContexts[i]);
     }
 

@@ -7,6 +7,10 @@
 
 EXTERN VmxExitHandler:PROC
 
+; VMCS field encodings used by AsmVmxLaunch and AsmVmxExitHandler
+VMCS_GUEST_RSP_ENCODING EQU 0681Ch
+VMCS_GUEST_RIP_ENCODING EQU 0681Eh
+
 .code
 
 ; =========================================================================
@@ -210,10 +214,44 @@ AsmVmxExitHandler PROC
     jmp     VmxResumeFailed
 
 VmxShutdown:
+    ; ---------------------------------------------------------------
+    ; VmxExitHandler returned FALSE: exit VMX and resume as non-root.
+    ;
+    ; We're on the Host stack with the saved GUEST_CONTEXT at [rsp].
+    ; VmxAdvanceGuestRip() has already advanced Guest RIP past VMCALL.
+    ;
+    ; Strategy:
+    ;   1. vmread Guest RSP/RIP (must happen before vmxoff)
+    ;   2. Push Guest RIP onto Guest stack (so we can 'ret' to it)
+    ;   3. vmxoff
+    ;   4. Restore all guest GP registers from GUEST_CONTEXT
+    ;   5. Set RSP = (Guest RSP - 8), then ret -> Guest RIP
+    ; ---------------------------------------------------------------
+
+    ; 1. Read Guest RSP and Guest RIP from VMCS
+    mov     rcx, VMCS_GUEST_RSP_ENCODING
+    vmread  rdx, rcx            ; rdx = Guest RSP
+
+    mov     rcx, VMCS_GUEST_RIP_ENCODING
+    vmread  rax, rcx            ; rax = Guest RIP
+
+    ; 2. Push Guest RIP onto the Guest's stack
+    sub     rdx, 8
+    mov     [rdx], rax          ; Guest stack: [Guest RSP - 8] = Guest RIP
+
+    ; Save adjusted Guest RSP into GUEST_CONTEXT.Rsp slot (offset 0x20)
+    ; so we can load it later after restoring all other registers
+    mov     [rsp + 020h], rdx
+
+    ; 3. vmxoff — exit VMX operation
+    vmxoff
+
+    ; 4. Restore guest GP registers from GUEST_CONTEXT
     mov     rax, [rsp + 000h]
     mov     rcx, [rsp + 008h]
     mov     rdx, [rsp + 010h]
     mov     rbx, [rsp + 018h]
+    ; skip rsp (020h) — we load it last
     mov     rbp, [rsp + 028h]
     mov     rsi, [rsp + 030h]
     mov     rdi, [rsp + 038h]
@@ -226,22 +264,39 @@ VmxShutdown:
     mov     r14, [rsp + 070h]
     mov     r15, [rsp + 078h]
 
-    add     rsp, GUEST_CTX_SIZE
-
-    vmxoff
-    ret
+    ; 5. Load Guest RSP (adjusted, with Guest RIP on top) and ret
+    mov     rsp, [rsp + 020h]   ; switch to guest stack
+    ret                         ; pops Guest RIP, resumes guest execution
 
 VmxResumeFailed:
-    int 3
-    ret
+    ; vmresume failed - this is a critical error.
+    ; Cannot resume guest. Read the VM-instruction error from VMCS
+    ; and bugcheck rather than corrupting memory with a bad ret.
+    ;
+    ; At this point we're in VMX root mode on the host stack.
+    ; Log and halt instead of trying to ret (host stack has no valid return addr).
+    vmxoff
+    int     3
+    cli
+    hlt
+    jmp     VmxResumeFailed     ; infinite halt loop as safety net
 
 AsmVmxExitHandler ENDP
 
 ; =========================================================================
-;  VMLAUNCH Wrapper
+;  VMLAUNCH Wrapper for Blue Pill
+;  UCHAR AsmVmxLaunch(VOID)
+;  Returns: 0 = success (now in guest), 1 = vmlaunch failed
+;
+;  Before executing vmlaunch, writes:
+;    VMCS Guest RSP = current RSP
+;    VMCS Guest RIP = address of _LaunchSuccess label
+;  On successful vmlaunch, CPU resumes in guest mode at _LaunchSuccess,
+;  which returns 0 to the caller.
 ; =========================================================================
 
 AsmVmxLaunch PROC
+    ; Save non-volatile registers (callee-saved per x64 ABI)
     push    rbx
     push    rbp
     push    rdi
@@ -251,8 +306,25 @@ AsmVmxLaunch PROC
     push    r14
     push    r15
 
+    ; Write Guest RSP = current RSP (after pushes, this is the guest stack)
+    mov     rdx, rsp
+    mov     rcx, VMCS_GUEST_RSP_ENCODING
+    vmwrite rcx, rdx
+    jc      _LaunchFail     ; CF=1: vmwrite failed (not in VMX operation)
+    jz      _LaunchFail     ; ZF=1: vmwrite failed (invalid field)
+
+    ; Write Guest RIP = address of _LaunchSuccess label
+    ; On successful vmlaunch, guest starts executing at this address
+    lea     rdx, [_LaunchSuccess]
+    mov     rcx, VMCS_GUEST_RIP_ENCODING
+    vmwrite rcx, rdx
+    jc      _LaunchFail
+    jz      _LaunchFail
+
     vmlaunch
 
+    ; If we reach here, vmlaunch failed (CF=1 or ZF=1 on error)
+_LaunchFail:
     pop     r15
     pop     r14
     pop     r13
@@ -261,7 +333,22 @@ AsmVmxLaunch PROC
     pop     rdi
     pop     rbp
     pop     rbx
+    mov     rax, 1          ; Return failure
+    ret
 
+_LaunchSuccess:
+    ; CPU enters guest mode and resumes here.
+    ; RSP was restored by vmlaunch from VMCS Guest RSP, so our
+    ; pushed registers are still on the stack.
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rdi
+    pop     rbp
+    pop     rbx
+    xor     rax, rax        ; Return 0 = success
     ret
 AsmVmxLaunch ENDP
 
@@ -330,9 +417,12 @@ AsmXsetbv ENDP
 
 ; =========================================================================
 ;  VMCALL Wrapper
+;  void AsmVmxVmcall(ULONG64 HypercallValue)
+;  RCX = value to pass in RAX to hypervisor
 ; =========================================================================
 
 AsmVmxVmcall PROC
+    mov     rax, rcx
     vmcall
     ret
 AsmVmxVmcall ENDP

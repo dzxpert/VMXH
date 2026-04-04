@@ -595,7 +595,7 @@ static NTSTATUS ResolvePidToCr3(ULONG Pid, PULONG64 OutCr3)
  * The Hypervisor exit handler will pick this up and execute the operation
  * entirely in Ring -1, bypassing all Guest protections.
  */
-extern void AsmVmxVmcall(void);
+extern void AsmVmxVmcall(unsigned __int64 HypercallValue);
 
 static NTSTATUS IssueMemoryVmcall(ULONG SubCommand, PVMCALL_MEM_PARAMS Params)
 {
