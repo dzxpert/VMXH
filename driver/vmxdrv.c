@@ -7,6 +7,7 @@
 #include "svm.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
+#include "hv_hypercall.h"
 #include "hv_mem.h"
 #include "hv_hook.h"
 #include "ssdt.h"
@@ -22,6 +23,16 @@
 
 VMX_STATE   g_VmxState = { 0 };
 PDEVICE_OBJECT  g_DeviceObject = NULL;
+
+/* Dynamic processor count (replaces MAX_PROCESSORS constant) */
+ULONG       g_MaxProcessors = 0;
+
+/*
+ * BUG FIX (Issue #8): Dynamically resolved KeSetTargetProcessorDpcEx.
+ * NULL on systems older than Windows 7 (should never happen in practice
+ * since VMX requires at least Vista, but defensive coding).
+ */
+PFN_KeSetTargetProcessorDpcEx g_pfnKeSetTargetProcessorDpcEx = NULL;
 
 /* Hypervisor abstraction layer globals */
 PHV_OPS     g_HvOps = NULL;
@@ -87,7 +98,25 @@ NTSTATUS DriverEntry(
 
     /* Initialize logging first */
     LogInitialize();
-    LOG_INFO("VMX Anti-Anti-Debug Driver loading...");
+    LOG_INFO("VMX Anti-Anti-Debug Driver loading... [BUILD 20260411-v2 hv_hypercall]");
+
+    /* Detect active processor count early (used for all per-CPU allocations) */
+    g_MaxProcessors = KeQueryActiveProcessorCount(NULL);
+    LOG_INFO("Detected %u active processors", g_MaxProcessors);
+
+    /*
+     * BUG FIX (Issue #8): Dynamically resolve KeSetTargetProcessorDpcEx.
+     * Available since Windows 7. Uses PROCESSOR_NUMBER instead of CCHAR,
+     * supporting systems with >128 CPUs.
+     */
+    {
+        UNICODE_STRING FuncName;
+        RtlInitUnicodeString(&FuncName, L"KeSetTargetProcessorDpcEx");
+        g_pfnKeSetTargetProcessorDpcEx =
+            (PFN_KeSetTargetProcessorDpcEx)MmGetSystemRoutineAddress(&FuncName);
+        LOG_INFO("KeSetTargetProcessorDpcEx: %s",
+                 g_pfnKeSetTargetProcessorDpcEx ? "resolved" : "not available (fallback to CCHAR)");
+    }
 
     /* Detect CPU vendor and select hypervisor backend */
     g_CpuVendor = HvDetectCpuVendor();
@@ -96,6 +125,9 @@ NTSTATUS DriverEntry(
     HvDetectNestedMode();
     if (g_IsNestedMode) {
         LOG_INFO("Hyper-V detected — using enlightened interface for nested operation");
+    }
+    if (g_OuterHypervisorPresent) {
+        LOG_INFO("Outer hypervisor present — VMCALL/VMMCALL hypercall emulation active");
     }
 
     switch (g_CpuVendor) {
@@ -251,6 +283,15 @@ NTSTATUS DispatchDeviceControl(
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     IoControlCode = IoStack->Parameters.DeviceIoControl.IoControlCode;
+
+    /*
+     * BUG FIX: Initialize IoStatus.Information to 0 before dispatching.
+     * Individual handlers set it to the correct output size on success.
+     * Without this, on failure paths where handlers don't set Information,
+     * the I/O manager would copy garbage data back to the user-mode buffer
+     * (METHOD_BUFFERED uses Information as the output byte count).
+     */
+    Irp->IoStatus.Information = 0;
 
     switch (IoControlCode) {
     case IOCTL_VMX_INIT:

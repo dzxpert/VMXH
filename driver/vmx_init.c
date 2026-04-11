@@ -35,6 +35,9 @@ typedef struct _VMX_DPC_CONTEXT {
 static VOID VmxInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2);
 static VOID VmxTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2);
 
+/* Per-CPU HV_CPU_CONTEXT array for VmxOpsGetCurrentCpuContext() */
+static PHV_CPU_CONTEXT g_VmxHvCtx = NULL;
+
 /* ========================================================================= */
 /*  VMX Support Detection                                                    */
 /* ========================================================================= */
@@ -432,10 +435,15 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
         PROC_BASED2_ENABLE_EPT |
         PROC_BASED2_ENABLE_RDTSCP |
         PROC_BASED2_ENABLE_VPID |
-        PROC_BASED2_ENABLE_INVPCID,
+        PROC_BASED2_ENABLE_INVPCID |
+        PROC_BASED2_ENABLE_XSAVES,      /* Allow guest XSAVES/XRSTORS (used by SwapContext) */
         State->ProcBased2Cap
     );
     VmxWrite(VMCS_CTRL_SECONDARY_VM_EXEC, ProcBased2);
+
+    if (!(ProcBased2 & PROC_BASED2_ENABLE_XSAVES)) {
+        LOG_WARN("ENABLE_XSAVES not supported by CPU/VMM - guest XSAVES/XRSTORS may #UD");
+    }
 
     /* Exception Bitmap: intercept #DB and #BP */
     VmxWrite(VMCS_CTRL_EXCEPTION_BITMAP,
@@ -447,6 +455,11 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     /* VPID - use processor number + 1 (VPID 0 is reserved for host) */
     VmxWrite(VMCS_CTRL_VPID, CpuCtx->ProcessorNumber + 1);
 
+    /* XSS-Exiting Bitmap: 0 = don't intercept any XSAVES/XRSTORS components */
+    if (ProcBased2 & PROC_BASED2_ENABLE_XSAVES) {
+        VmxWrite(VMCS_CTRL_XSS_EXITING_BITMAP, 0);
+    }
+
     /* EPT Pointer - will be set when EPT is initialized */
     /* For now, set up identity-mapped EPT */
     Status = EptSetupIdentityMap(CpuCtx, State);
@@ -457,6 +470,13 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
     /* CR0/CR4 guest/host masks and read shadows */
     VmxWrite(VMCS_CTRL_CR0_GUEST_HOST_MASK, 0);    /* Don't intercept CR0 */
+    /*
+     * BUG FIX (Problem B): CR0 ReadShadow should store the Guest's original
+     * CR0 value (before VMX fixed bits adjustment). At initial setup time,
+     * Cr0 read from __readcr0() already has VMX fixed bits set (since we're
+     * running in VMX root mode after VMXON which requires them). So the value
+     * is effectively the same here, but we use it consistently.
+     */
     VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, Cr0);
     VmxWrite(VMCS_CTRL_CR4_GUEST_HOST_MASK, CR4_VMXE);  /* Hide VMXE from guest */
     VmxWrite(VMCS_CTRL_CR4_READ_SHADOW, Cr4 & ~CR4_VMXE);
@@ -553,6 +573,11 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_GUEST_IA32_SYSENTER_ESP, __readmsr(MSR_IA32_SYSENTER_ESP));
     VmxWrite(VMCS_GUEST_IA32_SYSENTER_EIP, __readmsr(MSR_IA32_SYSENTER_EIP));
 
+    /* IA32_XSS: required when ENABLE_XSAVES is set in secondary controls */
+    if (ProcBased2 & PROC_BASED2_ENABLE_XSAVES) {
+        VmxWrite(VMCS_GUEST_IA32_XSS, __readmsr(MSR_IA32_XSS));
+    }
+
     /* Other guest state */
     VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);     /* Active */
     VmxWrite(VMCS_GUEST_INTERRUPTIBILITY, 0);
@@ -586,6 +611,11 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_HOST_IA32_SYSENTER_CS, __readmsr(MSR_IA32_SYSENTER_CS));
     VmxWrite(VMCS_HOST_IA32_SYSENTER_ESP, __readmsr(MSR_IA32_SYSENTER_ESP));
     VmxWrite(VMCS_HOST_IA32_SYSENTER_EIP, __readmsr(MSR_IA32_SYSENTER_EIP));
+
+    /* Host IA32_XSS: required when ENABLE_XSAVES is set */
+    if (ProcBased2 & PROC_BASED2_ENABLE_XSAVES) {
+        VmxWrite(VMCS_HOST_IA32_XSS, __readmsr(MSR_IA32_XSS));
+    }
 
     /* Host RSP: top of the host stack, 16-byte aligned.
      * x64 ABI requires RSP % 16 == 0 before CALL. VM-Exit delivers RSP directly,
@@ -826,7 +856,21 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
     CpuCount = KeQueryActiveProcessorCount(NULL);
     State->CpuCount = CpuCount;
 
+    /* Set the global processor count (used for bounds checks everywhere) */
+    g_MaxProcessors = CpuCount;
+
     LOG_INFO("Initializing VMX on %u processors", CpuCount);
+
+    /* Dynamically allocate per-CPU context array */
+    State->CpuContexts = (PVMX_CPU_CONTEXT)ExAllocatePoolWithTag(
+        NonPagedPool,
+        CpuCount * sizeof(VMX_CPU_CONTEXT),
+        'xmvC');
+    if (!State->CpuContexts) {
+        LOG_ERROR("Failed to allocate VMX CPU contexts for %u CPUs", CpuCount);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(State->CpuContexts, CpuCount * sizeof(VMX_CPU_CONTEXT));
 
     /* Check capabilities */
     if (!VmxCheckCapabilities(State)) {
@@ -853,14 +897,68 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
         for (i = 0; i < CpuCount; i++) {
             VmxFreeCpuContext(&State->CpuContexts[i]);
         }
+        if (State->CpuContexts) {
+            ExFreePoolWithTag(State->CpuContexts, 'xmvC');
+            State->CpuContexts = NULL;
+        }
         return Status;
     }
 
     /*
+     * BUG FIX (Issue #1): Pre-allocate the per-CPU HV_CPU_CONTEXT array here
+     * instead of lazy allocation in VmxOpsGetCurrentCpuContext().
+     *
+     * The original lazy allocation was unsafe: multiple CPUs could see
+     * g_VmxHvCtx == NULL simultaneously during the first VM-Exit and race
+     * to allocate, causing double-allocation and memory leaks.
+     *
+     * Pre-allocating here (single-threaded, before any CPU enters VMX)
+     * eliminates the race condition entirely.
+     */
+    if (!g_VmxHvCtx && CpuCount > 0) {
+        g_VmxHvCtx = (PHV_CPU_CONTEXT)ExAllocatePoolWithTag(
+            NonPagedPool,
+            CpuCount * sizeof(HV_CPU_CONTEXT),
+            'xvhC');
+        if (!g_VmxHvCtx) {
+            LOG_ERROR("Failed to pre-allocate HV_CPU_CONTEXT array for %u CPUs", CpuCount);
+            for (i = 0; i < CpuCount; i++) {
+                VmxFreeCpuContext(&State->CpuContexts[i]);
+            }
+            if (State->CpuContexts) {
+                ExFreePoolWithTag(State->CpuContexts, 'xmvC');
+                State->CpuContexts = NULL;
+            }
+            EptCleanup();
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(g_VmxHvCtx, CpuCount * sizeof(HV_CPU_CONTEXT));
+    }
+
+    /* Initialize per-CPU EPT structures (hook page isolation) */
+    Status = EptInitPerCpu();
+    if (!NT_SUCCESS(Status)) {
+        LOG_WARN("Per-CPU EPT init failed: 0x%08X (falling back to shared EPT)", Status);
+        /* Non-fatal: hooks still work but without per-CPU isolation */
+    }
+
+    /*
      * Enable VMX on each CPU via DPC.
-     * KeSetTargetProcessorDpc + KeInsertQueueDpc ensures the DPC runs on
+     * HvSetTargetProcessorDpc + KeInsertQueueDpc ensures the DPC runs on
      * the target processor.  We wait for completion via KEVENT before
      * proceeding to the next CPU (serialized launch).
+     *
+     * BUG FIX (Issue #8): Uses dynamically resolved KeSetTargetProcessorDpcEx
+     * (PROCESSOR_NUMBER-based) for >127 CPU support, falling back to
+     * KeSetTargetProcessorDpc (CCHAR-based) on older systems.
+     *
+     * IMPORTANT (Problem E safety note): Dpc and DpcCtx are stack-allocated
+     * inside this loop. This is ONLY safe because KeWaitForSingleObject()
+     * blocks until the DPC completes and signals the Event. Do NOT remove
+     * or defer the wait — the KDPC object must remain valid while queued,
+     * and DpcCtx must remain valid while the DPC routine accesses it.
+     * If parallel CPU launch is needed in the future, allocate Dpc/DpcCtx
+     * from NonPagedPool instead of the stack.
      */
     for (i = 0; i < CpuCount; i++) {
         KDPC            Dpc;
@@ -871,8 +969,21 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
         KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
 
         KeInitializeDpc(&Dpc, VmxInitDpcRoutine, &DpcCtx);
-        KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
         KeSetImportanceDpc(&Dpc, HighImportance);
+
+        /*
+         * BUG FIX (Issue #8): Use HvSetTargetProcessorDpc which dynamically
+         * resolves KeSetTargetProcessorDpcEx (supports >127 CPUs) and falls
+         * back to KeSetTargetProcessorDpc (CCHAR) on older systems.
+         */
+        {
+            NTSTATUS DpcTargetStatus = HvSetTargetProcessorDpc(&Dpc, i);
+            if (!NT_SUCCESS(DpcTargetStatus)) {
+                LOG_ERROR("Failed to target DPC to CPU %u: 0x%08X", i, DpcTargetStatus);
+                Status = DpcTargetStatus;
+                goto InitFailed;
+            }
+        }
 
         if (!KeInsertQueueDpc(&Dpc, NULL, NULL)) {
             LOG_ERROR("Failed to queue init DPC for CPU %u", i);
@@ -906,9 +1017,9 @@ InitFailed:
             DpcCtx.Status = STATUS_UNSUCCESSFUL;
             KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
             KeInitializeDpc(&Dpc, VmxTerminateDpcRoutine, &DpcCtx);
-            KeSetTargetProcessorDpc(&Dpc, (CCHAR)j);
             KeSetImportanceDpc(&Dpc, HighImportance);
-            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+            if (NT_SUCCESS(HvSetTargetProcessorDpc(&Dpc, j)) &&
+                KeInsertQueueDpc(&Dpc, NULL, NULL)) {
                 KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
             }
         }
@@ -918,7 +1029,16 @@ InitFailed:
     for (j = i; j < CpuCount; j++) {
         VmxFreeCpuContext(&State->CpuContexts[j]);
     }
+    EptCleanupPerCpu();
     EptCleanup();
+    if (g_VmxHvCtx) {
+        ExFreePoolWithTag(g_VmxHvCtx, 'xvhC');
+        g_VmxHvCtx = NULL;
+    }
+    if (State->CpuContexts) {
+        ExFreePoolWithTag(State->CpuContexts, 'xmvC');
+        State->CpuContexts = NULL;
+    }
     return Status;
 }
 
@@ -949,10 +1069,10 @@ VOID VmxTerminate(PVMX_STATE State)
             KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
 
             KeInitializeDpc(&Dpc, VmxTerminateDpcRoutine, &DpcCtx);
-            KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
             KeSetImportanceDpc(&Dpc, HighImportance);
 
-            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+            if (NT_SUCCESS(HvSetTargetProcessorDpc(&Dpc, i)) &&
+                KeInsertQueueDpc(&Dpc, NULL, NULL)) {
                 KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
             }
 
@@ -961,11 +1081,24 @@ VOID VmxTerminate(PVMX_STATE State)
     }
 
     /* Now safe to clean up EPT (no CPU is using it anymore) */
+    EptCleanupPerCpu();
     EptCleanup();
 
     /* Free per-CPU resources */
     for (i = 0; i < State->CpuCount; i++) {
         VmxFreeCpuContext(&State->CpuContexts[i]);
+    }
+
+    /* Free the dynamically allocated CpuContexts array */
+    if (State->CpuContexts) {
+        ExFreePoolWithTag(State->CpuContexts, 'xmvC');
+        State->CpuContexts = NULL;
+    }
+
+    /* Free the per-CPU HV_CPU_CONTEXT array used by VmxOpsGetCurrentCpuContext */
+    if (g_VmxHvCtx) {
+        ExFreePoolWithTag(g_VmxHvCtx, 'xvhC');
+        g_VmxHvCtx = NULL;
     }
 
     State->Initialized = FALSE;
@@ -1075,22 +1208,24 @@ static VOID VmxOpsWritePrimaryProcControls(ULONG64 Value)
 
 static PHV_CPU_CONTEXT VmxOpsGetCurrentCpuContext(VOID)
 {
-    /* VMX_CPU_CONTEXT doesn't embed HV_CPU_CONTEXT at start,
-     * so we return a static adapter. For VMX, callers use
-     * g_VmxState.CpuContexts directly for TSC offset etc.
-     * This provides a minimal interface for the abstraction layer. */
-    static HV_CPU_CONTEXT VmxHvCtx;
+    /*
+     * BUG FIX (Issue #1): g_VmxHvCtx is now pre-allocated in VmxInitialize()
+     * before any CPU enters VMX operation, eliminating the lazy allocation
+     * race condition where multiple CPUs could double-allocate.
+     */
     ULONG Cpu = KeGetCurrentProcessorNumber();
-    if (Cpu < MAX_PROCESSORS) {
-        VmxHvCtx.ProcessorNumber = g_VmxState.CpuContexts[Cpu].ProcessorNumber;
-        VmxHvCtx.HvEnabled = g_VmxState.CpuContexts[Cpu].VmxEnabled;
-        VmxHvCtx.GuestLaunched = g_VmxState.CpuContexts[Cpu].VmcsLaunched;
-        VmxHvCtx.TscOffset = g_VmxState.CpuContexts[Cpu].TscOffset;
-        VmxHvCtx.LastDebugPauseTsc = g_VmxState.CpuContexts[Cpu].LastDebugPauseTsc;
-        VmxHvCtx.InDebugPause = g_VmxState.CpuContexts[Cpu].InDebugPause;
-        VmxHvCtx.ExitCount = g_VmxState.CpuContexts[Cpu].ExitCount;
+
+    if (g_VmxHvCtx && Cpu < g_MaxProcessors) {
+        g_VmxHvCtx[Cpu].ProcessorNumber = g_VmxState.CpuContexts[Cpu].ProcessorNumber;
+        g_VmxHvCtx[Cpu].HvEnabled = g_VmxState.CpuContexts[Cpu].VmxEnabled;
+        g_VmxHvCtx[Cpu].GuestLaunched = g_VmxState.CpuContexts[Cpu].VmcsLaunched;
+        g_VmxHvCtx[Cpu].TscOffset = g_VmxState.CpuContexts[Cpu].TscOffset;
+        g_VmxHvCtx[Cpu].LastDebugPauseTsc = g_VmxState.CpuContexts[Cpu].LastDebugPauseTsc;
+        g_VmxHvCtx[Cpu].InDebugPause = g_VmxState.CpuContexts[Cpu].InDebugPause;
+        g_VmxHvCtx[Cpu].ExitCount = g_VmxState.CpuContexts[Cpu].ExitCount;
+        return &g_VmxHvCtx[Cpu];
     }
-    return &VmxHvCtx;
+    return NULL;
 }
 
 HV_OPS g_VmxOps = {

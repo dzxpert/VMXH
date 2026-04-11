@@ -263,6 +263,13 @@
 #define V_INTR_MASKING_MASK         (1 << V_INTR_MASKING_SHIFT)
 
 /* ========================================================================= */
+/*  Interrupt State (int_state at offset 0x068)                              */
+/* ========================================================================= */
+
+#define SVM_INTSTATE_SHADOW         (1 << 0)    /* Blocking by STI/MOV SS */
+#define SVM_INTSTATE_NMI_MASK       (1 << 2)    /* Blocking by NMI (NMI mask) */
+
+/* ========================================================================= */
 /*  Nested Paging Control                                                    */
 /* ========================================================================= */
 
@@ -464,7 +471,7 @@ typedef struct _SVM_CPU_CONTEXT {
 /* ========================================================================= */
 
 typedef struct _SVM_STATE {
-    SVM_CPU_CONTEXT CpuContexts[MAX_PROCESSORS];
+    PSVM_CPU_CONTEXT CpuContexts;   /* dynamically allocated array [g_MaxProcessors] */
     ULONG           CpuCount;
     BOOLEAN         Initialized;
 

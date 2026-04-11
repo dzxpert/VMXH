@@ -42,17 +42,30 @@
  * However, the structures are identical (reusing EPT types).
  */
 typedef struct _NPT_STATE {
-    /* PML4 table (top level) */
+    /* PML4 table (top level) - shared template */
     DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[EPT_PML4E_COUNT];
 
-    /* Pre-allocated PDPT for first 512GB */
+    /* Pre-allocated PDPT for first 512GB - shared template */
     DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[EPT_PDPTE_COUNT];
 
-    /* Physical address of PML4 (written to VMCB.nested_cr3) */
+    /* Physical address of PML4 (template - written to VMCB.nested_cr3) */
     ULONG64 Pml4Pa;
 
     BOOLEAN Initialized;
 } NPT_STATE, *PNPT_STATE;
+
+/*
+ * Per-CPU NPT root structure for hook page isolation.
+ *
+ * Each CPU gets its own PML4 → PDPT chain so that NPT PTEs for hooked
+ * pages can be toggled independently per-core without cross-CPU
+ * interference during the NPF → TF/#DB → restore cycle.
+ */
+typedef struct _NPT_CPU_STATE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[EPT_PML4E_COUNT];
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[EPT_PDPTE_COUNT];
+    ULONG64     Pml4Pa;
+} NPT_CPU_STATE, *PNPT_CPU_STATE;
 
 /* ========================================================================= */
 /*  NPT Hook State (same structure as EPT hooks)                             */
@@ -63,6 +76,12 @@ typedef struct _NPT_HOOK_STATE {
     ULONG           HookCount;
     KSPIN_LOCK      Lock;
     BOOLEAN         Initialized;
+
+    /*
+     * BUG FIX (Issue #3+5+6): Hash table for O(1) hook lookup by physical page.
+     * Same design as EPT_HOOK_STATE.HookHashTable.
+     */
+    ULONG           HookHashTable[EPT_HOOK_HASH_SIZE];
 } NPT_HOOK_STATE, *PNPT_HOOK_STATE;
 
 /* ========================================================================= */
@@ -91,11 +110,22 @@ VOID        NptSplitLargePage(ULONG64 PhysicalAddress);
 /* TLB invalidation (via ASID flush) */
 VOID        NptInvalidateAll(VOID);
 
+/* Per-CPU #DB tracking (for multi-core NPT hook race fix) */
+VOID    NptDbTrackRelaxedPage(ULONG64 PagePhysicalAddr);
+ULONG64 NptDbGetAndClearRelaxedPage(VOID);
+
+/* Per-CPU NPT management (for hook page isolation) */
+NTSTATUS NptInitPerCpu(VOID);
+VOID     NptCleanupPerCpu(VOID);
+PEPT_PTE NptGetPerCpuPte(ULONG CpuIndex, ULONG64 PhysicalAddress);
+ULONG64  NptGetPerCpuRootPa(ULONG CpuIndex);
+
 /* Find hook by physical address */
 PEPT_HOOK_ENTRY NptFindHookByPhysicalAddress(ULONG64 PhysicalAddress);
 
 /* Global state */
 extern NPT_STATE        g_NptState;
 extern NPT_HOOK_STATE   g_NptHookState;
+extern PNPT_CPU_STATE   g_NptCpuStates;   /* per-CPU NPT root array */
 
 #endif /* _NPT_H_ */

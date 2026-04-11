@@ -39,6 +39,35 @@ struct _VMX_STATE;
 /* Maximum number of EPT hooks (SSDT ~500 + Shadow SSDT ~500 + custom) */
 #define MAX_EPT_HOOKS               1024
 
+/*
+ * Hash table sizes for O(1) lookups in hot paths (VMX root mode).
+ *
+ * EPT_HOOK_HASH_BITS / EPT_HOOK_HASH_SIZE:
+ *   Hash table for EptFindHookByPhysicalAddress (page PA → hook index).
+ *   Sized at 2048 buckets for ≤1024 hooks → load factor ≤ 0.5,
+ *   ensuring good linear probing performance even at max capacity.
+ *
+ * EPT_SPLIT_HASH_BITS / EPT_SPLIT_HASH_SIZE:
+ *   Hash table for split page lookup (2MB base PA → split page index).
+ *   Sized at 256 buckets for ≤128 split pages → load factor ≤ 0.5.
+ *
+ * Both use open-addressing with linear probing and a sentinel value (-1)
+ * for empty slots. This avoids dynamic allocation in VMX root mode.
+ */
+#define EPT_HOOK_HASH_BITS          11
+#define EPT_HOOK_HASH_SIZE          (1U << EPT_HOOK_HASH_BITS)  /* 2048 */
+#define EPT_HOOK_HASH_EMPTY         ((ULONG)-1)
+
+#define EPT_SPLIT_HASH_BITS         8
+#define EPT_SPLIT_HASH_SIZE         (1U << EPT_SPLIT_HASH_BITS) /* 256 */
+#define EPT_SPLIT_HASH_EMPTY        ((ULONG)-1)
+
+/*
+ * Trampoline buffer size: must hold OriginalBytes + JMP QWORD PTR [RIP+0] (14 bytes).
+ * JMP indirect encoding: FF 25 00000000 [8-byte absolute address] = 14 bytes.
+ */
+#define EPT_TRAMPOLINE_SIZE         64
+
 /* ========================================================================= */
 /*  EPT Structures                                                           */
 /* ========================================================================= */
@@ -143,20 +172,38 @@ typedef union _EPT_POINTER {
  * EPT page table structure (all levels)
  */
 typedef struct _EPT_STATE {
-    /* PML4 table (top level) */
+    /* PML4 table (top level) - shared template */
     DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[EPT_PML4E_COUNT];
 
-    /* Pre-allocated PDPT for first 512GB (common case) */
+    /* Pre-allocated PDPT for first 512GB (common case) - shared template */
     DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[EPT_PDPTE_COUNT];
 
-    /* EPT Pointer value */
+    /* EPT Pointer value (template - each CPU gets its own) */
     EPT_POINTER Eptp;
 
-    /* Physical address of PML4 */
+    /* Physical address of PML4 (template) */
     ULONG64 Pml4Pa;
 
     BOOLEAN Initialized;
 } EPT_STATE, *PEPT_STATE;
+
+/*
+ * Per-CPU EPT root structure for hook page isolation.
+ *
+ * Each CPU gets its own PML4 → PDPT chain so that EPT PTEs for hooked
+ * pages can be toggled independently per-core without cross-CPU
+ * interference during the EPT-violation → MTF → restore cycle.
+ *
+ * Non-hooked PDPT entries point to the shared PD pages (same as template).
+ * Hooked PDPT entries point to per-CPU PD pages, which in turn point to
+ * per-CPU split PT pages for the 2MB region containing hooks.
+ */
+typedef struct _EPT_CPU_STATE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[EPT_PML4E_COUNT];
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[EPT_PDPTE_COUNT];
+    EPT_POINTER Eptp;
+    ULONG64     Pml4Pa;
+} EPT_CPU_STATE, *PEPT_CPU_STATE;
 
 /*
  * EPT Hook entry
@@ -179,7 +226,16 @@ typedef struct _EPT_HOOK_ENTRY {
     /* Trampoline for calling original function */
     PVOID       TrampolineVa;           /* Saved original bytes + JMP back */
     ULONG       OriginalBytesSize;      /* Size of original bytes saved */
-    UCHAR       OriginalBytes[16];      /* Backup of original instruction bytes */
+
+    /*
+     * Backup of original instruction bytes at hook point.
+     *
+     * The JMP patch is 12 bytes (MOV RAX,imm64 + JMP RAX), so we must
+     * save >= 12 bytes of complete instructions.  In the worst case the
+     * 12th byte lands in the middle of a 15-byte instruction, so we may
+     * need up to 11 + 15 = 26 bytes.  Use 32 for alignment headroom.
+     */
+    UCHAR       OriginalBytes[32];
 
     /* Hook handler */
     PVOID       HookFunction;           /* Our replacement function */
@@ -188,6 +244,13 @@ typedef struct _EPT_HOOK_ENTRY {
     PEPT_PTE    TargetPte;              /* Pointer to the EPT PTE for this GPA */
 
 } EPT_HOOK_ENTRY, *PEPT_HOOK_ENTRY;
+
+/*
+ * Compile-time safety: the trampoline must be large enough to hold
+ * all saved original bytes + a 14-byte indirect JMP (FF 25 [RIP+0] + 8-byte addr).
+ * If someone enlarges OriginalBytes, this will fire at build time.
+ */
+C_ASSERT(sizeof(((EPT_HOOK_ENTRY*)0)->OriginalBytes) + 14 <= EPT_TRAMPOLINE_SIZE);
 
 /*
  * EPT Hook Manager
@@ -206,6 +269,19 @@ typedef struct _EPT_HOOK_STATE {
      * including nested virtualization (VMware, Hyper-V, etc.).
      */
     BOOLEAN         ExecuteOnlySupported;
+
+    /*
+     * BUG FIX (Issue #3+5+6): Hash table for O(1) hook lookup by physical page.
+     *
+     * The hot path (HandleEptViolation) calls EptFindHookByPhysicalAddress()
+     * on every EPT violation. The old O(n) linear scan over MAX_EPT_HOOKS
+     * (1024) entries is expensive in VMX root mode where latency matters.
+     *
+     * This hash table maps (PagePA >> 12) → hook array index.
+     * Open-addressing with linear probing; EPT_HOOK_HASH_EMPTY = unused slot.
+     * Maintained by EptHookFunction (insert) and EptUnhookFunction (remove).
+     */
+    ULONG           HookHashTable[EPT_HOOK_HASH_SIZE];
 } EPT_HOOK_STATE, *PEPT_HOOK_STATE;
 
 /*
@@ -247,8 +323,27 @@ VOID        EptCheckPendingInvept(VOID);          /* Called from VM-Exit handler
 /* Find hook by physical address */
 PEPT_HOOK_ENTRY EptFindHookByPhysicalAddress(ULONG64 PhysicalAddress);
 
+/* x64 instruction length decoder (for trampoline construction) */
+ULONG EptGetInstructionLength(PUCHAR Code);
+
+/* RIP-relative instruction detection and relocation (for trampoline construction) */
+BOOLEAN EptIsRipRelativeInstruction(PUCHAR Code, ULONG InsnLen, PULONG pDispOffset);
+BOOLEAN EptRelocateRipRelativeInstruction(PUCHAR TrampolineInsn, ULONG InsnLen,
+    ULONG DispOffset, ULONG64 OriginalVA, ULONG64 TrampolineVA);
+
+/* Per-CPU MTF tracking (for multi-core EPT hook race fix) */
+VOID    EptMtfTrackRelaxedPage(ULONG64 PagePhysicalAddr);
+ULONG64 EptMtfGetAndClearRelaxedPage(VOID);
+
+/* Per-CPU EPT management (for hook page isolation) */
+NTSTATUS EptInitPerCpu(VOID);
+VOID     EptCleanupPerCpu(VOID);
+PEPT_PTE EptGetPerCpuPte(ULONG CpuIndex, ULONG64 PhysicalAddress);
+ULONG64  EptGetPerCpuEptp(ULONG CpuIndex);
+
 /* Global EPT state */
 extern EPT_STATE        g_EptState;
 extern EPT_HOOK_STATE   g_EptHookState;
+extern PEPT_CPU_STATE   g_EptCpuStates;   /* per-CPU EPT root array */
 
 #endif /* _VMX_EPT_H_ */

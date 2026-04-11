@@ -27,6 +27,7 @@ SOURCES=\
     hv_detect.c         \
     hv_mem.c            \
     hv_hook.c           \
+    hv_hypercall.c      \
     svm_init.c          \
     svm_exit.c          \
     npt.c               \

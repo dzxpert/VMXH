@@ -41,10 +41,12 @@ hv_hook_asm.asm (ASM 分发器)
   |  调用 GenericHookPostCall() 记录日志
   |  返回给原始调用者
   v
-EPT/NPT 引擎（已有，无需修改）
-  |  仅执行页拆分 (Intel) / 读+执行 (AMD)
-  |  14 字节 JMP -> Thunk 存根
-  |  MTF/TF 单步恢复
+EPT/NPT 引擎
+  |  Execute-Only 页拆分 (Intel) / R=0,W=0,X=0 回退 (嵌套虚拟化)
+  |  12 字节 MOV+JMP -> Thunk 存根
+  |  Per-CPU PT 隔离：每 CPU 独立 PTE 切换，消除多核竞争
+  |  MTF/TF 单步恢复（INVEPT SINGLE_CONTEXT 优化）
+  |  O(1) 哈希表查找 Hook 和 Split Page
 ```
 
 ---
@@ -346,16 +348,18 @@ HandleIoctlInstallHook():
        |
        +-- HvHookFunction(0xFFFFF80012345678, ThunkAddr, &Trampoline)
        |     |
-       |     +-- EPT 引擎（已有，无需修改）：
+       |     +-- EPT 引擎：
        |           1. VA -> PA 地址转换
-       |           2. 将 2MB 页拆分为 4KB
+       |           2. 将 2MB 页拆分为 4KB（O(1) 哈希表跟踪 split page）
        |           3. 复制原始页 -> OriginalPage
        |           4. 复制原始页 -> HookPage
-       |           5. 修补 HookPage：在函数入口写入 JMP 到 ThunkAddr
-       |           6. 构建跳板：原始 14 字节 + JMP 返回
-       |           7. EPT PTE：仅执行 -> HookPage
-       |              （读取看到 OriginalPage，PatchGuard 安全）
-       |           8. INVEPT 刷新 TLB
+       |           5. 修补 HookPage：MOV RAX,imm64 + JMP RAX（12 字节）
+       |           6. 构建跳板：指令长度解码 -> 完整指令复制 -> RIP 相对修复
+       |           7. EPT PTE：
+       |              - 支持 Execute-Only：R=0,W=0,X=1 -> HookPage
+       |              - 不支持时回退：R=0,W=0,X=0 + RIP 意图检测
+       |           8. Per-CPU PT 隔离：克隆 PD+PT 到所有 CPU
+       |           9. INVEPT SINGLE_CONTEXT 刷新当前 CPU TLB
        |
        +-- 分配 GENERIC_HOOK_ENTRY (NonPagedPool)
        |     .HookId = 5
@@ -379,8 +383,10 @@ HandleIoctlInstallHook():
   |
   +-- CPU 从 NtCreateFile 入口取指令
   |
-  +-- [EPT] PTE 为仅执行，物理地址 = HookPage
-  |   HookPage 包含：JMP ThunkAddr（14 字节绝对间接 JMP）
+  +-- [EPT] PTE 权限取决于 Execute-Only 支持情况：
+  |   Mode A (支持): R=0,W=0,X=1，物理地址 = HookPage
+  |   Mode B (不支持): R=0,W=0,X=0，通过 RIP 检测区分执行/读取
+  |   HookPage 包含：MOV RAX,imm64; JMP RAX（12 字节绝对 JMP）
   |
   v
 [Thunk_5]
@@ -477,6 +483,10 @@ GENERIC_HOOK_STATE（全局单例）
 | `driver/hv_hook.h` | 框架头文件：所有结构体和函数声明 |
 | `driver/hv_hook.c` | 核心实现：初始化、安装、移除、决策、日志 |
 | `driver/hv_hook_asm.asm` | ASM 分发器：参数保存/恢复、跳板调用 |
+| `driver/ept.c` | EPT 引擎：Per-CPU 隔离、O(1) 哈希表、指令解码、RIP 重定位、Violation 处理 |
+| `driver/ept.h` | EPT 结构体：EPT_CPU_STATE、哈希常量、Per-CPU 函数声明 |
+| `driver/npt.c` | NPT 引擎 (AMD)：类似的 Per-CPU 隔离实现 |
+| `driver/npt.h` | NPT 结构体：NPT_CPU_STATE、Per-CPU 函数声明 |
 | `common/shared.h` | IOCTL 代码 (0x809-0x80C) 和共享结构体 |
 | `driver/vmxdrv.c` | 安装/移除/列表/事件的 IOCTL 处理程序 |
 
@@ -486,8 +496,435 @@ GENERIC_HOOK_STATE（全局单例）
 
 | 限制 | 详情 |
 |------|------|
-| 14 字节最小序言 | 被挂钩函数在任何短跳转目标之前必须至少有 14 字节 |
+| 12 字节最小序言 | 被挂钩函数在任何短跳转目标之前必须至少有 12 字节完整指令（指令解码器自动边界对齐） |
 | 栈参数 9+ 未显式复制 | 参数 9-12+ 依赖栈帧布局兼容性（实际使用中有效） |
 | Thunk 页不回收 | 释放的 Hook 会在 Thunk 页中留下空隙；页仅在清理时释放 |
 | 事件环形缓冲区溢出 | 环形缓冲区（512 条目）满时，最旧的事件会被静默覆盖 |
 | 用户态 Hook | 需要目标进程 CR3 解析；内核 Hook 完全支持 |
+| RIP-relative 重定位范围 | 跳板与原始位置距离超过 ±2GB 时，RIP-relative 指令无法重定位，拒绝安装 |
+
+---
+
+## VMCALL/VMMCALL Hyper-V Hypercall 兼容层
+
+### 必要性
+
+在嵌套虚拟化环境（VMware / Hyper-V / KVM）中运行时，Windows 内核在 `SwapContext` 等热路径中使用 VMCALL enlightenment 进行 TLB 刷新。当我们的 hypervisor 拦截这些 VMCALL 后，如果仅返回错误码而不执行真正的 TLB 刷新，会导致 CPU 从陈旧 TLB 缓存的错误物理页取指 → 非法指令 → BSOD。
+
+### 模拟实现
+
+`hv_hypercall.c` 中的 `HvEmulateHypercall()` 根据 RCX 低 16 位（Hyper-V Call Code）分派处理：
+
+- **TLB flush 系列** (`0x0001`-`0x0003`, `0x0013`-`0x0014`): 执行 INVVPID all + INVEPT all (Intel) 或 ASID flush (AMD)，然后返回 `HV_STATUS_SUCCESS`
+- **IPI 系列** (`0x000B`, `0x0015`): 直接返回 SUCCESS（内核有 APIC fallback）
+- **SpinWait 通知** (`0x0008`): 直接返回 SUCCESS（仅为调度提示）
+- **其他**: 返回 `HV_STATUS_INVALID_HYPERCALL_CODE (0x0002)`
+
+该模块在三种环境下均安全工作：裸机上无 VMCALL enlightenment 到达；VMware/KVM 下正确模拟 TLB flush；Hyper-V 下同时使用 Enlightened VMCS 优化。
+
+---
+
+## Per-CPU EPT/NPT Hook 页隔离
+
+### 问题：多核竞争条件
+
+EPT Hook 的工作原理是在 EPT Violation 时临时放宽 PTE 权限，执行一条指令（MTF 单步），然后恢复。当多个 CPU 同时触发同一 hook 时，共享 PTE 产生竞争：
+
+```
+CPU 0: EPT Violation → 放宽 PTE (R+W) → 启用 MTF
+CPU 1: EPT Violation → 放宽 PTE (R+W) → 启用 MTF    ← 同一个 PTE!
+CPU 0: MTF 触发 → 恢复 PTE (X-Only)                  ← 也恢复了 CPU 1 的 PTE!
+CPU 1: 还在执行 → PTE 已恢复 → 再次 EPT Violation → 死循环
+```
+
+### 解决方案：每 CPU 独立 PT
+
+```
+        ┌──────────────────────────────────────────────┐
+        │  共享模板 (EPT_STATE)                         │
+        │  PML4 → PDPT → PD Pages → Split PT Pages     │
+        │  (非 hook 区域所有 CPU 共享)                    │
+        └──────────────────────────────────────────────┘
+
+Per-CPU 层 (仅 hook 区域按需克隆):
+
+  CPU 0:  PML4[0] → PDPT[0]                      CPU 1:  PML4[1] → PDPT[1]
+            │                                               │
+            ├─ PDPT[x] → 共享 PD (未 hook 的 GB 区域)        ├─ PDPT[x] → 共享 PD
+            │                                               │
+            └─ PDPT[y] → per-CPU PD[0][y]                  └─ PDPT[y] → per-CPU PD[1][y]
+                           │                                               │
+                           └─ PD[z] → per-CPU PT[0]                       └─ PD[z] → per-CPU PT[1]
+                               (各自独立的 4KB PTE)                            (各自独立的 4KB PTE)
+```
+
+**分层隔离策略**：
+
+| 层级 | 隔离策略 | 原因 |
+|------|---------|------|
+| PML4 | 每 CPU 独立副本 | 让 PML4[0] 指向各自的 PDPT |
+| PDPT | 每 CPU 独立副本 | 让 PDPT entry 指向各自的 PD page |
+| PD | **按需克隆** | 只有包含 hook 的 GB 区域才创建 per-CPU PD |
+| PT (split) | **按需克隆** | 只有包含 hook 的 2MB 区域才创建 per-CPU PT |
+| 非 hook 区域 | 所有 CPU 共享 | 通过 PDPT entry 指向共享 PD pages |
+
+### 核心数据结构
+
+```c
+/* Per-CPU EPT 根结构 */
+typedef struct _EPT_CPU_STATE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[512];   /* 独立 PML4 */
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[512];   /* 独立 PDPT */
+    EPT_POINTER Eptp;      /* 该 CPU 的 EPTP 值 (写入 VMCS) */
+    ULONG64     Pml4Pa;
+} EPT_CPU_STATE;
+
+/* Per-CPU PT 页副本 */
+typedef struct _EPT_PER_CPU_SPLIT {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PTE Pte[512];      /* 独立 PTE 数组 */
+    ULONG64     PhysicalAddress;   /* 该 per-CPU PTE 数组的物理地址 */
+    BOOLEAN     Allocated;         /* 是否已分配 */
+} EPT_PER_CPU_SPLIT;
+
+/* Per-CPU PD 页副本 */
+typedef struct _EPT_PER_CPU_PD_PAGE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDE Entries[512];
+} EPT_PER_CPU_PD_PAGE;
+```
+
+### 初始化流程
+
+```
+EptInitPerCpu()  (在 EptInitialize 之后调用)
+  |
+  +-- 分配 g_EptCpuStates[g_MaxProcessors]
+  +-- 分配 g_PerCpuSplitPages[g_MaxProcessors] 指针数组
+  +-- 分配 g_PerCpuPdPages[g_MaxProcessors] 指针数组
+  |
+  +-- 对每个 CPU:
+       +-- 克隆 PML4 和 PDPT (从共享模板)
+       +-- PML4[0].PhysAddr = 该 CPU 的 PDPT 物理地址
+       +-- 构建独立 EPTP 值
+       |
+       PDPT entries 初始仍指向共享 PD pages（非 hook 区域不浪费内存）
+```
+
+### Hook 安装时的 Per-CPU 设置
+
+```
+EptHookFunction()
+  |
+  +-- ... 常规 hook 安装（页拆分、HookPage 创建、跳板构建）...
+  |
+  +-- Per-CPU 隔离设置:
+       |
+       +-- EptEnsurePerCpuPdForRegion(PdptIndex)
+       |     对每个 CPU: 克隆共享 PD page -> per-CPU PD page
+       |     更新 CPU 的 PDPT[PdptIndex] 指向自己的 PD page
+       |
+       +-- EptEnsurePerCpuSplitPage(splitIdx, PdptIndex, PdIndex)
+       |     对每个 CPU: 克隆共享 split PT page -> per-CPU PT page
+       |     更新 CPU 的 PD[PdptIndex].Entries[PdIndex] 指向自己的 PT page
+       |
+       +-- 复制 hook PTE 权限到所有 per-CPU PT:
+             for (cpu = 0; cpu < N; cpu++):
+                 CpuPte = EptGetPerCpuPte(cpu, TargetPA)
+                 CpuPte->Read/Write/Execute/PhysAddr = 与共享 PTE 相同
+```
+
+### 运行时 EPT Violation 处理（Per-CPU PTE）
+
+```
+HandleEptViolation()
+  |
+  +-- CpuIndex = KeGetCurrentProcessorNumber()
+  |
+  +-- Pte = EptGetPerCpuPte(CpuIndex, HookPA)  // 获取本 CPU 的私有 PTE
+  |   如果 per-CPU 不可用: 回退到共享 PTE
+  |
+  +-- 修改 Pte 权限 (仅影响当前 CPU):
+  |     Mode A: R=1,W=1,X=0 (数据访问) 或 R=0,W=0,X=1 (执行)
+  |     Mode B: R=1,W=1,X=1 + RIP 检测选择 HookPage/OriginalPage
+  |
+  +-- INVEPT SINGLE_CONTEXT(当前 CPU 的 EPTP)  // 仅刷新当前 CPU
+  |   (不再使用 ALL_CONTEXTS 影响所有 CPU)
+  |
+  +-- EptMtfTrackRelaxedPage(HookPA)  // 记录当前 CPU 放宽的页
+  +-- 启用 MTF
+
+HandleMtf()
+  |
+  +-- Pa = EptMtfGetAndClearRelaxedPage()  // 获取本 CPU 记录的页
+  +-- 恢复本 CPU 的 PTE 为 hook 权限
+  +-- INVEPT SINGLE_CONTEXT
+  +-- 关闭 MTF
+  |
+  // 其他 CPU 的 PTE 不受影响 → 无竞争
+```
+
+### 内存开销
+
+| 组件 | 大小 | 何时分配 |
+|------|------|---------|
+| EPT_CPU_STATE (PML4+PDPT+EPTP) | ~8KB × CPU数 | EptInitPerCpu() |
+| Per-CPU PD pages | ~2MB × CPU数 | 首次 hook 安装时按需克隆 |
+| Per-CPU Split PT pages | ~4KB × CPU数 × hook 的 2MB 区域数 | 首次 hook 安装时按需克隆 |
+
+> **示例**：4 CPU 系统，3 个 hook 分布在 2 个不同的 2MB 区域：
+> - EPT_CPU_STATE: 4 × 8KB = 32KB
+> - Per-CPU PD: 4 × 2MB = 8MB（一次性，覆盖所有 PDPT 索引）
+> - Per-CPU PT: 4 × 2 × 4KB = 32KB
+> - **总额外开销**: ~8.06MB
+
+---
+
+## Execute-Only 回退 (Mode A / Mode B)
+
+EPT Hook 依赖页权限分离来区分执行和数据访问。在硬件支持 Execute-Only 的平台上使用 Mode A；否则（常见于嵌套虚拟化环境）使用 Mode B。
+
+### Mode A: Execute-Only (R=0, W=0, X=1)
+
+```
+PTE 设置: Read=0, Write=0, Execute=1, PhysAddr = HookPage
+
+Guest 读取/写入 NtCreateFile 字节:
+  → EPT Violation (数据访问)
+  → Handler: 切换到 OriginalPage (R+W, X=0) + MTF
+  → MTF 恢复: 切回 HookPage (X-only)
+  → PatchGuard/完整性检查看到原始未修改代码 ✓
+
+Guest 执行 NtCreateFile:
+  → 直接命中 HookPage（X=1，无 Violation）
+  → MOV RAX,ThunkAddr; JMP RAX → Thunk → 分发器
+```
+
+**优点**：执行路径零 Violation（无额外性能损失）。
+
+### Mode B: 全禁止 (R=0, W=0, X=0)
+
+```
+PTE 设置: Read=0, Write=0, Execute=0, PhysAddr = HookPage
+
+Guest 的任何访问:
+  → EPT Violation (所有访问类型)
+  → Handler: 检查 Guest RIP
+    |
+    +-- RIP 在目标页内 → 执行意图
+    |   → 临时 R+W+X, PhysAddr = HookPage + MTF
+    |   → JMP 补丁执行 → 进入 Thunk
+    |
+    +-- RIP 在页外 → 数据读/写意图
+        → 临时 R+W+X, PhysAddr = OriginalPage + MTF
+        → 读到的是未修改原始代码 (PatchGuard 安全)
+
+  MTF 恢复: 切回 R=0,W=0,X=0
+```
+
+**RIP 检测原理**：利用 Guest CR3 页表遍历将 Guest RIP VA 转为 PA，比较其 4KB 页帧与目标页帧。
+
+```c
+/* VMX root 安全的 Guest VA → PA 转换（不依赖 Windows API） */
+ULONG64 RipPa = EptGuestVaToPa(GuestCr3, GuestRip);
+if ((RipPa & PAGE_MASK_4KB) == HookTargetPhysicalAddr) {
+    /* 执行：展示 HookPage */
+} else {
+    /* 数据访问：展示 OriginalPage */
+}
+```
+
+### 自动检测
+
+```c
+/* EptInitialize() 中检测 Execute-Only 支持 */
+ULONG64 EptVpidCap = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
+g_EptHookState.ExecuteOnlySupported = (EptVpidCap & 1) != 0;
+/* 嵌套虚拟化（VMware/Hyper-V）通常不暴露此位 → 自动回退 Mode B */
+```
+
+---
+
+## O(1) 哈希表查找优化
+
+EPT Violation 处理运行在 VMX root 模式的关键路径上，延迟直接影响 Guest 性能。原始实现使用线性扫描 O(n)，已优化为 O(1) 开放寻址哈希表。
+
+### Hook 查找哈希表
+
+```
+用途: HandleEptViolation() → EptFindHookByPhysicalAddress()
+键:   页物理地址 (PA >> 12)
+值:   Hook 数组索引
+大小: 2048 桶 (≤1024 hooks, 负载因子 ≤ 0.5)
+哈希: Knuth 乘法哈希 (PFN × 2654435761 >> shift)
+冲突: 线性探测 + EPT_HOOK_HASH_EMPTY 哨兵
+
+操作:
+  插入 - EptHookFunction()  : O(1)
+  查找 - EptFindHookByPhysicalAddress() : O(1) 期望
+  删除 - EptUnhookFunction() : O(n) 重建（非热路径）
+```
+
+### Split Page 查找哈希表
+
+```
+用途: EptGetPteForPhysicalAddress() / EptGetPerCpuPte()
+键:   2MB 对齐基址 (Base2MB >> 21)
+值:   g_SplitPages[] 数组索引
+大小: 256 桶 (≤128 split pages, 负载因子 ≤ 0.5)
+哈希: 同上 Knuth 乘法哈希
+
+在 EptSplitLargePage() 中插入, 在 EptCleanup() 中清除.
+```
+
+### 性能对比
+
+| 操作 | 旧方案 | 新方案 |
+|------|--------|--------|
+| Hook 查找 (每次 EPT Violation) | O(1024) 线性扫描 | O(1) 哈希查找 |
+| Split page 查找 (每次 PTE 操作) | O(128) 线性扫描 | O(1) 哈希查找 |
+| Hook 移除 (非热路径) | O(1) | O(n) 哈希重建 |
+
+---
+
+## 安全跳板构建
+
+跳板（Trampoline）用于在 Hook 触发后调用原始函数。构建过程涉及三个关键组件：
+
+### 指令长度解码器
+
+`EptGetInstructionLength()` 是一个最小化的 x86-64 指令长度解码器，覆盖函数序言中常见的指令子集：
+
+```
+支持的指令类别:
+  - 寄存器操作: MOV, LEA, XOR, AND, OR, SUB, ADD, CMP, TEST
+  - 栈操作: PUSH reg/imm, POP reg
+  - 流程控制: JMP rel8/rel32, Jcc rel8/rel32, CALL rel32, RET
+  - 前缀: REX (0x40-0x4F), 操作数大小 (0x66), 地址大小 (0x67)
+  - 两字节: 0F xx (CMOVcc, SETcc, MOVZX, MOVSX, NOP, Jcc rel32)
+  - Group 1/3/5: 80/81/83, F6/F7, FF 系列
+
+工作流程:
+  1. 跳过前缀字节（REX、66、67、段覆盖、LOCK/REP）
+  2. 识别一字节/两字节操作码
+  3. 如有 ModRM：解码 Mod、RM、SIB、位移
+  4. 累加立即数大小
+  5. 返回总长度（0 = 无法解码 → 拒绝 hook）
+```
+
+**安全保证**：解码器循环直到累计字节 ≥ 12（JMP patch 大小），确保跳板只包含完整指令。
+
+### RIP-Relative 指令检测与重定位
+
+```c
+/* 检测 RIP-relative 寻址: ModRM Mod=00, RM=101 */
+BOOLEAN EptIsRipRelativeInstruction(Code, InsnLen, &DispOffset);
+
+/* 重定位 disp32: new_disp = target - (TrampolineVA + InsnLen) */
+BOOLEAN EptRelocateRipRelativeInstruction(TrampolineInsn, InsnLen,
+    DispOffset, OriginalVA, TrampolineVA);
+```
+
+```
+原始位置 (OriginalVA = 0xFFFFF800`12345678):
+  LEA RAX, [RIP+0x1234]
+  → 目标绝对地址 = 0xFFFFF800`12345678 + InsnLen + 0x1234
+
+跳板位置 (TrampolineVA = 0xFFFFABCD`00001000):
+  LEA RAX, [RIP+NewDisp]
+  → NewDisp = 目标绝对地址 - (TrampolineVA + InsnLen)
+  → 如果 |NewDisp| > 2GB → 重定位失败 → 拒绝安装 hook
+```
+
+### 跳板整体结构
+
+```
+Trampoline (最大 64 字节):
+  +0:    [原始指令 1]          (已修复 RIP-relative)
+  +N1:   [原始指令 2]          (已修复 RIP-relative)
+  ...
+  +Nk:   [原始指令 k]          (总计 ≥ 12 字节完整指令)
+  +Total: FF 25 00000000        JMP [RIP+0]
+  +Total+6: [8字节绝对地址]     → TargetVA + Total (跳回被覆盖部分之后)
+```
+
+---
+
+## 共享页支持（同页多 Hook）
+
+当同一 4KB 物理页上安装多个 Hook（例如同一模块中相邻的两个函数），它们共享 HookPage 和 OriginalPage：
+
+```
+EptHookFunction(FuncA) → 第一个 hook，分配 HookPage + OriginalPage
+  Hook[0].OwnsPages = TRUE
+  HookPage 上偏移 A 处写入 JMP → ThunkA
+
+EptHookFunction(FuncB, 同页) → 检测到 PageOwner
+  Hook[1].OwnsPages = FALSE
+  复用 Hook[0] 的 HookPage/OriginalPage
+  HookPage 上偏移 B 处写入 JMP → ThunkB（不覆盖偏移 A 的 JMP）
+
+EptUnhookFunction(FuncA):
+  恢复 HookPage 偏移 A 处为原始字节
+  检测到 FuncB 仍在同页上 → 不释放 HookPage/OriginalPage
+  将 OwnsPages 转移给 Hook[1]
+
+EptUnhookFunction(FuncB):
+  恢复 HookPage 偏移 B 处为原始字节
+  同页无其他 hook → 恢复 EPT PTE 到原始页 → INVEPT → 释放页
+```
+
+**所有权转移规则**：移除页拥有者时，如果同页还有其他 hook，将 `OwnsPages = TRUE` 转移给另一个 hook。
+
+---
+
+## INVEPT 优化
+
+### 旧方案：INVEPT ALL_CONTEXTS
+
+每次 PTE 修改都刷新所有 CPU 的所有 EPTP 上下文的 TLB。
+
+### 新方案：INVEPT SINGLE_CONTEXT
+
+Per-CPU 隔离后，PTE 修改仅影响当前 CPU 的页表，使用 SINGLE_CONTEXT 刷新该 CPU 的 EPTP 上下文即可：
+
+```c
+ULONG64 CpuEptp = EptGetPerCpuEptp(CpuIndex);
+if (CpuEptp)
+    EptInvalidateSingleContext(CpuEptp);  /* 仅刷新当前 CPU */
+else
+    EptInvalidateAllContexts();           /* 回退 */
+```
+
+### 跨 CPU 刷新（Hook 安装/移除时）
+
+Hook 安装和移除修改了所有 CPU 的 PTE，仍然需要全局刷新。使用代际计数器机制：
+
+```
+EptInvalidateFromGuest():
+  InterlockedIncrement(&g_EptInveptGeneration)
+
+每次 VM-Exit:
+  EptCheckPendingInvept():
+    if (g_EptInveptCpuGen[CPU] != g_EptInveptGeneration):
+      g_EptInveptCpuGen[CPU] = g_EptInveptGeneration
+      INVEPT ALL_CONTEXTS
+```
+
+---
+
+## 两阶段 Unhook（防止 UAF）
+
+移除 Hook 时必须确保所有 CPU 的 TLB 不再引用即将释放的 HookPage/OriginalPage：
+
+```
+EptUnhookAll():
+  Pass 1: 遍历所有 hook，恢复 EPT PTE → 原始物理地址 (R+W+X)
+          同时恢复所有 per-CPU PTE
+          !! 不释放任何页 !!
+
+  INVEPT: EptInvalidateFromGuest() → 所有 CPU 最终执行 INVEPT
+
+  Pass 2: 遍历所有 hook，释放 HookPage/OriginalPage/Trampoline
+
+  // Pass 1 → INVEPT → Pass 2 的顺序确保不存在 UAF 窗口
+  // 如果在 Pass 1 直接释放页，其他 CPU 的 stale TLB 可能仍在翻译旧页 → use-after-free
+```

@@ -509,7 +509,7 @@ BOOLEAN AadHandleRdtsc(PGUEST_CONTEXT GuestContext)
     /* For target processes with timing hide, subtract accumulated offset */
     if (IsFeatureEnabled(GuestCr3, AAD_HIDE_TIMING)) {
         CpuIndex = KeGetCurrentProcessorNumber();
-        if (CpuIndex < MAX_PROCESSORS) {
+        if (CpuIndex < g_MaxProcessors) {
             PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
             if (HvCtx) {
                 LONG64 Offset = HvCtx->TscOffset;
@@ -532,7 +532,7 @@ BOOLEAN AadHandleRdtsc(PGUEST_CONTEXT GuestContext)
  */
 VOID AadNotifyDebugPause(ULONG CpuIndex)
 {
-    if (CpuIndex < MAX_PROCESSORS && g_HvOps) {
+    if (CpuIndex < g_MaxProcessors && g_HvOps) {
         PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
         if (HvCtx && !HvCtx->InDebugPause) {
             HvCtx->LastDebugPauseTsc = __rdtsc();
@@ -547,7 +547,7 @@ VOID AadNotifyDebugPause(ULONG CpuIndex)
  */
 VOID AadNotifyDebugResume(ULONG CpuIndex)
 {
-    if (CpuIndex < MAX_PROCESSORS && g_HvOps) {
+    if (CpuIndex < g_MaxProcessors && g_HvOps) {
         PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
         if (HvCtx && HvCtx->InDebugPause) {
             ULONG64 Now = __rdtsc();
@@ -588,9 +588,35 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
      *
      * We must clear bit 31 and zero the hypervisor leaves (0x40000000+)
      * unconditionally so the OS treats us as bare metal.
+     *
+     * NESTED VIRTUALIZATION: Also hide VMX (ECX[5]) and SVM capabilities
+     * so the guest doesn't attempt to execute VMXON/VMRUN. If the guest
+     * tries to use VMX/SVM instructions, they will trigger a VM-Exit and
+     * we inject #UD. Hiding the capability bits prevents well-behaved
+     * software from even trying.
      */
     if (Leaf == 1) {
-        CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);
+        CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);   /* Hide hypervisor present */
+        CpuInfo[2] &= ~(1 << 5);                       /* Hide VMX (Intel VT-x) */
+    }
+    else if (Leaf == 0x80000001) {
+        /*
+         * AMD extended features: hide SVM capability (ECX bit 2).
+         * This prevents guest OS / nested hypervisors from detecting
+         * SVM support and attempting VMRUN, which we intercept as #UD.
+         */
+        CpuInfo[2] &= ~(1 << 2);                       /* Hide SVM (AMD-V) */
+    }
+    else if (Leaf == 0x8000000A) {
+        /*
+         * AMD SVM features leaf: zero out entirely.
+         * This leaf reports SVM revision, number of ASIDs, and NPT support.
+         * Returning zeros prevents nested SVM detection at any depth.
+         */
+        CpuInfo[0] = 0;
+        CpuInfo[1] = 0;
+        CpuInfo[2] = 0;
+        CpuInfo[3] = 0;
     }
     else if (Leaf >= 0x40000000 && Leaf <= 0x40000006) {
         CpuInfo[0] = 0;

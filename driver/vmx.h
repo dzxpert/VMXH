@@ -18,7 +18,7 @@
 #define PAGE_SIZE_4KB               0x1000
 #define PAGE_MASK_4KB               (~0xFFFULL)
 #define ALIGNMENT_PAGE_SIZE         PAGE_SIZE_4KB
-#define MAX_PROCESSORS              64
+/* MAX_PROCESSORS removed — use g_MaxProcessors (from hv_ops.h) */
 
 /* ========================================================================= */
 /*  MSR Definitions                                                          */
@@ -48,6 +48,7 @@
 #define MSR_IA32_SYSENTER_ESP           0x0175
 #define MSR_IA32_SYSENTER_EIP           0x0176
 #define MSR_IA32_DEBUGCTL               0x01D9
+#define MSR_IA32_XSS                    0x0DA0
 #define MSR_IA32_PAT                    0x0277
 #define MSR_IA32_EFER                   0x0C0000080
 #define MSR_IA32_FS_BASE                0x0C0000100
@@ -117,6 +118,7 @@
 #define VMCS_CTRL_APIC_ACCESS_ADDR              0x00002014
 #define VMCS_CTRL_EPT_POINTER                   0x0000201A
 #define VMCS_CTRL_EOI_EXIT_BITMAP_0             0x0000201C
+#define VMCS_CTRL_XSS_EXITING_BITMAP            0x0000202C
 
 /* 64-Bit Read-Only Data Field */
 #define VMCS_GUEST_PHYSICAL_ADDRESS             0x00002400
@@ -131,11 +133,13 @@
 #define VMCS_GUEST_PDPTE1                       0x0000280C
 #define VMCS_GUEST_PDPTE2                       0x0000280E
 #define VMCS_GUEST_PDPTE3                       0x00002810
+#define VMCS_GUEST_IA32_XSS                     0x00002812
 
 /* 64-Bit Host-State Fields */
 #define VMCS_HOST_IA32_PAT                      0x00002C00
 #define VMCS_HOST_IA32_EFER                     0x00002C02
 #define VMCS_HOST_IA32_PERF_GLOBAL_CTRL         0x00002C04
+#define VMCS_HOST_IA32_XSS                      0x00002C06
 
 /* 32-Bit Control Fields */
 #define VMCS_CTRL_PIN_BASED_VM_EXEC             0x00004000
@@ -585,7 +589,7 @@ typedef struct _VMX_CPU_CONTEXT {
  * Global VMX state
  */
 typedef struct _VMX_STATE {
-    VMX_CPU_CONTEXT CpuContexts[MAX_PROCESSORS];
+    PVMX_CPU_CONTEXT CpuContexts;   /* dynamically allocated array [g_MaxProcessors] */
     ULONG           CpuCount;
     BOOLEAN         Initialized;
 
@@ -725,7 +729,7 @@ extern VMX_STATE g_VmxState;
 FORCEINLINE PHV_VMX_ENLIGHTENED_VMCS VmxGetCurrentEvmcs(VOID)
 {
     ULONG Cpu = KeGetCurrentProcessorNumber();
-    if (Cpu < MAX_PROCESSORS) {
+    if (Cpu < g_MaxProcessors && g_VmxState.CpuContexts) {
         return (PHV_VMX_ENLIGHTENED_VMCS)g_VmxState.CpuContexts[Cpu].EvmcsVa;
     }
     return NULL;

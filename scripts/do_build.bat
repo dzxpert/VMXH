@@ -68,3 +68,4 @@ set PATH=%BASEDIR%\bin\x86\amd64;%BASEDIR%\bin\x86;%BASEDIR%\bin;%SystemRoot%\sy
 
 cd /d %~dp0..
 %BASEDIR%\bin\x86\build.exe -cZg
+cd /d %~dp0

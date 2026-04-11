@@ -10,6 +10,7 @@
 #include "svm.h"
 #include "npt.h"
 #include "vmx.h"        /* For VMCALL_MAGIC_SHUTDOWN */
+#include "hv_hypercall.h"
 #include "log.h"
 #include "process.h"
 #include "anti_anti_debug.h"
@@ -117,10 +118,49 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
         break;
 
     case SVM_EXIT_XSETBV:
+        /*
+         * BUG FIX: Validate XCR0 before executing XSETBV.
+         *
+         * If the Guest writes an illegal XCR0 combination, the XSETBV instruction
+         * would execute in Host context and trigger a #GP, crashing the Hypervisor.
+         *
+         * Intel/AMD SDM — XCR0 constraints:
+         *   - Bit 0 (x87) must always be 1
+         *   - If bit 2 (AVX) is set, bit 1 (SSE) must also be set
+         *   - XCR index must be 0 (only XCR0 is currently defined)
+         *
+         * If validation fails, inject #GP(0) into the Guest instead.
+         */
         {
             ULONG   Ecx = (ULONG)GuestContext->Rcx;
             ULONG64 Value = (GuestContext->Rax & 0xFFFFFFFF) |
                             ((GuestContext->Rdx & 0xFFFFFFFF) << 32);
+
+            if (Ecx != 0) {
+                /* Only XCR0 (index 0) is valid; all others -> #GP(0) */
+                Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT |
+                                         SVM_EVTINJ_VALID_ERR | 13;
+                Vmcb->Control.EventInjErr = 0;
+                break;
+            }
+
+            if (!(Value & 1)) {
+                /* Bit 0 (x87 FPU) must be 1 */
+                Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT |
+                                         SVM_EVTINJ_VALID_ERR | 13;
+                Vmcb->Control.EventInjErr = 0;
+                break;
+            }
+
+            if ((Value & (1ULL << 2)) && !(Value & (1ULL << 1))) {
+                /* AVX (bit 2) requires SSE (bit 1) */
+                Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT |
+                                         SVM_EVTINJ_VALID_ERR | 13;
+                Vmcb->Control.EventInjErr = 0;
+                break;
+            }
+
+            /* Valid XCR0 - execute the real XSETBV */
             AsmXsetbv(Ecx, Value);
             HvAdvanceGuestRip();
         }
@@ -171,7 +211,34 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
         break;
 
     case SVM_EXIT_NMI:
-        /* NMI - re-inject */
+        /*
+         * BUG FIX (Review Issue #3): Check NMI blocking before re-injection.
+         *
+         * AMD APM Vol.2: VMCB IntState bit 2 (NmiMask) indicates the guest
+         * has NMI blocked. Re-injecting while blocked may be silently dropped
+         * or cause undefined behavior on some CPU revisions.
+         *
+         * Fix: If NmiMask is set, enable IRET intercept. When the guest
+         * executes IRET, the NMI mask is cleared, and we inject then.
+         * Aligned with VMX side's NMI-window exiting mechanism.
+         */
+        if (!(Vmcb->Control.IntState & SVM_INTSTATE_NMI_MASK)) {
+            /* Not blocked by NMI: safe to inject immediately */
+            Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_NMI | 2;
+        } else {
+            /* Blocked by NMI: enable IRET intercept for deferred injection */
+            Vmcb->Control.Intercept |= (1ULL << SVM_INTERCEPT_IRET);
+        }
+        break;
+
+    case SVM_EXIT_IRET:
+        /*
+         * BUG FIX (Review Issue #3): Deferred NMI injection via IRET intercept.
+         *
+         * Guest executed IRET — NMI blocking is now cleared by hardware.
+         * Disable IRET intercept and inject the pending NMI.
+         */
+        Vmcb->Control.Intercept &= ~(1ULL << SVM_INTERCEPT_IRET);
         Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_NMI | 2;
         break;
 
@@ -195,7 +262,13 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
     default:
         LOG_WARN("SVM: Unhandled exit code=0x%X, RIP=0x%llX, Info1=0x%llX",
                  ExitCode, Vmcb->Save.Rip, Vmcb->Control.ExitInfo1);
-        HvAdvanceGuestRip();
+        /*
+         * BUG FIX (Review Issue #1): Do NOT advance RIP for unknown exits.
+         * Non-instruction exits (interrupts, preemption timer, etc.) have
+         * undefined instruction length. Blindly adding it to RIP causes the
+         * guest to jump to garbage addresses -> state corruption / BSOD.
+         * Aligned with VMX side (vmx_exit.c default handler).
+         */
         break;
     }
 
@@ -387,28 +460,82 @@ static BOOLEAN SvmHandleDrAccess(PGUEST_CONTEXT Ctx, ULONG ExitCode)
  * Handles #DB exceptions which serve dual purpose:
  * 1. NPT hook single-step completion (TF was set for write-through)
  * 2. Anti-anti-debug exception handling
+ *
+ * BUG FIX: The original code restored ALL hooks globally, which caused a
+ * multi-core race condition.  For example:
+ *   - CPU 0 triggers NPF on hook A → switches to permissive → TF
+ *   - CPU 1 triggers NPF on hook B → switches to permissive
+ *   - CPU 0's #DB fires → restores ALL hooks including B
+ *   - CPU 1 hasn't finished executing its instruction → re-faults → infinite loop
+ *
+ * Fix: Each CPU only restores the specific hook(s) on pages that IT made
+ * permissive.  We use a per-CPU tracking array (in npt.c) to record which
+ * physical page was relaxed.  The #DB handler queries it and only restores
+ * hooks on that specific page.
  */
 static BOOLEAN SvmHandleDbException(PGUEST_CONTEXT Ctx)
 {
-    PSVM_CPU_CONTEXT CpuCtx = &g_SvmState.CpuContexts[KeGetCurrentProcessorNumber()];
-    PVMCB Vmcb = CpuCtx->VmcbVa;
-    ULONG i;
+    ULONG CpuNum = KeGetCurrentProcessorNumber();
+    PSVM_CPU_CONTEXT CpuCtx;
+    PVMCB Vmcb;
+    ULONG64 RelaxedPa;
+    BOOLEAN RestoredAny = FALSE;
+
+    if (CpuNum >= g_MaxProcessors || !g_SvmState.CpuContexts) return FALSE;
+    CpuCtx = &g_SvmState.CpuContexts[CpuNum];
+    Vmcb = CpuCtx->VmcbVa;
 
     /*
-     * Check if this #DB was from our NPT hook single-step (TF flag).
-     * If any hooks are temporarily in R+W+X mode, restore them.
+     * Get which page THIS CPU relaxed (stored by NptHandlePageFault).
+     * Only restore hooks on that specific page.
      */
-    for (i = 0; i < NPT_MAX_HOOKS; i++) {
-        if (g_NptHookState.Hooks[i].Active && g_NptHookState.Hooks[i].TargetPte) {
-            PEPT_PTE Pte = g_NptHookState.Hooks[i].TargetPte;
+    RelaxedPa = NptDbGetAndClearRelaxedPage();
 
-            /* Check if currently in write-through mode (R+W+X with original page) */
+    /*
+     * Restore hook on the page this CPU relaxed.
+     *
+     * OPTIMIZATION: Use O(1) hash table lookup instead of O(n) linear scan.
+     * The previous code iterated over all NPT_MAX_HOOKS (1024) entries on
+     * every #DB exit — a hot path. Since hooks are indexed by physical page
+     * address and only ONE hook can exist per 4KB page, a single hash lookup
+     * suffices.
+     *
+     * When RelaxedPa is 0 (shouldn't happen), fall back to O(n) scan.
+     *
+     * Per-CPU hook page isolation: use this CPU's private PTE so that
+     * restoring permissions only affects THIS CPU's NPT translation.
+     */
+    if (RelaxedPa != 0) {
+        /* O(1) path: direct hash lookup for the specific hooked page */
+        PEPT_HOOK_ENTRY Hook = NptFindHookByPhysicalAddress(RelaxedPa);
+        if (Hook && Hook->Active && Hook->TargetPte) {
+            PEPT_PTE Pte = NptGetPerCpuPte(CpuNum, Hook->TargetPhysicalAddr);
+            if (!Pte) Pte = Hook->TargetPte;
+
             if (Pte->Read && Pte->Write && Pte->Execute) {
-                /* Restore to R+X with hook page */
                 Pte->Read = 1;
                 Pte->Write = 0;
                 Pte->Execute = 1;
-                Pte->PhysAddr = g_NptHookState.Hooks[i].HookPagePa >> 12;
+                Pte->PhysAddr = Hook->HookPagePa >> 12;
+                RestoredAny = TRUE;
+            }
+        }
+    } else {
+        /* Fallback O(n) path: RelaxedPa unknown, restore ALL hooks (safety) */
+        ULONG i;
+        for (i = 0; i < NPT_MAX_HOOKS; i++) {
+            if (g_NptHookState.Hooks[i].Active && g_NptHookState.Hooks[i].TargetPte) {
+                PEPT_PTE Pte = NptGetPerCpuPte(CpuNum,
+                    g_NptHookState.Hooks[i].TargetPhysicalAddr);
+                if (!Pte) Pte = g_NptHookState.Hooks[i].TargetPte;
+
+                if (Pte->Read && Pte->Write && Pte->Execute) {
+                    Pte->Read = 1;
+                    Pte->Write = 0;
+                    Pte->Execute = 1;
+                    Pte->PhysAddr = g_NptHookState.Hooks[i].HookPagePa >> 12;
+                    RestoredAny = TRUE;
+                }
             }
         }
     }
@@ -418,20 +545,20 @@ static BOOLEAN SvmHandleDbException(PGUEST_CONTEXT Ctx)
 
     NptInvalidateAll();
 
-    /* If this was truly from our single-step, don't re-inject */
-    /* If it's a real debug exception for AAD, re-inject it */
-    /* For simplicity, check if any hook was in write-through mode */
-    /* If not, delegate to anti-anti-debug */
-    {
+    /*
+     * If we restored any hooks, this was our single-step — don't re-inject.
+     * If nothing was restored and this is a target process, it may be a
+     * real #DB for anti-anti-debug — delegate to AAD handler.
+     */
+    if (!RestoredAny) {
         ULONG64 GuestCr3 = Vmcb->Save.Cr3;
         if (IsTargetProcess(GuestCr3)) {
-            /* Might be a real #DB for the target - re-inject via AAD */
             return AadHandleException(Ctx);
         }
-    }
 
-    /* Not a target process and not from our hook - re-inject #DB normally */
-    Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | 1;
+        /* Not a target process and not from our hook - re-inject #DB normally */
+        Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | 1;
+    }
 
     return TRUE;
 }
@@ -475,10 +602,20 @@ static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
 
     /*
      * Unknown VMMCALL - not ours.
-     * Return HV_STATUS_INVALID_HYPERCALL_CODE in RAX and skip the instruction.
-     * Do NOT inject #UD - Windows uses VMMCALL for Hyper-V enlightenments.
+     *
+     * Windows issues VMMCALL for Hyper-V enlightenments (TLB flush,
+     * VP scheduling hints, etc.) when it detects a hypervisor via CPUID.
+     * VMware/KVM also trigger this.  We must NOT inject #UD.
+     *
+     * FIX: Instead of blindly returning HV_STATUS_INVALID_HYPERCALL_CODE
+     * (0x0002) — which causes SwapContext to crash because TLB is not
+     * actually flushed — we now parse the Hyper-V hypercall input value
+     * in RCX and emulate the critical TLB flush hypercalls.
+     *
+     * For emulated calls: RAX = 0 (HV_STATUS_SUCCESS)
+     * For unknown calls:  RAX = 2 (HV_STATUS_INVALID_HYPERCALL_CODE)
      */
-    Ctx->Rax = 0x0002;  /* HV_STATUS_INVALID_HYPERCALL_CODE */
+    Ctx->Rax = HvEmulateHypercall(Ctx->Rcx, Ctx->Rdx, Ctx->R8);
     HvAdvanceGuestRip();
     return TRUE;
 }

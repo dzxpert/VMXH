@@ -52,7 +52,56 @@ typedef struct _HV_CPU_CONTEXT {
 /*  Hypervisor Operations Interface                                          */
 /* ========================================================================= */
 
-#define MAX_PROCESSORS  64
+/*
+ * Dynamic processor count: set once during initialization via
+ * KeQueryActiveProcessorCount(). Replaces the old MAX_PROCESSORS constant.
+ */
+extern ULONG g_MaxProcessors;
+
+/*
+ * BUG FIX (Issue #8): KeSetTargetProcessorDpc takes a CCHAR parameter
+ * (signed 8-bit), limiting the maximum CPU index to 127. Systems with
+ * >128 CPUs would overflow and target the wrong CPU.
+ *
+ * KeSetTargetProcessorDpcEx (available since Windows 7) uses a
+ * PROCESSOR_NUMBER structure supporting any number of CPUs.
+ *
+ * We dynamically resolve KeSetTargetProcessorDpcEx at init time and
+ * fall back to KeSetTargetProcessorDpc (with CCHAR cast) on older systems.
+ *
+ * HvSetTargetProcessorDpc() is the unified helper that all code should use.
+ */
+typedef NTSTATUS (NTAPI *PFN_KeSetTargetProcessorDpcEx)(
+    PKDPC Dpc,
+    PPROCESSOR_NUMBER ProcNumber
+);
+
+extern PFN_KeSetTargetProcessorDpcEx g_pfnKeSetTargetProcessorDpcEx;
+
+/*
+ * HvSetTargetProcessorDpc - Target a DPC to a specific CPU.
+ * Uses KeSetTargetProcessorDpcEx if available, otherwise falls back to
+ * KeSetTargetProcessorDpc with CCHAR cast (limited to CPU 0-127).
+ *
+ * Returns STATUS_SUCCESS on success, or an error if CpuIndex > 127 and
+ * KeSetTargetProcessorDpcEx is not available.
+ */
+FORCEINLINE NTSTATUS HvSetTargetProcessorDpc(PKDPC Dpc, ULONG CpuIndex)
+{
+    if (g_pfnKeSetTargetProcessorDpcEx) {
+        PROCESSOR_NUMBER ProcNumber;
+        NTSTATUS Status = KeGetProcessorNumberFromIndex(CpuIndex, &ProcNumber);
+        if (!NT_SUCCESS(Status)) return Status;
+        return g_pfnKeSetTargetProcessorDpcEx(Dpc, &ProcNumber);
+    }
+
+    /* Fallback: CCHAR can only represent 0-127 */
+    if (CpuIndex > 127) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    KeSetTargetProcessorDpc(Dpc, (CCHAR)CpuIndex);
+    return STATUS_SUCCESS;
+}
 
 typedef struct _HV_OPS {
 

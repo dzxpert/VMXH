@@ -288,7 +288,28 @@ static VOID SvmInitMsrpm(PVOID Msrpm)
     /* Intercept debug-related MSRs */
     SvmMsrpmSetBit(Msrpm, 0x01D9, TRUE, TRUE);   /* IA32_DEBUGCTL */
 
-    LOG_DEBUG("SVM MSRPM initialized");
+    /*
+     * NESTED VIRTUALIZATION: Intercept VMX/SVM capability MSRs.
+     *
+     * On AMD, guest software may probe Intel VMX MSRs (0x480-0x491) to check
+     * for nested VMX support, or SVM-specific MSRs (VM_CR, VM_HSAVE_PA) to
+     * detect/configure SVM. We intercept these and return spoofed values
+     * (handled in HandleRdmsrImpl/HandleWrmsrImpl) to hide virtualization
+     * capabilities from the guest.
+     *
+     * Also intercept IA32_FEATURE_CONTROL (0x3A) which controls VMXON enable.
+     */
+    SvmMsrpmSetBit(Msrpm, 0x003A, TRUE, TRUE);     /* IA32_FEATURE_CONTROL */
+    {
+        ULONG VmxMsr;
+        for (VmxMsr = 0x0480; VmxMsr <= 0x0491; VmxMsr++) {
+            SvmMsrpmSetBit(Msrpm, VmxMsr, TRUE, TRUE);
+        }
+    }
+    SvmMsrpmSetBit(Msrpm, 0xC0010114, TRUE, TRUE);  /* MSR_VM_CR */
+    SvmMsrpmSetBit(Msrpm, 0xC0010117, TRUE, TRUE);  /* MSR_VM_HSAVE_PA */
+
+    LOG_DEBUG("SVM MSRPM initialized with debug + VMX/SVM MSR interceptions");
 }
 
 /* ========================================================================= */
@@ -421,15 +442,25 @@ static VOID SvmInitVmcb(PSVM_CPU_CONTEXT CpuCtx)
 
     /* Nested Paging (NPT) */
     if (g_SvmState.NptSupported) {
+        ULONG64 NptRootPa;
+        ULONG CpuNum = CpuCtx->Common.ProcessorNumber;
+
         Vmcb->Control.NestedCtl = SVM_NESTED_CTL_NP_ENABLE;
-        Vmcb->Control.NestedCr3 = NptGetRootPageTablePa();
+
+        /* Use per-CPU NPT root if available for hook page isolation */
+        NptRootPa = NptGetPerCpuRootPa(CpuNum);
+        if (NptRootPa == 0) {
+            NptRootPa = NptGetRootPageTablePa();  /* fallback to shared */
+        }
+        Vmcb->Control.NestedCr3 = NptRootPa;
 
         /*
          * With NPT enabled, CR3 interception for paging is not needed.
          * We still intercept CR0/CR4 writes to maintain consistency.
          */
-        LOG_INFO("NPT enabled for CPU %u, nested_cr3=0x%llX",
-                 CpuCtx->Common.ProcessorNumber, Vmcb->Control.NestedCr3);
+        LOG_INFO("NPT enabled for CPU %u, nested_cr3=0x%llX%s",
+                 CpuNum, Vmcb->Control.NestedCr3,
+                 (NptRootPa != NptGetRootPageTablePa()) ? " (per-CPU)" : " (shared)");
     }
 
     /* ===== Save Area - Mirror Current CPU State ===== */
@@ -720,6 +751,9 @@ NTSTATUS SvmInitialize(VOID)
     CpuCount = KeQueryActiveProcessorCount(NULL);
     g_SvmState.CpuCount = CpuCount;
 
+    /* Set the global processor count (used for bounds checks everywhere) */
+    g_MaxProcessors = CpuCount;
+
     LOG_INFO("Initializing SVM on %u processors", CpuCount);
 
     /* Check capabilities */
@@ -740,6 +774,26 @@ NTSTATUS SvmInitialize(VOID)
         SvmFreeGlobalResources();
         return Status;
     }
+
+    /* Initialize per-CPU NPT structures (hook page isolation) */
+    Status = NptInitPerCpu();
+    if (!NT_SUCCESS(Status)) {
+        LOG_WARN("Per-CPU NPT init failed: 0x%08X (falling back to shared NPT)", Status);
+        /* Non-fatal: hooks still work but without per-CPU isolation */
+    }
+
+    /* Dynamically allocate per-CPU context array */
+    g_SvmState.CpuContexts = (PSVM_CPU_CONTEXT)ExAllocatePoolWithTag(
+        NonPagedPool,
+        CpuCount * sizeof(SVM_CPU_CONTEXT),
+        'mvsC');
+    if (!g_SvmState.CpuContexts) {
+        LOG_ERROR("Failed to allocate SVM CPU contexts for %u CPUs", CpuCount);
+        NptCleanup();
+        SvmFreeGlobalResources();
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(g_SvmState.CpuContexts, CpuCount * sizeof(SVM_CPU_CONTEXT));
 
     /* Allocate per-CPU structures */
     for (i = 0; i < CpuCount; i++) {
@@ -770,8 +824,19 @@ NTSTATUS SvmInitialize(VOID)
         KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
 
         KeInitializeDpc(&Dpc, SvmInitDpcRoutine, &DpcCtx);
-        KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
         KeSetImportanceDpc(&Dpc, HighImportance);
+
+        /*
+         * BUG FIX (Issue #8): Use HvSetTargetProcessorDpc for >127 CPU support.
+         */
+        {
+            NTSTATUS DpcTargetStatus = HvSetTargetProcessorDpc(&Dpc, i);
+            if (!NT_SUCCESS(DpcTargetStatus)) {
+                LOG_ERROR("Failed to target DPC to CPU %u: 0x%08X", i, DpcTargetStatus);
+                Status = DpcTargetStatus;
+                goto SvmInitFailed;
+            }
+        }
 
         if (!KeInsertQueueDpc(&Dpc, NULL, NULL)) {
             LOG_ERROR("Failed to queue SVM init DPC for CPU %u", i);
@@ -804,9 +869,9 @@ SvmInitFailed:
             DpcCtx.Status = STATUS_UNSUCCESSFUL;
             KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
             KeInitializeDpc(&Dpc, SvmTerminateDpcRoutine, &DpcCtx);
-            KeSetTargetProcessorDpc(&Dpc, (CCHAR)j);
             KeSetImportanceDpc(&Dpc, HighImportance);
-            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+            if (NT_SUCCESS(HvSetTargetProcessorDpc(&Dpc, j)) &&
+                KeInsertQueueDpc(&Dpc, NULL, NULL)) {
                 KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
             }
         }
@@ -815,7 +880,12 @@ SvmInitFailed:
     for (j = i; j < CpuCount; j++) {
         SvmFreeCpuContext(&g_SvmState.CpuContexts[j]);
     }
+    NptCleanupPerCpu();
     NptCleanup();
+    if (g_SvmState.CpuContexts) {
+        ExFreePoolWithTag(g_SvmState.CpuContexts, 'mvsC');
+        g_SvmState.CpuContexts = NULL;
+    }
     SvmFreeGlobalResources();
     return Status;
 }
@@ -840,10 +910,10 @@ VOID SvmTerminate(VOID)
             KeInitializeEvent(&DpcCtx.Event, NotificationEvent, FALSE);
 
             KeInitializeDpc(&Dpc, SvmTerminateDpcRoutine, &DpcCtx);
-            KeSetTargetProcessorDpc(&Dpc, (CCHAR)i);
             KeSetImportanceDpc(&Dpc, HighImportance);
 
-            if (KeInsertQueueDpc(&Dpc, NULL, NULL)) {
+            if (NT_SUCCESS(HvSetTargetProcessorDpc(&Dpc, i)) &&
+                KeInsertQueueDpc(&Dpc, NULL, NULL)) {
                 KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
             }
 
@@ -852,10 +922,17 @@ VOID SvmTerminate(VOID)
     }
 
     /* Now safe to clean up */
+    NptCleanupPerCpu();
     NptCleanup();
 
     for (i = 0; i < g_SvmState.CpuCount; i++) {
         SvmFreeCpuContext(&g_SvmState.CpuContexts[i]);
+    }
+
+    /* Free the dynamically allocated CpuContexts array */
+    if (g_SvmState.CpuContexts) {
+        ExFreePoolWithTag(g_SvmState.CpuContexts, 'mvsC');
+        g_SvmState.CpuContexts = NULL;
     }
 
     SvmFreeGlobalResources();
@@ -872,7 +949,7 @@ VOID SvmTerminate(VOID)
 static PSVM_CPU_CONTEXT SvmGetCurrentCpu(VOID)
 {
     ULONG CpuNum = KeGetCurrentProcessorNumber();
-    if (CpuNum < MAX_PROCESSORS) {
+    if (CpuNum < g_MaxProcessors && g_SvmState.CpuContexts) {
         return &g_SvmState.CpuContexts[CpuNum];
     }
     return NULL;

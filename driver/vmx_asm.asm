@@ -6,10 +6,12 @@
 ;
 
 EXTERN VmxExitHandler:PROC
+EXTERN VmxResumeFailedHandler:PROC
 
 ; VMCS field encodings used by AsmVmxLaunch and AsmVmxExitHandler
 VMCS_GUEST_RSP_ENCODING EQU 0681Ch
 VMCS_GUEST_RIP_ENCODING EQU 0681Eh
+VMCS_GUEST_RFLAGS_ENCODING EQU 06820h
 
 .code
 
@@ -220,20 +222,29 @@ VmxShutdown:
     ; We're on the Host stack with the saved GUEST_CONTEXT at [rsp].
     ; VmxAdvanceGuestRip() has already advanced Guest RIP past VMCALL.
     ;
+    ; BUG FIX (Problem H): Also restore Guest RFLAGS via vmread + popfq.
+    ; The original code did not restore RFLAGS, leaving Host RFLAGS active
+    ; after vmxoff. While most flags are quickly overwritten by subsequent
+    ; instructions, special flags (TF, DF, IF) could cause subtle issues.
+    ;
     ; Strategy:
-    ;   1. vmread Guest RSP/RIP (must happen before vmxoff)
+    ;   1. vmread Guest RSP/RIP/RFLAGS (must happen before vmxoff)
     ;   2. Push Guest RIP onto Guest stack (so we can 'ret' to it)
     ;   3. vmxoff
     ;   4. Restore all guest GP registers from GUEST_CONTEXT
-    ;   5. Set RSP = (Guest RSP - 8), then ret -> Guest RIP
+    ;   5. Push Guest RFLAGS and popfq to restore flags
+    ;   6. Set RSP = (Guest RSP - 8), then ret -> Guest RIP
     ; ---------------------------------------------------------------
 
-    ; 1. Read Guest RSP and Guest RIP from VMCS
+    ; 1. Read Guest RSP, Guest RIP, and Guest RFLAGS from VMCS
     mov     rcx, VMCS_GUEST_RSP_ENCODING
     vmread  rdx, rcx            ; rdx = Guest RSP
 
     mov     rcx, VMCS_GUEST_RIP_ENCODING
     vmread  rax, rcx            ; rax = Guest RIP
+
+    mov     rcx, VMCS_GUEST_RFLAGS_ENCODING
+    vmread  rcx, rcx            ; rcx = Guest RFLAGS
 
     ; 2. Push Guest RIP onto the Guest's stack
     sub     rdx, 8
@@ -242,6 +253,13 @@ VmxShutdown:
     ; Save adjusted Guest RSP into GUEST_CONTEXT.Rsp slot (offset 0x20)
     ; so we can load it later after restoring all other registers
     mov     [rsp + 020h], rdx
+
+    ; Save Guest RFLAGS into GUEST_CONTEXT.Rax slot (offset 0x00) temporarily
+    ; (we'll read it back after restoring other GP regs, before restoring rax)
+    ; Actually, use a different approach: save on guest stack too
+    sub     rdx, 8
+    mov     [rdx], rcx          ; Guest stack: [Guest RSP - 16] = Guest RFLAGS
+    mov     [rsp + 020h], rdx   ; Update saved Guest RSP to account for RFLAGS
 
     ; 3. vmxoff — exit VMX operation
     vmxoff
@@ -264,19 +282,31 @@ VmxShutdown:
     mov     r14, [rsp + 070h]
     mov     r15, [rsp + 078h]
 
-    ; 5. Load Guest RSP (adjusted, with Guest RIP on top) and ret
+    ; 5. Load Guest RSP (with RFLAGS and RIP on top) and restore RFLAGS
     mov     rsp, [rsp + 020h]   ; switch to guest stack
+    popfq                       ; restore Guest RFLAGS (was at [Guest RSP - 16])
     ret                         ; pops Guest RIP, resumes guest execution
 
 VmxResumeFailed:
     ; vmresume failed - this is a critical error.
-    ; Cannot resume guest. Read the VM-instruction error from VMCS
-    ; and bugcheck rather than corrupting memory with a bad ret.
+    ; Read the VM-instruction error from VMCS before vmxoff destroys it.
     ;
-    ; At this point we're in VMX root mode on the host stack.
-    ; Log and halt instead of trying to ret (host stack has no valid return addr).
+    ; RCX = VMCS_VM_INSTRUCTION_ERROR encoding (0x4400)
+    ; RAX = error number (returned by vmread)
+    mov     rcx, 04400h
+    vmread  rax, rcx            ; rax = VM-instruction error number
+
+    ; Save error number for C call (rcx = first arg in x64 ABI)
+    mov     rcx, rax
+
+    ; We're on the host stack. Call the C handler to log the error.
+    ; The GUEST_CONTEXT is still at the base of our frame.
+    sub     rsp, 28h            ; shadow space for x64 ABI
+    call    VmxResumeFailedHandler
+    add     rsp, 28h
+
+    ; Now exit VMX and halt
     vmxoff
-    int     3
     cli
     hlt
     jmp     VmxResumeFailed     ; infinite halt loop as safety net

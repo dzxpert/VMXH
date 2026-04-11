@@ -24,6 +24,9 @@
   - [日志系统](#日志系统)
 - [AMD SVM 技术细节](#amd-svm-技术细节)
 - [Hyper-V 嵌套虚拟化支持](#hyper-v-嵌套虚拟化支持)
+- [嵌套虚拟化隐藏](#嵌套虚拟化隐藏)
+- [Hyper-V Hypercall 模拟](#hyper-v-hypercall-模拟vmcallvmmcall-兼容层)
+- [Per-CPU EPT/NPT Hook 页隔离](#per-cpu-eptnpt-hook-页隔离)
 - [Hypervisor 内存读写](#hypervisor-内存读写)
 - [后加载虚拟化与内存连续性](#后加载虚拟化与内存连续性)
 - [通用 EPT/NPT Hook 框架](#通用-eptnpt-hook-框架)
@@ -69,6 +72,8 @@
 | **SSDT 监控与 Hook** | 发现、转储、按名称/索引 Hook 任意 SSDT 函数，支持全量/过滤监控 | 磁盘映射 ntoskrnl.exe (SEC_IMAGE) 获取无污染 SSDT 地址，复用 EPT Hook 框架 |
 | **Shadow SSDT (Win32k) Hook** | 发现、转储、Hook NtUser*/NtGdi* 函数，支持全量/过滤监控 | KTHREAD 偏移扫描定位 KeServiceDescriptorTableShadow，Session 上下文中解析 win32k |
 | **Hyper-V 嵌套虚拟化** | 在 Hyper-V 开启的环境下正常运行，无需关闭 Hyper-V | 自动检测 L0 Hyper-V，使用 Enlightened VMCS/VMCB 替代低效的 VMREAD/VMWRITE 模拟 |
+| **嵌套虚拟化隐藏** | 对 Guest 完全隐藏宿主机虚拟化能力 | 拦截 CPUID/MSR/VMX/SVM 指令，伪装为裸机环境 |
+| **Per-CPU EPT/NPT 隔离** | 多核 Hook 零竞争条件 | 每 CPU 独立 EPT/NPT 页表链，PTE 权限切换互不干扰 |
 | **更多扩展** | 后续持续增加基于 VMX 的高级功能 | — |
 
 ### 设计理念
@@ -1173,6 +1178,422 @@ if (!g_IsNestedMode && IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
                             |
                    L2 Guest 继续执行
 ```
+
+---
+
+## 嵌套虚拟化隐藏
+
+### 背景
+
+为了阻止 Guest 内软件（包括嵌套虚拟化尝试、反作弊驱动的虚拟化检测、以及反调试代码的 Hypervisor 探测），我们在 VM-Exit handler 中对 **CPUID / MSR / VMX 指令 / SVM 指令** 进行全面拦截，使 Guest 认为自己运行在无虚拟化能力的裸机上。
+
+### 修改影响方向
+
+```
+L0 (外层 VMware / Hyper-V / KVM)      ← 不受任何影响
+        ↑ 我们的 __readmsr / VMXON 等走这条路, 由 L0 控制
+L1 (VMXToolbox Hypervisor)             ← 修改发生在这里
+        ↓ VM-Exit handler 修改返回给 Guest 的值
+L2 (Guest OS + 应用)                   ← 看到伪造的裸机环境
+```
+
+**所有修改只影响 L1→L2 方向**，不影响 L0→L1 方向。
+
+### CPUID 隐藏
+
+**文件**: `anti_anti_debug.c` — `AadHandleCpuid()`
+
+对所有进程无条件生效（不依赖反反调试标志）：
+
+| Leaf | 修改 | 目的 |
+|------|------|------|
+| `CPUID.1:ECX` | 清除 bit 31 (Hypervisor Present) | 隐藏 Hypervisor 存在 |
+| `CPUID.1:ECX` | 清除 bit 5 (VMX) | 隐藏 Intel VT-x 支持 |
+| `CPUID.0x80000001:ECX` | 清除 bit 2 (SVM) | 隐藏 AMD-V 支持 |
+| `CPUID.0x8000000A` | 返回全零 | 隐藏 SVM 特性叶（NASID/NPT 支持等） |
+| `CPUID.0x40000000~0x40000006` | 返回全零 | 隐藏 Hypervisor 厂商字符串和接口叶 |
+
+```c
+if (Leaf == 1) {
+    CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);   /* Hide hypervisor present */
+    CpuInfo[2] &= ~(1 << 5);                       /* Hide VMX (Intel VT-x) */
+}
+else if (Leaf == 0x80000001) {
+    CpuInfo[2] &= ~(1 << 2);                       /* Hide SVM (AMD-V) */
+}
+else if (Leaf == 0x8000000A) {
+    CpuInfo[0] = CpuInfo[1] = CpuInfo[2] = CpuInfo[3] = 0;
+}
+else if (Leaf >= 0x40000000 && Leaf <= 0x40000006) {
+    CpuInfo[0] = CpuInfo[1] = CpuInfo[2] = CpuInfo[3] = 0;
+}
+```
+
+**安全性说明**：`__cpuidex()` 先执行真实 CPUID（由 L0 返回），修改发生在 VM-Exit handler 中，仅改变返回给 L2 Guest 的结果。L0 完全不知道我们修改了什么。
+
+### MSR 拦截 — 虚拟化能力隐藏
+
+**文件**: `msr.c`
+
+#### MSR Bitmap 配置
+
+在 `MsrBitmapInitialize()` 中拦截以下 MSR：
+
+| MSR 范围 | 名称 | 拦截模式 |
+|----------|------|---------|
+| `0x003A` | IA32_FEATURE_CONTROL | 读+写 |
+| `0x0480~0x0491` | IA32_VMX_BASIC ~ IA32_VMX_VMFUNC | 读+写 |
+| `0xC0010114` | MSR_VM_CR (AMD) | 读+写 (SVM MSRPM) |
+| `0xC0010117` | MSR_VM_HSAVE_PA (AMD) | 读+写 (SVM MSRPM) |
+
+#### RDMSR 伪造策略
+
+| MSR | 返回值 | 含义 |
+|-----|--------|------|
+| `0x0480~0x0491` (VMX MSRs) | 全零 | VMX 不可用 |
+| `0x003A` (IA32_FEATURE_CONTROL) | `1` (Lock=1, VMXON=0) | VMX 被 BIOS 锁定禁用 |
+| `0xC0010114` (MSR_VM_CR) | 真实值 \| SVMDIS \| LOCK | SVM 被禁用并锁定 |
+| `0xC0010117` (MSR_VM_HSAVE_PA) | `0` | SVM Host Save Area 未配置 |
+
+#### WRMSR 阻止策略
+
+所有虚拟化相关 MSR 的写入操作均注入 `#GP(0)`，模拟裸机行为（VMX MSR 只读；IA32_FEATURE_CONTROL 写入锁定后 #GP；VM_CR 锁定后 #GP）。
+
+### VMX 指令拦截
+
+**文件**: `vmx_exit.c`
+
+Guest 尝试执行任何 VMX 指令时（即使 CPUID 已隐藏 VMX 位），CPU 会无条件触发 VM-Exit。我们对所有 VMX 指令注入 `#UD`（Undefined Opcode），与 VMX 被禁用时的 CPU 行为一致：
+
+```c
+case EXIT_REASON_VMCLEAR:
+case EXIT_REASON_VMLAUNCH:
+case EXIT_REASON_VMPTRLD:
+case EXIT_REASON_VMPTRST:
+case EXIT_REASON_VMREAD:
+case EXIT_REASON_VMRESUME:
+case EXIT_REASON_VMWRITE:
+case EXIT_REASON_VMXOFF:
+case EXIT_REASON_VMXON:
+case EXIT_REASON_INVEPT:
+case EXIT_REASON_INVVPID:
+    /* Inject #UD (vector 6) */
+    VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO, INTERRUPT_INFO_VALID |
+             (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) | 6);
+    break;
+```
+
+### SVM 指令拦截
+
+**文件**: `svm_exit.c`
+
+AMD SVM 后端同样拦截所有 SVM 管理指令并注入 `#UD`：
+
+- `VMRUN` / `VMLOAD` / `VMSAVE`
+- `STGI` / `CLGI`
+- `SKINIT` / `INVLPGA`
+
+### 安全性总结
+
+| 修改点 | 影响方向 | 对外层 HV 影响 | 说明 |
+|--------|---------|--------------|------|
+| CPUID 隐藏 VMX/SVM 位 | L1→L2 | ❌ 无 | 只修改给 Guest 的返回值 |
+| MSR bitmap 拦截 | L1→L2 | ❌ 无 | 只控制 Guest 的 MSR 访问 |
+| RDMSR 伪造 | L1→L2 | ❌ 无 | 只在 Exit handler 中修改 |
+| WRMSR 阻止 (#GP) | L1→L2 | ❌ 无 | 只对 Guest 注入 #GP |
+| VMX 指令 → #UD | L1→L2 | ❌ 无 | 只拦截 Guest 的 VMX 指令 |
+| SVM 指令 → #UD | L1→L2 | ❌ 无 | 只拦截 Guest 的 SVM 指令 |
+
+**初始化安全**：`VmxCheckCapabilities()` 和 `SvmCheckCapabilities()` 中的 `__readmsr(MSR_IA32_VMX_BASIC)` 等调用在 `DriverEntry` 中执行，此时 VMX/SVM 还未启动，MSR Bitmap 还未生效，不受影响。
+
+---
+
+## Hyper-V Hypercall 模拟（VMCALL/VMMCALL 兼容层）
+
+### 问题背景
+
+在嵌套虚拟化环境中（VMware Workstation / Hyper-V / KVM），外部 hypervisor 会在 CPUID.1:ECX[31] 设置 **Hypervisor Present** 位。Windows 在**启动早期**（驱动加载之前）就检测到该位，并在内核热路径中编译了 **VMCALL/VMMCALL enlightenment** 调用，最典型的是 `nt!SwapContext` 中使用 `HvFlushVirtualAddressSpace` (VMCALL) 进行 TLB 刷新。
+
+**关键时序问题**：
+
+```
+Windows 启动时:
+  CPUID.1:ECX[31] = 1 (外部 hypervisor 设置)
+    → Windows 缓存: "有 Hyper-V 兼容 hypervisor"
+    → 编译 SwapContext 等热路径使用 VMCALL TLB flush
+    → 这个决策不可逆, 即使后续 CPUID 返回不同结果
+
+我们的驱动加载后:
+  AadHandleCpuid() 清除 ECX[31]
+    → 但 SwapContext 中的 VMCALL 已经编译好了, 不会改变
+    → VMCALL 被我们的 hypervisor 拦截
+
+原有处理 (导致 BSOD):
+  HandleVmcall():
+    RAX = 0x0002 (HV_STATUS_INVALID_HYPERCALL_CODE)
+    → SwapContext 不检查返回值, 认为 TLB 已刷新
+    → 实际 TLB 未刷新 → 执行陈旧物理页内容
+    → 0x0F (不完整的两字节操作码) → #UD → BSOD
+```
+
+### 崩溃现象
+
+| 项目 | 值 |
+|------|-----|
+| 崩溃地址 | `nt!SwapContext+0x100` |
+| 异常码 | `0xC000001D` (STATUS_ILLEGAL_INSTRUCTION) |
+| 故障字节 | `0x0F` (不完整的两字节操作码前缀) |
+| IRQL | 2 (DISPATCH_LEVEL) |
+| 调用栈 | `SwapContext → KiSwapContext → KiDispatchInterrupt → KiDpcInterrupt` |
+
+### 解决方案：Hypercall 模拟层
+
+新增 `hv_hypercall.h` / `hv_hypercall.c`，在 VMCALL/VMMCALL exit handler 中解析 Hyper-V hypercall 输入值（RCX 低 16 位 = Call Code），对关键 hypercall 进行真正的硬件模拟：
+
+| Hypercall Code | 名称 | 模拟实现 |
+|---|---|---|
+| `0x0001` | `HvSwitchVirtualAddressSpace` | INVVPID all + INVEPT all (Intel) / ASID flush (AMD) |
+| `0x0002` | `HvFlushVirtualAddressSpace` | INVVPID all + INVEPT all / ASID flush |
+| `0x0003` | `HvFlushVirtualAddressList` | INVVPID all + INVEPT all / ASID flush |
+| `0x0013` | `HvFlushVirtualAddressSpaceEx` | INVVPID all + INVEPT all / ASID flush |
+| `0x0014` | `HvFlushVirtualAddressListEx` | INVVPID all + INVEPT all / ASID flush |
+| `0x0008` | `HvNotifyLongSpinWait` | 直接返回 SUCCESS (调度提示) |
+| `0x000B` | `HvSendSyntheticClusterIpi` | 直接返回 SUCCESS |
+| `0x0015` | `HvSendSyntheticClusterIpiEx` | 直接返回 SUCCESS |
+| 其他 | 未知 hypercall | 返回 `0x0002` (HV_STATUS_INVALID_HYPERCALL_CODE) |
+
+### 调用流程
+
+```
+SwapContext → VMCALL (RCX = 0x0002 | flags)
+    ↓ VM-Exit
+HandleVmcall() / SvmHandleVmmcall()
+    ├── 检查 VMCALL_MAGIC_SHUTDOWN → 关闭 hypervisor
+    ├── 检查 VMCALL_MAGIC | SubCmd → 我们自己的 VMCALL 协议
+    └── 其他 → HvEmulateHypercall(RCX, RDX, R8)
+                  ├── 解析 RCX[15:0] = Call Code
+                  ├── TLB flush 系列 → HvPerformTlbFlush()
+                  │     ├── Intel: INVVPID all + INVEPT all
+                  │     └── AMD:   NptInvalidateAll() (ASID flush)
+                  ├── IPI/SpinWait → 直接返回 SUCCESS
+                  └── 未知 → 返回 0x0002
+    RAX = 返回值 (SUCCESS / INVALID_CODE)
+    RIP += instruction_length
+    ↓ VM-Resume
+SwapContext 继续执行 (TLB 已正确刷新)
+```
+
+### 外部 Hypervisor 检测增强
+
+`HvDetectNestedMode()` 已增强为支持多种外部 hypervisor 的识别：
+
+| 外部 Hypervisor | CPUID 0x40000000 签名 | `g_OuterHypervisor` | `g_IsNestedMode` | Enlightened VMCS |
+|---|---|---|---|---|
+| 裸机 | (ECX[31]=0) | `OUTER_HV_NONE` | FALSE | N/A |
+| Microsoft Hyper-V | `"Microsoft Hv"` | `OUTER_HV_HYPERV` | **TRUE** | ✅ 支持 |
+| VMware Workstation/ESXi | `"VMwareVMware"` | `OUTER_HV_VMWARE` | FALSE | ❌ |
+| Linux KVM | `"KVMKVMKVM"` | `OUTER_HV_KVM` | FALSE | ❌ |
+| 其他 | (ECX[31]=1) | `OUTER_HV_UNKNOWN` | FALSE | ❌ |
+
+关键区分：
+- `g_IsNestedMode`：仅在 Hyper-V 下为 TRUE（用于 Enlightened VMCS 优化）
+- `g_OuterHypervisorPresent`：任何外部 hypervisor 存在时为 TRUE（触发 hypercall 模拟）
+
+### 三种环境下的行为
+
+| 环境 | CPUID.1:ECX[31] | Windows 使用 VMCALL? | 我们的处理 |
+|---|---|---|---|
+| **裸机** | 0 | ❌ 不使用 | VMCALL exit 只匹配我们自己的 magic 值 |
+| **VMware** | 1 (VMware 设置) | ✅ TLB flush enlightenment | `HvEmulateHypercall()` 执行真正的 INVVPID/INVEPT |
+| **Hyper-V** | 1 (Hyper-V 设置) | ✅ TLB flush enlightenment | `HvEmulateHypercall()` + Enlightened VMCS |
+
+### 相关文件
+
+| 文件 | 改动 |
+|---|---|
+| `hv_hypercall.h` (新增) | Hyper-V hypercall 常量、状态码、外部 hypervisor 类型枚举 |
+| `hv_hypercall.c` (新增) | `HvEmulateHypercall()` 实现、`HvPerformTlbFlush()` 双平台 TLB flush |
+| `vmx_exit.c` | `HandleVmcall()` unknown 路径改为调用 `HvEmulateHypercall()` |
+| `svm_exit.c` | `SvmHandleVmmcall()` unknown 路径改为调用 `HvEmulateHypercall()` |
+| `hv_detect.c` | `HvDetectNestedMode()` 增强: 识别 VMware/KVM/Unknown hypervisor |
+| `hv_detect.h` | 更新注释和声明 |
+| `vmxdrv.c` | `DriverEntry` 增加外部 hypervisor 日志 |
+
+---
+
+## Per-CPU EPT/NPT Hook 页隔离
+
+### 背景问题
+
+在多核系统上，EPT/NPT Hook 的 **违规 → 单步 → 恢复** 三阶段存在竞争条件：
+
+```
+CPU 0: EPT Violation → 放宽 PTE (R+W) → 启用 MTF
+CPU 1: EPT Violation → 放宽 PTE (R+W) → 启用 MTF    ← 同一个 PTE!
+CPU 0: MTF 触发 → 恢复 PTE (X-Only)                  ← 也恢复了 CPU 1 正在使用的 PTE!
+CPU 1: 还在执行放宽后的指令 → PTE 已被 CPU 0 恢复 → 再次 EPT Violation → 死循环/卡死
+```
+
+### 解决方案
+
+每个 CPU 拥有独立的 EPT/NPT 页表链（PML4 → PDPT → PD → PT），使得 PTE 权限切换仅影响当前 CPU 的地址翻译。
+
+**关键约束**：只在 PT 级别做隔离，非 Hook 区域所有 CPU 仍共享相同的 PD/PT pages。
+
+### 整体架构
+
+```
+        ┌──────────────────────────────────────────────┐
+        │  共享模板 (EPT_STATE / NPT_STATE)             │
+        │  PML4 → PDPT → PD Pages → Split PT Pages     │
+        │  (非 Hook 区域所有 CPU 共享)                    │
+        └──────────────────────────────────────────────┘
+
+Per-CPU 层 (仅 Hook 区域):
+
+  CPU 0:  PML4[0] → PDPT[0]                CPU 1:  PML4[1] → PDPT[1]
+            │                                        │
+            ├─ PDPT[x] → 共享 PD (未 hook)           ├─ PDPT[x] → 共享 PD
+            │                                        │
+            └─ PDPT[y] → per-CPU PD[0][y]           └─ PDPT[y] → per-CPU PD[1][y]
+                           │                                       │
+                           ├─ PD[z] → per-CPU PT[0]              ├─ PD[z] → per-CPU PT[1]
+                           │   (hook 的 2MB 区域)                 │   (hook 的 2MB 区域)
+                           │                                      │
+                           └─ PD[其他] → 共享 PT                  └─ PD[其他] → 共享 PT
+```
+
+**分层隔离策略**：
+- **PML4 + PDPT**: 每 CPU 独立副本（初始化时从模板 clone），用于让 PDPT entry 指向不同的 PD
+- **PD pages**: **按需 clone** — 只有包含 Hook 的 GB 区域才创建 per-CPU 副本
+- **PT (split) pages**: **按需 clone** — 只有包含 Hook 的 2MB 区域才创建 per-CPU 副本
+- **非 Hook 区域**: 所有 CPU 共享相同的 PD/PT pages
+
+### 数据结构
+
+```c
+// Per-CPU EPT 根结构 (ept.h)
+typedef struct _EPT_CPU_STATE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[512];  // 独立 PML4
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[512];  // 独立 PDPT
+    EPT_POINTER Eptp;     // 该 CPU 的 EPTP 值 (写入 VMCS)
+    ULONG64     Pml4Pa;   // PML4 的物理地址
+} EPT_CPU_STATE;
+
+// Per-CPU split PT page 副本 (ept.c)
+typedef struct _EPT_PER_CPU_SPLIT {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PTE Pte[512];  // 512 个 4KB PTE
+    ULONG64     PhysicalAddress;    // 该页表页的物理地址
+    BOOLEAN     Allocated;          // 是否已分配
+} EPT_PER_CPU_SPLIT;
+
+// 全局数组
+PEPT_CPU_STATE   g_EptCpuStates;                // [g_MaxProcessors] per-CPU EPT root
+PEPT_PER_CPU_SPLIT  *g_PerCpuSplitPages;        // [g_MaxProcessors] → [MAX_SPLIT_PAGES]
+EPT_PER_CPU_PD_PAGE **g_PerCpuPdPages;          // [g_MaxProcessors] → [MAX_PD_PAGES]
+```
+
+AMD NPT 侧 (`npt.h`/`npt.c`) 结构与 Intel EPT 完全镜像。
+
+### 初始化流程
+
+```
+DriverEntry
+  └─ VmxInitialize / SvmInitialize
+       ├─ EptInitialize / NptInitialize        ← 创建共享模板页表
+       ├─ EptInitPerCpu / NptInitPerCpu        ← 创建 per-CPU PML4+PDPT
+       └─ 对每个 CPU:
+            └─ EptSetupIdentityMap / SvmInitVmcb
+                 └─ 写 per-CPU EPTP / nested_cr3 到 VMCS / VMCB
+```
+
+`EptInitPerCpu()` 为每个 CPU clone PML4 和 PDPT，并将 PML4[0] 指向各自的 PDPT。此时所有 CPU 的 PDPT entry 仍指向共享 PD pages，只有 Hook 安装时才按需创建 per-CPU PD 和 PT pages。
+
+### Hook 安装时的 Per-CPU 设置
+
+```c
+// EptHookFunction() 中的 per-CPU 块 (ept.c)
+if (g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages) {
+    // 1. 确保该 GB 区域的 PD page 已 per-CPU 化
+    EptEnsurePerCpuPdForRegion(PdptIdx);
+
+    // 2. 确保该 2MB 区域的 split PT page 已 per-CPU 化
+    EptEnsurePerCpuSplitPage(splitIdx, PdptIdx, PdIdx);
+
+    // 3. 将 hook PTE 权限复制到所有 CPU 的私有副本
+    for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
+        PEPT_PTE CpuPte = EptGetPerCpuPte(cpu, TargetPa);
+        if (CpuPte) {
+            CpuPte->Read = Pte->Read;
+            CpuPte->Write = Pte->Write;
+            CpuPte->Execute = Pte->Execute;
+            CpuPte->PhysAddr = Pte->PhysAddr;
+        }
+    }
+}
+```
+
+### 运行时：EPT Violation / NPF 处理
+
+核心变化：使用 **per-CPU PTE** 替代共享 PTE，消除多核竞争。
+
+**Intel EPT (ept.c — HandleEptViolation)**:
+
+```c
+CpuIndex = KeGetCurrentProcessorNumber();
+Hook = EptFindHookByPhysicalAddress(GuestPhysAddr);
+
+// ★ 核心: 使用 per-CPU PTE
+Pte = EptGetPerCpuPte(CpuIndex, Hook->TargetPhysicalAddr);
+if (!Pte) Pte = Hook->TargetPte;  // fallback 到共享
+
+// 后续的 Pte->Read/Write/Execute 修改只影响当前 CPU 的翻译
+// 启用 MTF 单步, 通过 EptMtfTrackRelaxedPage() 记录当前 CPU 放宽了哪个页
+```
+
+**Intel MTF 恢复 (vmx_exit.c — HandleMtf)**:
+
+```c
+CpuIndex = KeGetCurrentProcessorNumber();
+RelaxedPa = EptMtfGetAndClearRelaxedPage();  // 获取当前 CPU 放宽的页面
+
+// ★ 使用 per-CPU PTE 恢复 (只恢复当前 CPU)
+PEPT_PTE Pte = EptGetPerCpuPte(CpuIndex, Hook->TargetPhysicalAddr);
+Pte->Read = 0; Pte->Write = 0; Pte->Execute = 1;  // 恢复到 hook 状态
+Pte->PhysAddr = Hook->HookPagePa >> 12;
+EptInvalidateSingleContext(CpuEptp);  // 仅刷新当前 CPU 的 TLB
+```
+
+**AMD NPT** 侧的 `NptHandlePageFault` 和 `SvmHandleDbException` 采用相同策略。
+
+### INVEPT 优化
+
+Per-CPU 隔离后，PTE 修改只影响当前 CPU，因此使用 **INVEPT SINGLE_CONTEXT** 替代 ALL_CONTEXTS，避免不必要的跨 CPU TLB 刷新：
+
+```c
+ULONG64 CpuEptp = EptGetPerCpuEptp(CpuIndex);
+if (CpuEptp)
+    EptInvalidateSingleContext(CpuEptp);
+else
+    EptInvalidateAllContexts();  // fallback
+```
+
+### 内存分配汇总
+
+| Pool Tag | 用途 | 分配时机 | 大小 |
+|----------|------|---------|------|
+| `'tpEC'` | per-CPU EPT root (PML4+PDPT+EPTP) | `EptInitPerCpu` | `CPUs × sizeof(EPT_CPU_STATE)` |
+| `'tpES'` | per-CPU split PT pages | 按需: `EptEnsurePerCpuSplitPage` | `MAX_SPLIT_PAGES × sizeof(EPT_PER_CPU_SPLIT)` per CPU |
+| `'tpEP'` | per-CPU PD pages | 按需: `EptEnsurePerCpuPdForRegion` | `MAX_PD_PAGES × sizeof(EPT_PER_CPU_PD_PAGE)` per CPU |
+| `'tpNC'` / `'tpNS'` / `'tpNP'` | AMD NPT 侧 (镜像) | 同 EPT | 同 EPT |
+
+> **按需分配**: split PT 和 PD pages 仅在 Hook 安装到对应区域时分配，不装 Hook 就不分配。
+
+### 容错设计
+
+1. **初始化失败非致命**: `EptInitPerCpu`/`NptInitPerCpu` 返回失败时仅 `LOG_WARN` 并继续，Hook 回退到共享 PTE（无隔离）
+2. **Fallback 到共享 PTE**: 所有使用 per-CPU PTE 的地方都有 fallback: `if (!Pte) Pte = Hook->TargetPte;`
+3. **NULL 检查**: 所有 per-CPU 路径检查 `g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages` 非 NULL
 
 ---
 
@@ -2395,7 +2816,8 @@ DriverSetTarget(1234, AAD_HIDE_ALL) -> IOCTL_VMX_SET_TARGET
 ```
 vmxdrv.c (驱动入口)
 +-- hv_ops.h (抽象层接口)
-+-- hv_detect.h/c (CPU 厂商检测 + Hyper-V 嵌套模式检测)
++-- hv_detect.h/c (CPU 厂商检测 + 外部 Hypervisor 检测: Hyper-V/VMware/KVM)
++-- hv_hypercall.h/c (Hyper-V Hypercall 模拟: TLB flush/IPI/SpinWait)
 +-- hv_mem.h/c (物理内存读写引擎, Guest 页表遍历)
 +-- hv_hook.h/c (通用 Hook 框架, 动态 Thunk, 规则引擎)
 |   +-- hv_hook_asm.asm (ASM dispatcher)
@@ -2411,10 +2833,11 @@ vmxdrv.c (驱动入口)
 |   +-- svm_asm.asm (VMRUN)
 +-- vmx_exit.c (Intel Exit 分发)
 +-- svm_exit.c (AMD Exit 分发)
+|   +-- hv_hypercall.h/c (VMCALL/VMMCALL unknown → HvEmulateHypercall())
 |   +-- hv_mem.h/c (VMCALL 内存操作处理)
 |   +-- anti_anti_debug.h/c (反反调试, 双平台共用, 嵌套模式感知)
 |   |   +-- hv_ops 宏 (HvReadGuestCr3, HvAdvanceGuestRip, ...)
-|   |   +-- hv_detect.h (g_IsNestedMode, 控制 CPUID 隐藏)
+|   |   +-- hv_detect.h (g_IsNestedMode, g_OuterHypervisorPresent)
 |   |   +-- process.h/c (进程查找)
 |   +-- msr.c (MSR 处理, 通过 hv_ops)
 +-- shared.h (IOCTL 定义)

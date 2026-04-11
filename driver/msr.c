@@ -73,7 +73,27 @@ VOID MsrBitmapInitialize(PVOID MsrBitmap)
      */
     MsrBitmapSetBit(MsrBitmap, MSR_IA32_DEBUGCTL, TRUE, TRUE);
 
-    LOG_DEBUG("MSR bitmap initialized with debug MSR interceptions");
+    /*
+     * NESTED VIRTUALIZATION: Intercept VMX capability MSRs.
+     *
+     * Guest software (or a nested hypervisor) may probe VMX capability MSRs
+     * (IA32_VMX_BASIC through IA32_VMX_VMFUNC, MSR range 0x480-0x491) to
+     * discover VMX features before attempting VMXON. We intercept these and
+     * return zero to indicate VMX is not available, consistent with the CPUID
+     * hiding of VMX capability bit (CPUID.1:ECX[5]).
+     *
+     * Also intercept IA32_FEATURE_CONTROL (0x3A) to hide the VMXON-enabled
+     * bit and prevent the guest from attempting to enable VMX.
+     */
+    MsrBitmapSetBit(MsrBitmap, 0x003A, TRUE, TRUE);   /* IA32_FEATURE_CONTROL */
+    {
+        ULONG VmxMsr;
+        for (VmxMsr = 0x0480; VmxMsr <= 0x0491; VmxMsr++) {
+            MsrBitmapSetBit(MsrBitmap, VmxMsr, TRUE, TRUE);
+        }
+    }
+
+    LOG_DEBUG("MSR bitmap initialized with debug + VMX MSR interceptions");
 }
 
 /* ========================================================================= */
@@ -87,6 +107,61 @@ BOOLEAN HandleRdmsrImpl(PGUEST_CONTEXT GuestContext)
     ULONG64     GuestCr3;
 
     GuestCr3 = HvReadGuestCr3();
+
+    /*
+     * NESTED VIRTUALIZATION: Intercept VMX/SVM capability MSRs.
+     *
+     * Return zero for all VMX capability MSRs (0x480-0x491) and hide the
+     * VMXON-enabled bit in IA32_FEATURE_CONTROL. Also handle SVM-related
+     * MSRs (VM_CR, VM_HSAVE_PA) if running on AMD.
+     *
+     * This prevents guest software from discovering virtualization capabilities,
+     * consistent with the CPUID hiding of VMX/SVM bits.
+     */
+    if (Msr >= 0x0480 && Msr <= 0x0491) {
+        /* VMX capability MSRs: return 0 (VMX not available) */
+        GuestContext->Rax = 0;
+        GuestContext->Rdx = 0;
+        HvAdvanceGuestRip();
+        return TRUE;
+    }
+
+    if (Msr == 0x003A) {
+        /*
+         * IA32_FEATURE_CONTROL: return locked with VMXON disabled.
+         * Bit 0 (Lock) = 1, Bit 2 (VMXON outside SMX) = 0
+         * This tells the guest VMX is locked out in BIOS.
+         */
+        GuestContext->Rax = 1;  /* Locked, VMXON disabled */
+        GuestContext->Rdx = 0;
+        HvAdvanceGuestRip();
+        return TRUE;
+    }
+
+    if (Msr == 0xC0010114) {
+        /*
+         * MSR_VM_CR (AMD): Hide SVM capability.
+         * Set SVMDIS bit (bit 4) to indicate SVM is disabled.
+         * Set LOCK bit (bit 3) to indicate it's locked by BIOS.
+         */
+        Value = __readmsr(Msr);
+        Value |= (1ULL << 4);  /* SVMDIS = 1 */
+        Value |= (1ULL << 3);  /* LOCK = 1 */
+        GuestContext->Rax = (Value & 0xFFFFFFFF);
+        GuestContext->Rdx = (Value >> 32);
+        HvAdvanceGuestRip();
+        return TRUE;
+    }
+
+    if (Msr == 0xC0010117) {
+        /*
+         * MSR_VM_HSAVE_PA (AMD): Return 0 to hide SVM host save area.
+         */
+        GuestContext->Rax = 0;
+        GuestContext->Rdx = 0;
+        HvAdvanceGuestRip();
+        return TRUE;
+    }
 
     /* Read the actual MSR value */
     __try {
@@ -136,6 +211,26 @@ BOOLEAN HandleWrmsrImpl(PGUEST_CONTEXT GuestContext)
     ULONG       Msr = (ULONG)GuestContext->Rcx;
     ULONG64     Value = (GuestContext->Rax & 0xFFFFFFFF) |
                         ((GuestContext->Rdx & 0xFFFFFFFF) << 32);
+
+    /*
+     * NESTED VIRTUALIZATION: Block writes to VMX/SVM capability MSRs.
+     *
+     * VMX MSRs (0x480-0x491) are read-only; writes should #GP.
+     * IA32_FEATURE_CONTROL (0x3A) writes could enable VMXON; block them.
+     * MSR_VM_HSAVE_PA (0xC0010117) writes would set the SVM host save area; block.
+     * MSR_VM_CR (0xC0010114) writes could enable SVM; block.
+     *
+     * Inject #GP(0) for all of these to match bare-metal behavior when
+     * VMX/SVM is disabled.
+     */
+    if ((Msr >= 0x0480 && Msr <= 0x0491) ||
+        Msr == 0x003A ||
+        Msr == 0xC0010114 ||
+        Msr == 0xC0010117) {
+        HvInjectException(13, INTERRUPT_TYPE_HARDWARE_EXCEPTION, TRUE, 0);
+        HvSetEntryInstructionLength(HvReadExitInstructionLength());
+        return TRUE;
+    }
 
     /* Write the MSR */
     __try {
