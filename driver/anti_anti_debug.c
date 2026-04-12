@@ -8,6 +8,7 @@
 #include "ept.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
+#include "hv_hypercall.h"
 #include "log.h"
 #include "../common/shared.h"
 #include <ntstrsafe.h>
@@ -404,12 +405,38 @@ BOOLEAN AadHandleDrAccess(PGUEST_CONTEXT GuestContext)
         HvAdvanceGuestRip();
         return TRUE;
     }
+
+    /*
+     * BUG FIX: GpReg=4 means RSP. The GUEST_CONTEXT.Rsp field is just a
+     * placeholder — the actual Guest RSP lives in the VMCS. We must use
+     * the VMCS read/write path for RSP, same as the CR access handler does.
+     * Using the placeholder would read/write garbage and corrupt guest state.
+     */
+    /*
+     * RSP handling: With the unified RSP sync at VM-Exit entry
+     * (VmxExitHandler/SvmExitHandler reads VMCS/VMCB Guest RSP into
+     * GuestContext->Rsp), GpRegs[4] is now always valid. No special
+     * case needed for GpReg==4 anymore. The write-back to VMCS/VMCB
+     * happens at VM-Exit exit.
+     */
     RegPtr = &GpRegs[GpReg];
 
     if (!IsFeatureEnabled(GuestCr3, AAD_HIDE_HWBP)) {
         /* Not a target - execute the instruction normally */
         if (Direction == DR_ACCESS_DIRECTION_READ) {
-            /* MOV from DR to GP - read real DR value */
+            /*
+             * MOV FROM DR (read): Read real DR value and write to guest GP register.
+             *
+             * VERIFIED CORRECT: The value is written back via `*RegPtr = DrValue`
+             * which writes directly into GpRegs[GpReg] (the GUEST_CONTEXT array).
+             * This correctly updates the guest register state.
+             *
+             * HyperDbg had a bug where MOV FROM DR used a local variable without
+             * writing the result back to the guest register. VMXToolbox does NOT
+             * have this bug — `RegPtr` points directly into the GUEST_CONTEXT,
+             * and with unified RSP sync at VM-Exit entry, GpRegs[4] (RSP) is
+             * also valid, so no special case is needed for any register index.
+             */
             ULONG64 DrValue = 0;
             switch (DrNumber) {
                 case 0: DrValue = __readdr(0); break;
@@ -439,7 +466,11 @@ BOOLEAN AadHandleDrAccess(PGUEST_CONTEXT GuestContext)
     /* === Target process: spoof DR values === */
 
     if (Direction == DR_ACCESS_DIRECTION_READ) {
-        /* Reading DR - return fake values */
+        /*
+         * Reading DR - return fake (spoofed) values.
+         * VERIFIED CORRECT: FakeValue is written back via `*RegPtr = FakeValue`
+         * which correctly updates the guest register in GUEST_CONTEXT.
+         */
         ULONG64 FakeValue = 0;
 
         switch (DrNumber) {
@@ -464,7 +495,7 @@ BOOLEAN AadHandleDrAccess(PGUEST_CONTEXT GuestContext)
         }
 
         *RegPtr = FakeValue;
-        LOG_DEBUG("DR%u read spoofed: returned 0x%llX", DrNumber, FakeValue);
+        VMXROOT_LOG_DEBUG("DR%u read spoofed: returned 0x%llX", DrNumber, FakeValue);
 
     } else {
         /* Writing DR - allow but silently consume for DR0-3 visibility */
@@ -489,41 +520,35 @@ BOOLEAN AadHandleDrAccess(PGUEST_CONTEXT GuestContext)
 }
 
 /* ========================================================================= */
-/*  RDTSC/RDTSCP Handler                                                     */
+/*  TSC Offset Management (Hardware TSC Offsetting)                          */
 /* ========================================================================= */
 
 /*
- * Compensate TSC to hide time spent in debug pauses.
+ * Update the hardware TSC Offset (VMCS/VMCB) based on the current process.
+ *
+ * Called on CR3 load (process context switch) to apply or clear the TSC
+ * compensation. For target processes with AAD_HIDE_TIMING, we write the
+ * accumulated TscOffset as a negative hardware offset so that RDTSC/RDTSCP
+ * automatically returns adjusted values without VM-Exit.
+ *
+ * For non-target processes, we reset the hardware offset to 0.
  */
-BOOLEAN AadHandleRdtsc(PGUEST_CONTEXT GuestContext)
+VOID AadUpdateHwTscOffset(ULONG64 NewCr3)
 {
-    ULONG64     GuestCr3;
-    ULONG64     RealTsc;
-    ULONG       CpuIndex;
+    PHV_CPU_CONTEXT HvCtx;
 
-    GuestCr3 = HvReadGuestCr3();
+    if (!g_HvOps) return;
 
-    /* Read the real TSC */
-    RealTsc = __rdtsc();
+    HvCtx = g_HvOps->GetCurrentCpuContext();
+    if (!HvCtx) return;
 
-    /* For target processes with timing hide, subtract accumulated offset */
-    if (IsFeatureEnabled(GuestCr3, AAD_HIDE_TIMING)) {
-        CpuIndex = KeGetCurrentProcessorNumber();
-        if (CpuIndex < g_MaxProcessors) {
-            PHV_CPU_CONTEXT HvCtx = g_HvOps->GetCurrentCpuContext();
-            if (HvCtx) {
-                LONG64 Offset = HvCtx->TscOffset;
-                RealTsc -= (ULONG64)Offset;
-            }
-        }
+    if (IsFeatureEnabled(NewCr3, AAD_HIDE_TIMING)) {
+        /* Target process: apply accumulated debug-pause offset */
+        HvWriteTscOffset(HvCtx->TscOffset);
+    } else {
+        /* Non-target process: no TSC adjustment */
+        HvWriteTscOffset(0);
     }
-
-    /* Return TSC in EDX:EAX */
-    GuestContext->Rax = (RealTsc & 0xFFFFFFFF);
-    GuestContext->Rdx = (RealTsc >> 32);
-
-    HvAdvanceGuestRip();
-    return TRUE;
 }
 
 /*
@@ -554,6 +579,18 @@ VOID AadNotifyDebugResume(ULONG CpuIndex)
             ULONG64 PauseDuration = Now - HvCtx->LastDebugPauseTsc;
             HvCtx->TscOffset += (LONG64)PauseDuration;
             HvCtx->InDebugPause = FALSE;
+
+            /*
+             * Immediately update the hardware TSC Offset so the resumed
+             * guest process sees compensated TSC values right away.
+             * Only apply if the current process is a target with timing hide.
+             */
+            {
+                ULONG64 GuestCr3 = HvReadGuestCr3();
+                if (IsFeatureEnabled(GuestCr3, AAD_HIDE_TIMING)) {
+                    HvWriteTscOffset(HvCtx->TscOffset);
+                }
+            }
         }
     }
 }
@@ -578,25 +615,28 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
     __cpuidex(CpuInfo, Leaf, SubLeaf);
 
     /*
-     * Always hide hypervisor presence from ALL processes.
+     * CPUID Leaf 1 (ECX): Hypervisor Presence and VMX capability.
      *
-     * If the physical CPU (or outer hypervisor like VMware) advertises
-     * the hypervisor-present bit in CPUID.1:ECX[31], Windows will use
-     * VMCALL/VMMCALL enlightenments (TLB flush, VP scheduling, etc.)
-     * in hot paths like SwapContext.  Since we are not Hyper-V and
-     * cannot handle those hypercalls, the OS would crash.
+     * CRITICAL DESIGN DECISION for nested virtualization (VMware L0):
      *
-     * We must clear bit 31 and zero the hypervisor leaves (0x40000000+)
-     * unconditionally so the OS treats us as bare metal.
+     * Windows already decided at boot time to use VMCALL enlightenments
+     * because VMware (L0) advertised CPUID.1:ECX[31]=1. That decision
+     * is CACHED and cannot be un-done by clearing the bit later.
      *
-     * NESTED VIRTUALIZATION: Also hide VMX (ECX[5]) and SVM capabilities
-     * so the guest doesn't attempt to execute VMXON/VMRUN. If the guest
-     * tries to use VMX/SVM instructions, they will trigger a VM-Exit and
-     * we inject #UD. Hiding the capability bits prevents well-behaved
-     * software from even trying.
+     * Previous approach: Clear bit 31 → Windows "thinks" no hypervisor,
+     * but STILL uses cached VMCALL paths → contradictory state.
+     *
+     * New approach: KEEP bit 31 set (hypervisor present), and provide
+     * minimal compatible hypervisor CPUID leaves (0x40000000+) that
+     * tell Windows we support the enlightenments it's already using.
+     * This way Windows's cached decision is consistent with what
+     * CPUID reports.
+     *
+     * We still hide VMX (bit 5) to prevent nested VM creation.
      */
     if (Leaf == 1) {
-        CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT);   /* Hide hypervisor present */
+        /* KEEP hypervisor present bit (bit 31) — Windows already cached it */
+        /* CpuInfo[2] &= ~(1 << CPUID_HYPERVISOR_BIT); -- REMOVED */
         CpuInfo[2] &= ~(1 << 5);                       /* Hide VMX (Intel VT-x) */
     }
     else if (Leaf == 0x80000001) {
@@ -618,7 +658,152 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
         CpuInfo[2] = 0;
         CpuInfo[3] = 0;
     }
-    else if (Leaf >= 0x40000000 && Leaf <= 0x40000006) {
+    else if (Leaf == 0x40000000) {
+        /*
+         * Hypervisor identification leaf.
+         *
+         * EAX = Maximum hypervisor CPUID leaf
+         * EBX/ECX/EDX = Hypervisor vendor signature.
+         *
+         * CRITICAL DESIGN: Split behavior based on outer hypervisor presence.
+         *
+         * NESTED MODE (g_OuterHypervisorPresent == TRUE):
+         *   Windows already saw CPUID.1:ECX[31]=1 at boot and cached the
+         *   decision to use VMCALL enlightenments (SwapContext TLB flush, etc.).
+         *   We MUST report "Microsoft Hv" + "Hv#1" so Windows's cached decision
+         *   remains consistent. The hypercalls are emulated in hv_hypercall.c.
+         *
+         * BARE METAL (g_OuterHypervisorPresent == FALSE):
+         *   Windows booted without seeing any hypervisor. It never cached
+         *   VMCALL enlightenment decisions. We return "Hv#0" (non-conformant)
+         *   to prevent Windows from trying to use Hyper-V Synthetic MSRs
+         *   (0x40000100+) which don't exist on real hardware and would cause
+         *   #GP in VMX root mode.
+         *
+         * This dual-mode approach is the safest:
+         * - Nested: maintains compatibility with already-cached VMCALL paths
+         * - Bare metal: prevents BSOD 0x1AA from Synthetic MSR writes
+         */
+        if (g_OuterHypervisorPresent) {
+            /* Nested mode: maintain Microsoft Hv compatibility */
+            CpuInfo[0] = 0x40000006;   /* Max leaf = 0x40000006 (standard range) */
+            CpuInfo[1] = 0x7263694D;   /* "Micr" */
+            CpuInfo[2] = 0x666F736F;   /* "osof" */
+            CpuInfo[3] = 0x76482074;   /* "t Hv" */
+        } else {
+            /* Bare metal: don't claim Microsoft Hv conformance */
+            CpuInfo[0] = 0x40000001;   /* Max leaf = 0x40000001 (minimal) */
+            CpuInfo[1] = 0x7263694D;   /* "Micr" */
+            CpuInfo[2] = 0x666F736F;   /* "osof" */
+            CpuInfo[3] = 0x76482074;   /* "t Hv" */
+        }
+    }
+    else if (Leaf == 0x40000001) {
+        /*
+         * Hypervisor interface identification.
+         *
+         * NESTED MODE: "Hv#1" = standard Hyper-V interface.
+         *   Windows uses the standard VMCALL-based hypercall ABI, which we
+         *   emulate in hv_hypercall.c. This is required because Windows has
+         *   already compiled VMCALL into kernel hot paths.
+         *
+         * BARE METAL: "Hv#0" = non-conformant interface.
+         *   Tells Windows we do NOT conform to the Microsoft Hv interface.
+         *   Windows will NOT attempt to use Hyper-V Synthetic MSRs or SynIC,
+         *   preventing BSOD from writes to non-existent MSRs 0x40000100+.
+         *   Similar to HyperDbg's approach ("Hv#0").
+         */
+        if (g_OuterHypervisorPresent) {
+            CpuInfo[0] = 0x31237648;   /* "Hv#1" — Microsoft Hv conformant */
+        } else {
+            CpuInfo[0] = 0x30237648;   /* "Hv#0" — NOT conformant */
+        }
+        CpuInfo[1] = 0;
+        CpuInfo[2] = 0;
+        CpuInfo[3] = 0;
+    }
+    else if (Leaf == 0x40000002) {
+        /*
+         * Leaf 0x40000002: Build version info.
+         * Return zeros — no specific build version to report.
+         */
+        CpuInfo[0] = 0;
+        CpuInfo[1] = 0;
+        CpuInfo[2] = 0;
+        CpuInfo[3] = 0;
+    }
+    else if (Leaf == 0x40000003) {
+        /*
+         * Leaf 0x40000003: HV_X64_CPUID_FEATURES (Partition Privilege Flags).
+         *
+         * This tells Windows which Hyper-V enlightenments we support.
+         * In nested mode (g_OuterHypervisorPresent), we MUST advertise
+         * the features that Windows already cached at boot time, otherwise
+         * Windows may hang when it re-queries features and finds them
+         * missing (inconsistent with cached decisions).
+         *
+         * EAX = Partition Privileges (low 32 bits):
+         *   Bit 0:  AccessVpRunTimeReg       — VP runtime MSR
+         *   Bit 1:  AccessPartitionReferenceCounter — reference TSC
+         *   Bit 2:  AccessSynicRegs          — SynIC MSRs (SCONTROL, SIEFP, etc.)
+         *   Bit 3:  AccessSyntheticTimerRegs — Synthetic Timer MSRs (0x400000B0+)
+         *   Bit 4:  AccessIntrCtrlRegs       — APIC MSRs
+         *   Bit 5:  AccessHypercallMsrs      — Hypercall page MSR
+         *   Bit 9:  AccessVpIndex            — VP_INDEX MSR
+         *
+         * EDX = Miscellaneous features:
+         *   Bit 3:  available (AccessFrequencyRegs)
+         *
+         * We advertise ONLY the minimal set that Windows requires for
+         * the enlightenments it already uses. All the corresponding
+         * MSR reads/writes are absorbed in msr.c (silently return 0
+         * or absorb writes).
+         */
+        if (g_OuterHypervisorPresent) {
+            CpuInfo[0] = (1 << 0)   /* AccessVpRunTimeReg */
+                       | (1 << 1)   /* AccessPartitionReferenceCounter */
+                       | (1 << 2)   /* AccessSynicRegs */
+                       | (1 << 3)   /* AccessSyntheticTimerRegs */
+                       | (1 << 5)   /* AccessHypercallMsrs */
+                       | (1 << 9);  /* AccessVpIndex */
+        } else {
+            CpuInfo[0] = 0;   /* Bare metal: no enlightenments */
+        }
+        CpuInfo[1] = 0;
+        CpuInfo[2] = 0;
+        CpuInfo[3] = 0;
+    }
+    else if (Leaf == 0x40000004) {
+        /*
+         * Leaf 0x40000004: Implementation Recommendations.
+         *
+         * Bit 0: HvRecommendRelaxedTiming — recommend relaxed timing
+         * Bit 1: HvRecommendDmaRemapping — recommend DMA remapping
+         * Bit 3: HvRecommendUsingHypercallsForTlbFlush
+         * Bit 6: HvRecommendUsingHypercallsForLocalTlbFlush
+         * Bit 7: HvRecommendUsingHypercallsForRemoteTlbFlush
+         * Bit 11: HvRecommendUsingSpinlockAwarenessInterface
+         *
+         * We recommend TLB flush via hypercalls (which we emulate in
+         * hv_hypercall.c) to keep Windows using the paths it cached.
+         */
+        if (g_OuterHypervisorPresent) {
+            CpuInfo[0] = (1 << 0)    /* RelaxedTiming */
+                       | (1 << 3)    /* TlbFlushHypercalls */
+                       | (1 << 6)    /* LocalTlbFlushHypercalls */
+                       | (1 << 7);   /* RemoteTlbFlushHypercalls */
+        } else {
+            CpuInfo[0] = 0;
+        }
+        CpuInfo[1] = 0;
+        CpuInfo[2] = 0;
+        CpuInfo[3] = 0;
+    }
+    else if (Leaf >= 0x40000005 && Leaf <= 0x40000006) {
+        /*
+         * Leaves 0x40000005-0x40000006: Implementation Limits + HW features.
+         * Return zeros — no special limits or hardware features to report.
+         */
         CpuInfo[0] = 0;
         CpuInfo[1] = 0;
         CpuInfo[2] = 0;

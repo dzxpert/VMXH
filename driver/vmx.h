@@ -553,6 +553,15 @@ typedef struct _VMX_CPU_CONTEXT {
     PVOID       MsrBitmapVa;
     ULONG64     MsrBitmapPa;
 
+    /* I/O bitmaps (4KB each): A covers ports 0x0000-0x7FFF, B covers 0x8000-0xFFFF.
+     * Initialized to all zeros = no I/O port triggers VM-Exit.
+     * When USE_IO_BITMAPS is set, it takes precedence over UNCONDITIONAL_IO_EXIT,
+     * effectively neutralizing the must-be-1 UNCONDITIONAL_IO_EXIT bit. */
+    PVOID       IoBitmapAVa;
+    ULONG64     IoBitmapAPa;
+    PVOID       IoBitmapBVa;
+    ULONG64     IoBitmapBPa;
+
     /* Host stack for VM-Exit handler */
     PVOID       HostStackBase;
     SIZE_T      HostStackSize;
@@ -576,6 +585,11 @@ typedef struct _VMX_CPU_CONTEXT {
     /* Pending external interrupt (for deferred injection when RFLAGS.IF=0) */
     BOOLEAN     PendingInterrupt;
     ULONG       PendingInterruptVector;
+
+    /* TRUE if PIN_BASED_EXTERNAL_INT_EXIT was forced on by must-be-1 bits
+     * (common in VMware/Hyper-V nested virtualization). When TRUE, we also
+     * enable ACK_INT_ON_EXIT and discard intercepted interrupts. */
+    BOOLEAN     ExternalIntExitForced;
 
     /* Enlightened VMCS (nested mode only, NULL on bare metal) */
     PVOID       VpAssistPageVa;

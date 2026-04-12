@@ -69,6 +69,19 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
     /* Sync guest RAX from VMCB to GuestContext for shared handlers */
     GuestContext->Rax = Vmcb->Save.Rax;
 
+    /*
+     * CRITICAL: Sync Guest RSP from VMCB into GuestContext at #VMEXIT entry.
+     *
+     * Same rationale as the VMX side (vmx_exit.c): the ASM stub pushes GP
+     * registers onto the Host stack, so GuestContext->Rsp is a placeholder.
+     * The real Guest RSP lives in VMCB.Save.Rsp.
+     *
+     * By syncing here, ALL subsequent handlers (DR access, CR access, etc.)
+     * can use GpRegs[4] / GuestContext->Rsp directly without special-casing.
+     * On exit, we write it back to VMCB.Save.Rsp.
+     */
+    GuestContext->Rsp = Vmcb->Save.Rsp;
+
     /* Increment exit counter */
     InterlockedIncrement64(&CpuCtx->Common.ExitCount);
 
@@ -82,17 +95,6 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
 
     case SVM_EXIT_CPUID:
         Result = AadHandleCpuid(GuestContext);
-        break;
-
-    case SVM_EXIT_RDTSC:
-        Result = AadHandleRdtsc(GuestContext);
-        break;
-
-    case SVM_EXIT_RDTSCP:
-        /* Handle TSC part same as RDTSC */
-        AadHandleRdtsc(GuestContext);
-        /* Also return IA32_TSC_AUX in ECX */
-        GuestContext->Rcx = __readmsr(MSR_TSC_AUX) & 0xFFFFFFFF;
         break;
 
     case SVM_EXIT_MSR:
@@ -275,6 +277,9 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
     /* Sync guest RAX back to VMCB (handlers may have modified it) */
     Vmcb->Save.Rax = GuestContext->Rax;
 
+    /* Sync guest RSP back to VMCB (handlers may have modified it) */
+    Vmcb->Save.Rsp = GuestContext->Rsp;
+
     return Result;
 }
 
@@ -325,6 +330,8 @@ static BOOLEAN SvmHandleCrAccess(PGUEST_CONTEXT Ctx, ULONG ExitCode)
     case SVM_EXIT_WRITE_CR3:
         Value = SvmGetGpReg(Ctx, GpReg);
         Vmcb->Save.Cr3 = Value;
+        /* Update hardware TSC Offset for the new process context */
+        AadUpdateHwTscOffset(Value);
         break;
 
     case SVM_EXIT_WRITE_CR4:
@@ -395,6 +402,14 @@ static BOOLEAN SvmHandleDrAccess(PGUEST_CONTEXT Ctx, ULONG ExitCode)
     if (!IsFeatureEnabled(GuestCr3, AAD_HIDE_HWBP)) {
         /* Non-target: execute DR access normally */
         if (!IsWrite) {
+            /*
+             * MOV FROM DR (read): Read real DR value and write to guest GP register.
+             *
+             * VERIFIED CORRECT: Same write-back pattern as AadHandleDrAccess().
+             * `*RegPtr = DrValue` writes directly into GpRegs[GpReg] in GUEST_CONTEXT.
+             * With unified RSP sync at SvmExitHandler() entry, GpRegs[4] (RSP) is
+             * also valid. No special case needed for any register index.
+             */
             ULONG64 DrValue = 0;
             switch (DrNumber) {
                 case 0: DrValue = __readdr(0); break;
@@ -624,14 +639,15 @@ static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
 /*  GP Register Helpers                                                      */
 /* ========================================================================= */
 
+/*
+ * NOTE: RSP (index 4) is now valid in GuestContext because SvmExitHandler()
+ * syncs VMCB.Save.Rsp → GuestContext->Rsp at entry and writes it back at exit.
+ * No special-case needed for RegIndex==4 anymore.
+ */
 static ULONG64 SvmGetGpReg(PGUEST_CONTEXT Ctx, ULONG RegIndex)
 {
     ULONG64 *Regs = (ULONG64 *)Ctx;
 
-    if (RegIndex == 4) {
-        /* RSP from VMCB */
-        return HvReadGuestRsp();
-    }
     if (RegIndex <= 15) {
         return Regs[RegIndex];
     }
@@ -642,10 +658,6 @@ static VOID SvmSetGpReg(PGUEST_CONTEXT Ctx, ULONG RegIndex, ULONG64 Value)
 {
     ULONG64 *Regs = (ULONG64 *)Ctx;
 
-    if (RegIndex == 4) {
-        HvWriteGuestRsp(Value);
-        return;
-    }
     if (RegIndex <= 15) {
         Regs[RegIndex] = Value;
     }

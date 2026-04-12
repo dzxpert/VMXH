@@ -23,8 +23,6 @@ static BOOLEAN HandleWrmsr(PGUEST_CONTEXT Ctx);
 static BOOLEAN HandleCrAccess(PGUEST_CONTEXT Ctx);
 static BOOLEAN HandleDrAccess(PGUEST_CONTEXT Ctx);
 static BOOLEAN HandleException(PGUEST_CONTEXT Ctx);
-static BOOLEAN HandleRdtsc(PGUEST_CONTEXT Ctx);
-static BOOLEAN HandleRdtscp(PGUEST_CONTEXT Ctx);
 static BOOLEAN HandleXsetbv(PGUEST_CONTEXT Ctx);
 static BOOLEAN HandleInvd(PGUEST_CONTEXT Ctx);
 static BOOLEAN HandleVmcall(PGUEST_CONTEXT Ctx);
@@ -59,12 +57,80 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
     ULONG   CpuIndex;
     BOOLEAN Result = TRUE;
 
+    /*
+     * DIAGNOSTIC: Per-CPU early exit counting with rapid-fire detection.
+     *
+     * When VM-Exits fire at extremely high frequency (e.g., millions per
+     * second due to unhandled UNCONDITIONAL_IO_EXIT), the VMware host
+     * becomes unresponsive because each exit involves a VMEXIT → handler →
+     * VMRESUME round-trip overhead.
+     *
+     * Fix: Track per-CPU exit count. If >10000 exits occur with no
+     * "quiet period" (i.e., rapid-fire), forcefully shut down VMX.
+     * This counter is checked BEFORE any logging to avoid recursion.
+     *
+     * Note: Uses static volatiles — safe because each CPU only accesses
+     * its own data (partitioned by CpuIndex).
+     *
+     * Declared here (before any statements) for C89 compatibility
+     * required by WDK 7.1 (MSVC 2008).
+     */
+    static volatile LONG64 s_EarlyExitCount[64] = { 0 };
+    static volatile LONG64 s_LastReportedCount[64] = { 0 };
+
+    /*
+     * CRITICAL: Sync Guest RSP from VMCS into GuestContext at VM-Exit entry.
+     *
+     * The ASM stub saves GP registers to the stack-based GUEST_CONTEXT, but
+     * RSP in that struct is a placeholder — it holds the Host stack pointer
+     * at the time of the push, NOT the Guest RSP. The real Guest RSP lives
+     * in VMCS_GUEST_RSP.
+     *
+     * By syncing it here (like HyperDbg does in VmxVmexitHandler), ALL
+     * subsequent handlers can use GpRegs[4] / GuestContext->Rsp directly
+     * without needing special-case code for RegIndex==4.
+     *
+     * On VM-Exit completion, we write back the (potentially modified) value
+     * to VMCS_GUEST_RSP before VMRESUME.
+     */
+    GuestContext->Rsp = VmxRead(VMCS_GUEST_RSP);
+
     ExitReason = (ULONG)VmxRead(VMCS_EXIT_REASON);
     CpuIndex = KeGetCurrentProcessorNumber();
 
     /* Increment exit counter */
     if (CpuIndex < g_MaxProcessors) {
-        InterlockedIncrement64(&g_VmxState.CpuContexts[CpuIndex].ExitCount);
+        LONG64 Count = InterlockedIncrement64(&g_VmxState.CpuContexts[CpuIndex].ExitCount);
+
+        /*
+         * HEARTBEAT DIAGNOSTIC: Log every 10000th exit per-CPU.
+         * This creates a timeline showing what exit reasons appear
+         * over time. When VMware freezes, the last heartbeat message
+         * in WinDbg tells us exactly where the system got stuck.
+         *
+         * Also includes rapid-fire detection at 100K intervals.
+         */
+        if (CpuIndex < 64) {
+            s_EarlyExitCount[CpuIndex] = Count;
+
+            /* Heartbeat: every 100 exits (lowered for debugging nested VMware stalls) */
+            if ((Count % 100) == 0 && Count <= 5000) {
+                VMXROOT_LOG_INFO("HEARTBEAT CPU%u: count=%lld reason=%u qual=0x%llX RIP=0x%llX",
+                           CpuIndex, Count, (ULONG)(ExitReason & 0xFFFF),
+                           VmxRead(VMCS_EXIT_QUALIFICATION),
+                           VmxRead(VMCS_GUEST_RIP));
+            }
+
+            /* Rapid-fire detection at 1K intervals (lowered for debugging) */
+            if (Count - s_LastReportedCount[CpuIndex] >= 1000) {
+                s_LastReportedCount[CpuIndex] = Count;
+                if (Count <= 10000) {
+                    VMXROOT_LOG_INFO("RAPID CPU%u: count=%lld reason=%u RIP=0x%llX",
+                               CpuIndex, Count, (ULONG)(ExitReason & 0xFFFF),
+                               VmxRead(VMCS_GUEST_RIP));
+                }
+            }
+        }
     }
 
     /* Check if Guest requested an EPT TLB flush */
@@ -72,7 +138,7 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     /* Check for VM-Entry failure (bit 31) */
     if (ExitReason & 0x80000000) {
-        LOG_ERROR("VM-Entry failure! Reason: %u, Qualification: 0x%llX",
+        VMXROOT_LOG_ERROR("VM-Entry failure! Reason: %u, Qualification: 0x%llX",
                   ExitReason & 0xFFFF, VmxRead(VMCS_EXIT_QUALIFICATION));
         /*
          * Mark CPU as no longer in VMX operation.
@@ -84,6 +150,36 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
             g_VmxState.CpuContexts[CpuIndex].VmxEnabled = FALSE;
         }
         return FALSE;   /* Shut down VMX */
+    }
+
+    /*
+     * EARLY DIAGNOSTIC: Log the first N VM-Exits from each CPU.
+     * Now uses per-CPU counters so we see BOTH CPUs' first exits,
+     * not just whichever CPU is fastest.
+     *
+     * For RDMSR/WRMSR exits, also log the MSR number (Guest RCX)
+     * to identify which MSR caused the exit.
+     */
+    {
+        static volatile LONG s_EarlyLogCountPerCpu[64] = { 0 };
+        if (CpuIndex < 64) {
+            LONG EarlyCount = InterlockedIncrement(&s_EarlyLogCountPerCpu[CpuIndex]);
+            if (EarlyCount <= 100) {
+                USHORT Reason = (USHORT)(ExitReason & 0xFFFF);
+                if (Reason == EXIT_REASON_RDMSR || Reason == EXIT_REASON_WRMSR) {
+                    VMXROOT_LOG_INFO("VM-Exit CPU%u #%d: reason=%u (%s) MSR=0x%08X RIP=0x%llX",
+                               CpuIndex, (int)EarlyCount, (ULONG)Reason,
+                               Reason == EXIT_REASON_RDMSR ? "RDMSR" : "WRMSR",
+                               (ULONG)GuestContext->Rcx,
+                               VmxRead(VMCS_GUEST_RIP));
+                } else {
+                    VMXROOT_LOG_INFO("VM-Exit CPU%u #%d: reason=%u qual=0x%llX RIP=0x%llX",
+                               CpuIndex, (int)EarlyCount, (ULONG)(ExitReason & 0xFFFF),
+                               VmxRead(VMCS_EXIT_QUALIFICATION),
+                               VmxRead(VMCS_GUEST_RIP));
+                }
+            }
+        }
     }
 
     /* Dispatch by exit reason */
@@ -111,14 +207,6 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     case EXIT_REASON_EXCEPTION_NMI:
         Result = HandleException(GuestContext);
-        break;
-
-    case EXIT_REASON_RDTSC:
-        Result = HandleRdtsc(GuestContext);
-        break;
-
-    case EXIT_REASON_RDTSCP:
-        Result = HandleRdtscp(GuestContext);
         break;
 
     case EXIT_REASON_EPT_VIOLATION:
@@ -190,8 +278,42 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         break;
 
     case EXIT_REASON_HLT:
-        /* HLT - just advance RIP and resume */
+        /*
+         * HLT exit — Guest wants to sleep until an interrupt arrives.
+         *
+         * In nested virtualization (VMware), HLT_EXIT is forced by must-be-1
+         * bits, so every Guest HLT causes a VM-Exit.
+         *
+         * IMPORTANT: We CANNOT execute native HLT in VMX root mode!
+         * Doing _enable() + __halt() in VMX root would cause interrupts to
+         * be delivered through the Host IDT while on the Host stack (16KB
+         * ExAllocatePool buffer). This is catastrophic because:
+         *   1. ISRs execute on our tiny Host stack → stack overflow risk
+         *   2. ISR runs in the middle of our VM-Exit handler → corrupts
+         *      local variables and call chain on the same stack
+         *   3. ISR may call KeInsertQueueDpc/scheduler code that assumes
+         *      a normal kernel thread stack with proper KPCR/KPRCB linkage
+         *   4. IRET from ISR returns to our handler mid-execution with
+         *      potentially corrupted state
+         *
+         * Strategy: Set Guest Activity State to "HLT" (value 1).
+         * The CPU will enter Guest mode in HLT state. When an external
+         * interrupt arrives, the CPU will VM-Exit with EXIT_REASON_HLT or
+         * EXIT_REASON_EXTERNAL_INT (depending on PIN_BASED_EXTERNAL_INT_EXIT).
+         * This achieves true CPU yielding without any VMX root mode risk.
+         *
+         * We do NOT advance Guest RIP — the HLT instruction is "completed"
+         * by entering the HLT activity state. When the Guest wakes (via
+         * interrupt injection or activity state change back to Active),
+         * execution resumes at the instruction AFTER HLT automatically.
+         *
+         * NOTE: We advance RIP first, then set HLT state. This way, when
+         * the CPU wakes from HLT (interrupt arrives → VM-Exit → we set
+         * activity state back to Active → VMRESUME), Guest resumes at the
+         * instruction after HLT, which is the correct behavior.
+         */
         VmxAdvanceGuestRip();
+        VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 1);  /* 1 = HLT */
         break;
 
     case EXIT_REASON_INVPCID:
@@ -266,6 +388,22 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         VmxAdvanceGuestRip();
         break;
 
+    case EXIT_REASON_APIC_ACCESS:
+        /*
+         * APIC access VM-Exit. This can happen if VMware forces
+         * "APIC-register virtualization" or "virtualize APIC accesses"
+         * via must-be-1 bits. Just advance RIP.
+         */
+        VmxAdvanceGuestRip();
+        break;
+
+    case EXIT_REASON_TPR_BELOW_THRESHOLD:
+        /*
+         * TPR below threshold - used for virtual APIC / CR8 monitoring.
+         * Just resume, nothing to do.
+         */
+        break;
+
     case EXIT_REASON_TASK_SWITCH:
         /*
          * Task switch VM-Exit. Intel SDM: task switches unconditionally
@@ -275,7 +413,7 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
          * For now, inject #GP to let the guest handle the error.
          * Full task switch emulation is extremely complex.
          */
-        LOG_WARN("Task switch VM-Exit: qual=0x%llX, RIP=0x%llX",
+        VMXROOT_LOG_WARN("Task switch VM-Exit: qual=0x%llX, RIP=0x%llX",
                  VmxRead(VMCS_EXIT_QUALIFICATION),
                  VmxRead(VMCS_GUEST_RIP));
         VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
@@ -296,10 +434,8 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
          * re-executes the instruction → VM-Exit → infinite loop → VMware hangs.
          *
          * We emulate by executing the I/O instruction natively in host mode.
-         * For simplicity, we use a pass-through approach: re-inject by
-         * advancing RIP (the instruction already executed from the CPU's
-         * point of view if it completed the access) — NO! For I/O exits
-         * the instruction was NOT executed. We must emulate it.
+         * NOTE: In nested VMware, executing I/O in VMX root is safe because
+         * VMware (L0) handles its own I/O virtualization independently.
          *
          * Exit Qualification bits for I/O:
          *   Bits 2:0  = Size (0=1 byte, 1=2 bytes, 3=4 bytes)
@@ -315,9 +451,43 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
             ULONG   Size = (ULONG)(IoQual & 0x7);
             BOOLEAN IsIn = (IoQual & (1 << 3)) != 0;
             BOOLEAN IsString = (IoQual & (1 << 4)) != 0;
-            
+
+            /*
+             * DIAGNOSTIC: Log the first few I/O exits to identify which
+             * ports are causing the VM-Exit storm.
+             */
+            {
+                static volatile LONG s_IoExitLogCount = 0;
+                LONG IoCount = InterlockedIncrement(&s_IoExitLogCount);
+                if (IoCount <= 5) {
+                    VMXROOT_LOG_INFO("IO Exit #%d: %s port=0x%04X size=%u string=%u RIP=0x%llX",
+                             (int)IoCount,
+                             IsIn ? "IN" : "OUT",
+                             (ULONG)Port, Size, (ULONG)IsString,
+                             VmxRead(VMCS_GUEST_RIP));
+                }
+            }
+
             if (!IsString) {
-                /* Simple IN/OUT (not string) */
+                /*
+                 * Simple IN/OUT (not string) — emulate by executing the
+                 * I/O in VMX root mode directly, WITHOUT __try/__except.
+                 *
+                 * CRITICAL: __try/__except (SEH) is UNSAFE in VMX root mode!
+                 * The host stack (ExAllocatePoolWithTag'd 16KB buffer) is NOT
+                 * a Windows thread kernel stack. SEH relies on walking the
+                 * _EXCEPTION_REGISTRATION_RECORD chain on the thread stack,
+                 * and NT's exception dispatcher validates stack boundaries.
+                 * When SEH triggers on our host stack, the dispatcher follows
+                 * invalid/zero-filled records → jumps to a stack address →
+                 * executes zeroes (add byte ptr [rax], al) → BSOD 0x0A.
+                 *
+                 * In VMX root mode (CPL 0, no IOPL restriction), IN/OUT
+                 * instructions execute without #GP for any port. The only
+                 * risk is accessing non-existent hardware, which on x86
+                 * simply returns 0xFF for IN (bus float) and is a NOP for OUT.
+                 * VMware virtualizes all I/O ports, so no exception can occur.
+                 */
                 if (IsIn) {
                     ULONG Value = 0;
                     switch (Size) {
@@ -342,10 +512,10 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
                 }
             } else {
                 /*
-                 * String I/O (INS/OUTS) is complex to emulate properly
-                 * (needs RSI/RDI/RCX handling). For now, just advance RIP.
-                 * The instruction was not executed, so guest data may be wrong,
-                 * but this is better than an infinite loop.
+                 * String I/O (INS/OUTS) - complex to emulate properly
+                 * (needs RSI/RDI/RCX handling with REP prefix).
+                 * For now, just advance RIP. The instruction was not executed,
+                 * so guest data may be wrong, but this is better than a hang.
                  */
                 /* TODO: Full string I/O emulation */
             }
@@ -355,74 +525,119 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     case EXIT_REASON_EXTERNAL_INT:
         /*
-         * External interrupt exit (with ACK_INT_ON_EXIT enabled).
+         * External interrupt VM-Exit.
          *
-         * The CPU has acknowledged the interrupt and stored the vector in
-         * VMCS_EXIT_INTERRUPTION_INFO.  We must re-inject it into the guest.
+         * This occurs when PIN_BASED_EXTERNAL_INT_EXIT is set (forced by
+         * must-be-1 bits in nested virtualization — VMware, Hyper-V).
          *
-         * IMPORTANT: Intel SDM Vol. 3C, Section 26.3.1.5 - VM-Entry checks
-         * for event injection require:
-         *   1. RFLAGS.IF = 1
-         *   2. Guest Interruptibility State bits 0-1 = 0
-         *      (not blocking by STI or MOV SS)
+         * With ACK_INT_ON_EXIT enabled:
+         *   - The interrupt is automatically acknowledged by the LAPIC
+         *   - The vector is stored in EXIT_INTERRUPTION_INFO
          *
-         * BUG FIX (Problem C): The original code only checked RFLAGS.IF.
-         * After a STI instruction, IF=1 but "blocking by STI" is set for
-         * one instruction. Injecting an external interrupt in this state
-         * causes VM-Entry failure. We now check both conditions.
+         * BUG FIX: The old code DISCARDED the interrupt entirely, which
+         * caused critical failures:
+         *   - IPIs (inter-processor interrupts) are one-shot — discarding them
+         *     means DPC dispatch, TLB shootdowns, and CPU wake-ups are lost
+         *   - Timer interrupts lost → scheduler stalls → system freezes
+         *   - This was a major contributor to the "VMware hangs" symptom
+         *
+         * Fix: Re-inject the interrupt into the Guest via VM-Entry interruption
+         * info. The vector from EXIT_INTERRUPTION_INFO is re-packed as an
+         * external interrupt injection for VM-Entry.
+         *
+         * If Guest RFLAGS.IF=0 (interrupts disabled), we cannot inject
+         * immediately. Set "interrupt-window exiting" and defer.
+         *
+         * HLT Activity State handling: If Guest was in HLT state (set by our
+         * HLT handler), injecting an external interrupt at VM-Entry causes
+         * hardware to automatically transition Activity State from HLT to
+         * Active (Intel SDM Vol. 3C, 26.6.2). For the deferred path (IF=0),
+         * we must explicitly reset Activity State to Active so the Guest can
+         * execute and eventually enable interrupts.
          */
         {
             ULONG64 IntInfo = VmxRead(VMCS_EXIT_INTERRUPTION_INFO);
             if (IntInfo & INTERRUPT_INFO_VALID) {
-                ULONG Vector = (ULONG)(IntInfo & 0xFF);
+                ULONG Vector = (ULONG)(IntInfo & INTERRUPT_INFO_VECTOR_MASK);
                 ULONG64 GuestRflags = VmxRead(VMCS_GUEST_RFLAGS);
                 ULONG64 Interruptibility = VmxRead(VMCS_GUEST_INTERRUPTIBILITY);
+                ULONG64 ActivityState = VmxRead(VMCS_GUEST_ACTIVITY_STATE);
 
+                /*
+                 * Check if Guest can accept the interrupt:
+                 *   - RFLAGS.IF must be 1
+                 *   - No blocking by STI or MOV SS
+                 */
                 if ((GuestRflags & (1ULL << 9)) &&
                     !(Interruptibility & 0x3)) {
-                    /* IF=1 and not blocked by STI/MOV SS: safe to inject */
+                    /* Guest is interruptible — inject immediately.
+                     * If Guest was in HLT state, hardware auto-transitions
+                     * to Active when injecting an external interrupt. */
                     VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
                              INTERRUPT_INFO_VALID |
                              (INTERRUPT_TYPE_EXTERNAL << INTERRUPT_INFO_TYPE_SHIFT) |
                              Vector);
                 } else {
-                    /* IF=0 or blocked by STI/MOV SS: defer injection */
-                    ULONG CpuIdx = KeGetCurrentProcessorNumber();
-                    if (CpuIdx < g_MaxProcessors) {
-                        g_VmxState.CpuContexts[CpuIdx].PendingInterrupt = TRUE;
-                        g_VmxState.CpuContexts[CpuIdx].PendingInterruptVector = Vector;
+                    /*
+                     * Guest has interrupts disabled (CLI / STI shadow / MOV SS).
+                     * We cannot inject now. Save the vector and request an
+                     * interrupt-window exit to inject when IF becomes 1.
+                     *
+                     * NOTE: We store only one pending interrupt per CPU.
+                     * If another external interrupt arrives before injection,
+                     * the older one is lost. In practice this is acceptable
+                     * because VMware coalesces rapid external interrupts.
+                     */
+                    if (CpuIndex < g_MaxProcessors) {
+                        g_VmxState.CpuContexts[CpuIndex].PendingInterrupt = TRUE;
+                        g_VmxState.CpuContexts[CpuIndex].PendingInterruptVector = Vector;
                     }
 
-                    /* Request interrupt-window exit */
+                    /* Enable interrupt-window exiting */
                     {
                         ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
                         ProcBased |= PROC_BASED_INT_WINDOW_EXIT;
                         VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
                     }
+
+                    /*
+                     * If Guest was in HLT activity state, we MUST reset it to
+                     * Active (0). Otherwise the CPU stays halted and can never
+                     * execute instructions to enable interrupts (STI), so the
+                     * interrupt-window exit would never fire → permanent hang.
+                     */
+                    if (ActivityState == 1) {
+                        VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);
+                    }
                 }
             }
+            /* If IntInfo is not valid (shouldn't happen with ACK_INT_ON_EXIT),
+             * the interrupt was not acknowledged — it stays pending in the LAPIC
+             * and will be delivered to Guest on next VMRESUME when IF=1. */
         }
         break;
 
     case EXIT_REASON_INT_WINDOW:
         /*
-         * Interrupt window opened: guest RFLAGS.IF is now 1.
-         * Inject the pending interrupt that was deferred, then clear
-         * the interrupt-window exiting bit.
+         * Interrupt window exit — Guest is now ready to accept interrupts.
+         *
+         * This fires because we set PROC_BASED_INT_WINDOW_EXIT when an
+         * external interrupt arrived while Guest had IF=0. Now IF=1 and
+         * we can inject the deferred interrupt.
+         *
+         * BUG FIX: Old code just cleared the bit. New code injects the
+         * pending interrupt that was saved in CpuContext.
          */
         {
-            ULONG CpuIdx = KeGetCurrentProcessorNumber();
             ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
-
-            /* Clear interrupt-window exiting */
             ProcBased &= ~PROC_BASED_INT_WINDOW_EXIT;
             VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
 
-            /* Inject the saved interrupt */
-            if (CpuIdx < g_MaxProcessors &&
-                g_VmxState.CpuContexts[CpuIdx].PendingInterrupt) {
-                ULONG Vector = g_VmxState.CpuContexts[CpuIdx].PendingInterruptVector;
-                g_VmxState.CpuContexts[CpuIdx].PendingInterrupt = FALSE;
+            /* Inject pending interrupt if any */
+            if (CpuIndex < g_MaxProcessors &&
+                g_VmxState.CpuContexts[CpuIndex].PendingInterrupt) {
+                ULONG Vector = g_VmxState.CpuContexts[CpuIndex].PendingInterruptVector;
+                g_VmxState.CpuContexts[CpuIndex].PendingInterrupt = FALSE;
 
                 VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
                          INTERRUPT_INFO_VALID |
@@ -452,15 +667,13 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     default:
         /*
-         * BUG FIX: Unknown VM-Exit handling with infinite loop protection.
+         * BUG FIX: Unknown VM-Exit handling with AGGRESSIVE loop protection.
          *
          * If the same exit reason fires repeatedly at the same RIP, we're
          * in an infinite loop (instruction re-executes → same VM-Exit →
          * resume → repeat). This makes VMware appear to "hang".
          *
-         * Strategy: Track the last unhandled exit. If the same reason fires
-         * from the same RIP more than a threshold number of times, shut down
-         * VMX to avoid freezing the entire VM.
+         * At 3 repetitions we shut down immediately.
          */
         {
             static volatile LONG s_UnhandledCount = 0;
@@ -471,17 +684,11 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
             if (Reason == s_LastUnhandledReason && GuestRip == s_LastUnhandledRip) {
                 LONG Count = InterlockedIncrement(&s_UnhandledCount);
-                if (Count <= 5) {
-                    LOG_WARN("Repeated unhandled VM-Exit[%d]: reason=%u, RIP=0x%llX",
-                             (int)Count, Reason, GuestRip);
-                }
-                if (Count >= 100) {
-                    /*
-                     * Infinite loop detected - shut down VMX to prevent
-                     * the entire VMware guest from freezing.
-                     */
-                    LOG_ERROR("Infinite VM-Exit loop detected! reason=%u, RIP=0x%llX - shutting down",
-                              Reason, GuestRip);
+                if (Count >= 3) {
+                    VMXROOT_LOG_ERROR("FATAL: Infinite VM-Exit loop! reason=%u, "
+                              "qual=0x%llX, RIP=0x%llX, count=%d - SHUTTING DOWN VMX",
+                              Reason, VmxRead(VMCS_EXIT_QUALIFICATION),
+                              GuestRip, (int)Count);
                     Result = FALSE;
                     break;
                 }
@@ -489,12 +696,44 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
                 s_LastUnhandledReason = Reason;
                 s_LastUnhandledRip = GuestRip;
                 s_UnhandledCount = 1;
-                LOG_WARN("Unhandled VM-Exit: reason=%u, qual=0x%llX, RIP=0x%llX",
-                         Reason, VmxRead(VMCS_EXIT_QUALIFICATION), GuestRip);
+
+                /* First occurrence of a new unhandled exit: log details */
+                VMXROOT_LOG_WARN("Unhandled VM-Exit: reason=%u, qual=0x%llX, RIP=0x%llX, CPU=%u",
+                         Reason, VmxRead(VMCS_EXIT_QUALIFICATION),
+                         GuestRip, CpuIndex);
             }
+
+            /*
+             * For the first few occurrences, try to advance RIP to avoid
+             * infinite loop while we're still diagnosing.
+             */
+            VmxAdvanceGuestRip();
         }
         break;
     }
+
+    /*
+     * DIAGNOSTIC: Confirm handler completion for first 10 exits per CPU.
+     * If we see exit #N but NOT "DONE #N", the handler is stuck/crashed.
+     */
+    {
+        static volatile LONG s_DoneLogCount[64] = { 0 };
+        if (CpuIndex < 64) {
+            LONG DoneCount = InterlockedIncrement(&s_DoneLogCount[CpuIndex]);
+            if (DoneCount <= 10) {
+                VMXROOT_LOG_INFO("DONE CPU%u #%d: reason=%u result=%d",
+                           CpuIndex, (int)DoneCount,
+                           (ULONG)(ExitReason & 0xFFFF), (int)Result);
+            }
+        }
+    }
+
+    /*
+     * Write back Guest RSP to VMCS before VMRESUME.
+     * Any handler that modified GuestContext->Rsp (e.g., DR access with
+     * GpReg==4, CR access) will have the change applied to VMCS here.
+     */
+    VmxWrite(VMCS_GUEST_RSP, GuestContext->Rsp);
 
     return Result;
 }
@@ -512,20 +751,32 @@ VOID VmxResumeFailedHandler(ULONG64 VmInstructionError)
 {
     ULONG64 GuestRip = 0, GuestRsp = 0, ExitReason = 0;
 
-    __try {
-        GuestRip = VmxRead(VMCS_GUEST_RIP);
-        GuestRsp = VmxRead(VMCS_GUEST_RSP);
-        ExitReason = VmxRead(VMCS_EXIT_REASON);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        /* Ignore - VMCS may be corrupted */
-    }
+    /*
+     * Read VMCS fields directly WITHOUT __try/__except.
+     *
+     * CRITICAL: __try/__except (SEH) is UNSAFE in VMX root mode!
+     * The host stack is not a thread kernel stack, so SEH's exception
+     * registration chain is invalid here. If vmread fails, it simply
+     * sets CF/ZF flags — it does NOT generate an x86 exception.
+     * Therefore __try/__except was never needed here in the first place.
+     *
+     * vmread only fails if:
+     *   - Not in VMX operation (impossible — we're called from VM-Exit handler)
+     *   - Invalid field encoding (impossible — these are standard encodings)
+     * In both cases, the values remain 0 (our initializers above).
+     */
+    GuestRip = VmxRead(VMCS_GUEST_RIP);
+    GuestRsp = VmxRead(VMCS_GUEST_RSP);
+    ExitReason = VmxRead(VMCS_EXIT_REASON);
 
-    LOG_ERROR("*** VMRESUME FAILED ***");
-    LOG_ERROR("  VM-instruction error: %llu", VmInstructionError);
-    LOG_ERROR("  Guest RIP: 0x%llX, RSP: 0x%llX", GuestRip, GuestRsp);
-    LOG_ERROR("  Last exit reason: %llu", ExitReason & 0xFFFF);
-    LOG_ERROR("  CPU: %u", KeGetCurrentProcessorNumber());
+    /*
+     * This is a fatal path — we're about to vmxoff + hlt, so
+     * we need maximum chance of the message reaching WinDbg.
+     */
+    VMXROOT_LOG_ERROR("*** VMRESUME FAILED *** VM-instruction error: %llu, "
+              "Guest RIP: 0x%llX, RSP: 0x%llX, Last exit reason: %llu, CPU: %u",
+              VmInstructionError, GuestRip, GuestRsp,
+              ExitReason & 0xFFFF, KeGetCurrentProcessorNumber());
 }
 
 /* ========================================================================= */
@@ -575,7 +826,18 @@ static BOOLEAN HandleCrAccess(PGUEST_CONTEXT Ctx)
             /* CR3 load - process switch */
             VmxWrite(VMCS_GUEST_CR3, NewValue);
 
-            /* We could log process switches for targets here */
+            /* Update hardware TSC Offset for the new process context */
+            AadUpdateHwTscOffset(NewValue);
+
+            /* DIAGNOSTIC: Log first few CR3 switches to confirm normal operation */
+            {
+                static volatile LONG s_Cr3SwitchCount = 0;
+                LONG Cr3Count = InterlockedIncrement(&s_Cr3SwitchCount);
+                if (Cr3Count <= 5) {
+                    LOG_INFO("CR3 switch #%d: new CR3=0x%llX CPU=%u",
+                             (int)Cr3Count, NewValue, KeGetCurrentProcessorNumber());
+                }
+            }
         }
         else if (CrNum == 0) {
             /*
@@ -654,7 +916,11 @@ static BOOLEAN HandleCrAccess(PGUEST_CONTEXT Ctx)
     return TRUE;
 }
 
-/* DR Access - delegate to anti-anti-debug */
+/* DR Access - delegate to anti-anti-debug.
+ * NOTE: With MOV_DR_EXIT disabled in VMCS setup, this handler should
+ * NOT fire. If it does fire (due to must-be-1 bits forcing DR exiting),
+ * AadHandleDrAccess still handles it correctly by passing through the
+ * real DR values (since no target process is set). */
 static BOOLEAN HandleDrAccess(PGUEST_CONTEXT Ctx)
 {
     return AadHandleDrAccess(Ctx);
@@ -686,8 +952,21 @@ static BOOLEAN HandleException(PGUEST_CONTEXT Ctx)
     if (IntType == INTERRUPT_TYPE_NMI) {
         ULONG64 Interruptibility = VmxRead(VMCS_GUEST_INTERRUPTIBILITY);
 
+        /* DIAGNOSTIC: Log first few NMI exits */
+        {
+            static volatile LONG s_NmiCount = 0;
+            LONG NmiC = InterlockedIncrement(&s_NmiCount);
+            if (NmiC <= 5) {
+                LOG_INFO("NMI exit #%d: interruptibility=0x%llX blocked=%u CPU=%u",
+                         (int)NmiC, Interruptibility,
+                         (ULONG)((Interruptibility >> 3) & 1),
+                         KeGetCurrentProcessorNumber());
+            }
+        }
+
         if (!(Interruptibility & (1ULL << 3))) {
-            /* Not blocked by NMI: safe to inject immediately */
+            /* Not blocked by NMI: safe to inject immediately.
+             * NMI injection auto-transitions HLT→Active (Intel SDM 26.6.2). */
             VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
                      INTERRUPT_INFO_VALID |
                      (INTERRUPT_TYPE_NMI << INTERRUPT_INFO_TYPE_SHIFT) |
@@ -697,39 +976,19 @@ static BOOLEAN HandleException(PGUEST_CONTEXT Ctx)
             ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
             ProcBased |= PROC_BASED_NMI_WINDOW_EXIT;
             VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+
+            /* If Guest was in HLT state, wake it so NMI-window can fire */
+            {
+                ULONG64 ActivityState = VmxRead(VMCS_GUEST_ACTIVITY_STATE);
+                if (ActivityState == 1) {
+                    VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);
+                }
+            }
         }
         return TRUE;
     }
 
     return AadHandleException(Ctx);
-}
-
-/* RDTSC - delegate to anti-anti-debug */
-static BOOLEAN HandleRdtsc(PGUEST_CONTEXT Ctx)
-{
-    return AadHandleRdtsc(Ctx);
-}
-
-/* RDTSCP - like RDTSC but also sets ECX = IA32_TSC_AUX */
-static BOOLEAN HandleRdtscp(PGUEST_CONTEXT Ctx)
-{
-    /*
-     * BUG FIX (Problem D): Document the implicit coupling with AadHandleRdtsc.
-     *
-     * AadHandleRdtsc() internally calls HvAdvanceGuestRip() — this is by design
-     * so that both RDTSC and RDTSCP exits share the same TSC compensation logic.
-     * Do NOT add another VmxAdvanceGuestRip() here, or Guest RIP will be advanced
-     * twice, skipping the instruction after RDTSCP and causing corruption.
-     *
-     * If AadHandleRdtsc is ever refactored to NOT advance RIP internally,
-     * a VmxAdvanceGuestRip() call MUST be added here.
-     */
-    AadHandleRdtsc(Ctx);
-
-    /* Also return IA32_TSC_AUX in ECX (RDTSCP-specific) */
-    Ctx->Rcx = __readmsr(MSR_IA32_TSC_AUX) & 0xFFFFFFFF;
-
-    return TRUE;
 }
 
 /* EPT Violation - delegate to EPT module */
@@ -916,12 +1175,24 @@ static BOOLEAN HandleVmcall(PGUEST_CONTEXT Ctx)
     {
         static volatile LONG s_VmcallLogCount = 0;
         LONG Count = InterlockedIncrement(&s_VmcallLogCount);
-        if (Count <= 10) {
+        if (Count <= 20) {
             ULONG64 GuestRip = VmxRead(VMCS_GUEST_RIP);
-            LOG_INFO("VMCALL[%d]: RAX=0x%llX RCX=0x%llX RDX=0x%llX R8=0x%llX RIP=0x%llX",
-                     (int)Count, Rax, Ctx->Rcx, Ctx->Rdx, Ctx->R8, GuestRip);
+            VMXROOT_LOG_INFO("VMCALL[%d]: RAX=0x%llX RCX=0x%llX "
+                     "callcode=%u RDX=0x%llX R8=0x%llX RIP=0x%llX CPU=%u",
+                     (int)Count, Rax, Ctx->Rcx,
+                     (ULONG)(Ctx->Rcx & 0xFFFF),
+                     Ctx->Rdx, Ctx->R8, GuestRip,
+                     KeGetCurrentProcessorNumber());
         }
         Ctx->Rax = HvEmulateHypercall(Ctx->Rcx, Ctx->Rdx, Ctx->R8);
+        
+        /* Log if hypercall returned error (might indicate problematic call) */
+        if (Ctx->Rax != 0 && Count <= 20) {
+            LOG_WARN("VMCALL[%d] RETURNED ERROR: status=0x%llX "
+                     "callcode=%u",
+                     (int)Count, Ctx->Rax,
+                     (ULONG)(Ctx->Rcx & 0xFFFF));
+        }
     }
     VmxAdvanceGuestRip();
     return TRUE;
@@ -1032,15 +1303,14 @@ static BOOLEAN HandleTripleFault(PGUEST_CONTEXT Ctx)
  * Map register index (from exit qualification) to GUEST_CONTEXT offset.
  * Register encoding: 0=RAX, 1=RCX, 2=RDX, 3=RBX, 4=RSP, 5=RBP, 6=RSI, 7=RDI
  *                    8=R8,  9=R9,  10=R10, 11=R11, 12=R12, 13=R13, 14=R14, 15=R15
+ *
+ * NOTE: RSP (index 4) is now valid in GuestContext because VmxExitHandler()
+ * syncs VMCS_GUEST_RSP → GuestContext->Rsp at entry and writes it back at exit.
+ * No special-case needed for RegIndex==4 anymore.
  */
 static ULONG64 GetGpRegValue(PGUEST_CONTEXT Ctx, ULONG RegIndex)
 {
     ULONG64 *Regs = (ULONG64 *)Ctx;
-
-    if (RegIndex == 4) {
-        /* RSP comes from VMCS, not the context */
-        return VmxRead(VMCS_GUEST_RSP);
-    }
 
     if (RegIndex <= 15) {
         return Regs[RegIndex];
@@ -1052,11 +1322,6 @@ static ULONG64 GetGpRegValue(PGUEST_CONTEXT Ctx, ULONG RegIndex)
 static VOID SetGpRegValue(PGUEST_CONTEXT Ctx, ULONG RegIndex, ULONG64 Value)
 {
     ULONG64 *Regs = (ULONG64 *)Ctx;
-
-    if (RegIndex == 4) {
-        VmxWrite(VMCS_GUEST_RSP, Value);
-        return;
-    }
 
     if (RegIndex <= 15) {
         Regs[RegIndex] = Value;

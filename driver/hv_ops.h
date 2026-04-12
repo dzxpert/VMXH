@@ -178,6 +178,11 @@ typedef struct _HV_OPS {
     ULONG64     (*ReadPrimaryProcControls)(VOID);
     VOID        (*WritePrimaryProcControls)(ULONG64 Value);
 
+    /* ===== TSC Offset (hardware) ===== */
+
+    /* Write hardware TSC Offset in VMCS/VMCB (used for anti-timing via offsetting) */
+    VOID        (*WriteTscOffset)(LONG64 Offset);
+
     /* ===== Per-CPU Context Access ===== */
 
     /* Get generic per-CPU context for current processor */
@@ -229,5 +234,6 @@ extern CPU_VENDOR g_CpuVendor;
 #define HvHookFunction(t,h,o)           g_HvOps->HookFunction(t,h,o)
 #define HvUnhookFunction(t)             g_HvOps->UnhookFunction(t)
 #define HvUnhookAll()                   g_HvOps->UnhookAll()
+#define HvWriteTscOffset(v)             g_HvOps->WriteTscOffset(v)
 
 #endif /* _HV_OPS_H_ */

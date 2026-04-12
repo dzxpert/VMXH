@@ -98,6 +98,8 @@ NTSTATUS DriverEntry(
 
     /* Initialize logging first */
     LogInitialize();
+    /* Start the flush thread to relay VMX root mode ring buffer logs to WinDbg */
+    LogFlushThreadStart();
     LOG_INFO("VMX Anti-Anti-Debug Driver loading... [BUILD 20260411-v2 hv_hypercall]");
 
     /* Detect active processor count early (used for all per-CPU allocations) */
@@ -245,6 +247,7 @@ VOID DriverUnload(
     }
 
     LOG_INFO("Driver unloaded");
+    LogFlushThreadStop();
     LogTerminate();
 }
 

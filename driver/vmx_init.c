@@ -203,6 +203,22 @@ static NTSTATUS VmxAllocateCpuContext(PVMX_CPU_CONTEXT CpuCtx, ULONG VmcsRevisio
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    /* I/O Bitmaps A and B (4KB each, initialized to all zeros = no I/O VM-Exit).
+     * When USE_IO_BITMAPS is enabled together with UNCONDITIONAL_IO_EXIT,
+     * the bitmap takes precedence: only ports with bit=1 cause VM-Exit.
+     * All zeros = no I/O exits, effectively neutralizing the forced
+     * UNCONDITIONAL_IO_EXIT must-be-1 bit from VMware. */
+    CpuCtx->IoBitmapAVa = VmxAllocateAlignedMemory(PAGE_SIZE_4KB, &CpuCtx->IoBitmapAPa);
+    if (!CpuCtx->IoBitmapAVa) {
+        LOG_ERROR("Failed to allocate I/O bitmap A for CPU %u", CpuCtx->ProcessorNumber);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    CpuCtx->IoBitmapBVa = VmxAllocateAlignedMemory(PAGE_SIZE_4KB, &CpuCtx->IoBitmapBPa);
+    if (!CpuCtx->IoBitmapBVa) {
+        LOG_ERROR("Failed to allocate I/O bitmap B for CPU %u", CpuCtx->ProcessorNumber);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     /* Host Stack (16KB) */
     CpuCtx->HostStackSize = 4 * PAGE_SIZE_4KB;
     CpuCtx->HostStackBase = ExAllocatePoolWithTag(
@@ -393,6 +409,8 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
         }
     }
 
+    LOG_INFO("VmxSetupVmcs: starting on CPU %u", CpuCtx->ProcessorNumber);
+
     /* ===== Read current CPU state ===== */
     GdtBase = AsmGetGdtBase();
     IdtBase = AsmGetIdtBase();
@@ -411,24 +429,104 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
     /* ===== VM-Execution Controls ===== */
 
-    /* Pin-Based Controls */
+    /* Pin-Based Controls
+     *
+     * We do NOT request PIN_BASED_EXTERNAL_INT_EXIT — in a Blue Pill hypervisor,
+     * external interrupts should be delivered directly to the Guest via Guest IDT.
+     *
+     * HOWEVER: VmxAdjustControls may force EXTERNAL_INT_EXIT on due to must-be-1
+     * bits (common in VMware/Hyper-V nested virtualization). If that happens,
+     * we MUST also enable ACK_INT_ON_EXIT in the Exit Controls, otherwise:
+     *   - External interrupt → VM-Exit (interrupt NOT acknowledged)
+     *   - VMRESUME → interrupt still pending → immediate VM-Exit again
+     *   - Infinite loop → stack corruption → BSOD 0x1AA
+     *
+     * With ACK_INT_ON_EXIT: the interrupt is acknowledged during VM-Exit,
+     * the vector appears in EXIT_INTERRUPTION_INFO. We simply discard it
+     * (the LAPIC considers it handled; devices have timeout/retry mechanisms).
+     *
+     * NMI_EXIT is kept for WinDbg Ctrl+Break and proper NMI blocking semantics.
+     */
     PinBased = VmxAdjustControls(
-        PIN_BASED_EXTERNAL_INT_EXIT |       /* Intercept external interrupts */
-        PIN_BASED_NMI_EXIT,                 /* Intercept NMIs */
+        PIN_BASED_NMI_EXIT,                 /* Intercept NMIs (needed for WinDbg) */
         State->TrueControlsSupported ? State->TruePinBasedCap : State->PinBasedCap
     );
+
+    /* Detect if EXTERNAL_INT_EXIT was forced on by must-be-1 bits */
+    CpuCtx->ExternalIntExitForced = !!(PinBased & PIN_BASED_EXTERNAL_INT_EXIT);
+    if (CpuCtx->ExternalIntExitForced) {
+        LOG_WARN("CPU %u: PIN_BASED_EXTERNAL_INT_EXIT forced by must-be-1 bits! "
+                 "Will enable ACK_INT_ON_EXIT to prevent infinite VM-Exit loop.",
+                 CpuCtx->ProcessorNumber);
+    }
+
     VmxWrite(VMCS_CTRL_PIN_BASED_VM_EXEC, PinBased);
 
     /* Primary Processor-Based Controls */
-    ProcBased = VmxAdjustControls(
-        PROC_BASED_USE_MSR_BITMAPS |
-        PROC_BASED_SECONDARY_CONTROLS |
-        PROC_BASED_CR3_LOAD_EXIT |          /* Monitor process switching */
-        PROC_BASED_MOV_DR_EXIT |            /* Intercept DR access */
-        PROC_BASED_RDTSC_EXIT,              /* Intercept RDTSC */
-        State->TrueControlsSupported ? State->TrueProcBasedCap : State->ProcBasedCap
-    );
+    {
+        ULONG RequestedProcBased =
+            PROC_BASED_USE_MSR_BITMAPS |
+            PROC_BASED_USE_IO_BITMAPS |         /* I/O bitmap overrides UNCONDITIONAL_IO_EXIT:
+                                                 * when both are set, the bitmap controls which
+                                                 * ports trigger VM-Exit. All zeros = no I/O exits,
+                                                 * neutralizing the must-be-1 UNCONDITIONAL_IO_EXIT
+                                                 * forced by VMware in nested virtualization. */
+            PROC_BASED_SECONDARY_CONTROLS |
+            /* PROC_BASED_CR3_LOAD_EXIT |       -- DISABLED FOR TESTING: CR3 exit causes
+             *                                     extreme slowdown in nested VMware due to
+             *                                     high-frequency VM-Exits on every context
+             *                                     switch. Re-enable after confirming perf fix. */
+            /* PROC_BASED_MOV_DR_EXIT |         -- DISABLED FOR TESTING: DR access exits
+             *                                     cause extreme VM-Exit storm in nested VMware.
+             *                                     Windows kernel saves/restores DRx on EVERY
+             *                                     thread switch, generating thousands of exits
+             *                                     per second. In nested virt each exit costs
+             *                                     L1->L0->L1 round-trip = system freeze.
+             *                                     Only needed for anti-debug DR spoofing.
+             *                                     Re-enable after core VMX is stable. */
+            PROC_BASED_USE_TSC_OFFSETTING;      /* Use hardware TSC Offset (no VM-Exit) */
+
+        ProcBased = VmxAdjustControls(
+            RequestedProcBased,
+            State->TrueControlsSupported ? State->TrueProcBasedCap : State->ProcBasedCap
+        );
+
+        /*
+         * DIAGNOSTIC: Log which bits were force-enabled by must-be-1 bits.
+         * This is critical for debugging VMware-nested hangs — VMware may
+         * force-enable UNCONDITIONAL_IO_EXIT, HLT_EXIT, MWAIT_EXIT, etc.
+         */
+        {
+            ULONG ForcedBits = ProcBased & ~RequestedProcBased;
+            if (ForcedBits) {
+                LOG_WARN("CPU %u: Primary ProcBased forced bits: 0x%08X (final: 0x%08X)",
+                         CpuCtx->ProcessorNumber, ForcedBits, ProcBased);
+                if (ForcedBits & PROC_BASED_UNCONDITIONAL_IO_EXIT)
+                    LOG_WARN("  -> UNCONDITIONAL_IO_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_HLT_EXIT)
+                    LOG_WARN("  -> HLT_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_MWAIT_EXIT)
+                    LOG_WARN("  -> MWAIT_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_MONITOR_EXIT)
+                    LOG_WARN("  -> MONITOR_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_PAUSE_EXIT)
+                    LOG_WARN("  -> PAUSE_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_RDPMC_EXIT)
+                    LOG_WARN("  -> RDPMC_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_INVLPG_EXIT)
+                    LOG_WARN("  -> INVLPG_EXIT forced ON");
+                if (ForcedBits & PROC_BASED_MOV_DR_EXIT)
+                    LOG_WARN("  -> MOV_DR_EXIT forced ON (will cause DR access VM-Exit storm!)");
+                if (ForcedBits & PROC_BASED_CR3_STORE_EXIT)
+                    LOG_WARN("  -> CR3_STORE_EXIT forced ON");
+            }
+        }
+    }
     VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: ProcBased written\n",
+               CpuCtx->ProcessorNumber);
 
     /* Secondary Processor-Based Controls */
     ProcBased2 = VmxAdjustControls(
@@ -441,16 +539,41 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     );
     VmxWrite(VMCS_CTRL_SECONDARY_VM_EXEC, ProcBased2);
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: Secondary written (0x%08X)\n",
+               CpuCtx->ProcessorNumber, ProcBased2);
+
     if (!(ProcBased2 & PROC_BASED2_ENABLE_XSAVES)) {
-        LOG_WARN("ENABLE_XSAVES not supported by CPU/VMM - guest XSAVES/XRSTORS may #UD");
+        LOG_WARN("ENABLE_XSAVES not supported - guest XSAVES/XRSTORS may #UD");
     }
 
-    /* Exception Bitmap: intercept #DB and #BP */
-    VmxWrite(VMCS_CTRL_EXCEPTION_BITMAP,
-             EXCEPTION_BITMAP_DB | EXCEPTION_BITMAP_BP);
+    /* Exception Bitmap: no exceptions intercepted for now.
+     *
+     * DISABLED FOR TESTING: #DB and #BP interception is only needed for
+     * anti-anti-debug exception normalization (AadHandleException).
+     * In nested VMware, every exception VM-Exit adds L1->L0->L1 overhead.
+     * With anti-debug features inactive, these exits serve no purpose.
+     * Re-enable (EXCEPTION_BITMAP_DB | EXCEPTION_BITMAP_BP) after core
+     * VMX is stable and anti-debug is being tested.
+     */
+    VmxWrite(VMCS_CTRL_EXCEPTION_BITMAP, 0);
 
-    /* MSR Bitmap */
+    /* MSR Bitmap — initialize interception bits then write the PA */
+    {
+        extern VOID MsrBitmapInitialize(PVOID MsrBitmap);
+        MsrBitmapInitialize(CpuCtx->MsrBitmapVa);
+    }
     VmxWrite(VMCS_CTRL_MSR_BITMAP, CpuCtx->MsrBitmapPa);
+
+    /* I/O Bitmaps A and B — physical addresses of the 4KB pages.
+     * Both bitmaps are all zeros (set during allocation by VmxAllocateAlignedMemory),
+     * meaning no I/O port will trigger a VM-Exit.
+     * This effectively neutralizes the UNCONDITIONAL_IO_EXIT must-be-1 bit
+     * that VMware forces on in nested virtualization. */
+    VmxWrite(VMCS_CTRL_IO_BITMAP_A, CpuCtx->IoBitmapAPa);
+    VmxWrite(VMCS_CTRL_IO_BITMAP_B, CpuCtx->IoBitmapBPa);
+    LOG_INFO("CPU %u: I/O bitmaps configured (A PA=0x%llX, B PA=0x%llX) - all zeros, no I/O exits",
+             CpuCtx->ProcessorNumber, CpuCtx->IoBitmapAPa, CpuCtx->IoBitmapBPa);
 
     /* VPID - use processor number + 1 (VPID 0 is reserved for host) */
     VmxWrite(VMCS_CTRL_VPID, CpuCtx->ProcessorNumber + 1);
@@ -460,6 +583,10 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
         VmxWrite(VMCS_CTRL_XSS_EXITING_BITMAP, 0);
     }
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: Bitmaps+VPID+XSS done\n",
+               CpuCtx->ProcessorNumber);
+
     /* EPT Pointer - will be set when EPT is initialized */
     /* For now, set up identity-mapped EPT */
     Status = EptSetupIdentityMap(CpuCtx, State);
@@ -467,6 +594,12 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
         LOG_ERROR("EPT setup failed for CPU %u", CpuCtx->ProcessorNumber);
         return Status;
     }
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: EPT identity map done\n",
+               CpuCtx->ProcessorNumber);
+
+    LOG_INFO("CPU %u: VMCS controls + EPT done", CpuCtx->ProcessorNumber);
 
     /* CR0/CR4 guest/host masks and read shadows */
     VmxWrite(VMCS_CTRL_CR0_GUEST_HOST_MASK, 0);    /* Don't intercept CR0 */
@@ -485,13 +618,45 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_CTRL_TSC_OFFSET, 0);
 
     /* ===== VM-Exit Controls ===== */
-    ExitCtls = VmxAdjustControls(
-        VMEXIT_HOST_ADDR_SPACE_SIZE |       /* 64-bit host */
-        VMEXIT_SAVE_IA32_EFER |
-        VMEXIT_LOAD_IA32_EFER |
-        VMEXIT_ACK_INT_ON_EXIT,
-        State->TrueControlsSupported ? State->TrueExitCap : State->ExitCap
-    );
+    /*
+     * ACK_INT_ON_EXIT handling:
+     *
+     * On bare metal (no outer hypervisor), PIN_BASED_EXTERNAL_INT_EXIT is NOT
+     * a must-be-1 bit, so external interrupts don't cause VM-Exit at all.
+     * In that case, ACK_INT_ON_EXIT is unnecessary.
+     *
+     * In nested virtualization (VMware, Hyper-V), PIN_BASED_EXTERNAL_INT_EXIT
+     * is typically must-be-1 (the outer hypervisor needs to intercept interrupts).
+     * If EXTERNAL_INT_EXIT is forced on, we MUST also set ACK_INT_ON_EXIT.
+     *
+     * Why? Without ACK_INT_ON_EXIT:
+     *   - External interrupt → VM-Exit (interrupt NOT acknowledged, still pending)
+     *   - VMRESUME → interrupt still pending → immediate VM-Exit again
+     *   - Infinite VM-Exit loop → eventual stack corruption → BSOD 0x1AA
+     *
+     * With ACK_INT_ON_EXIT:
+     *   - External interrupt → VM-Exit (interrupt acknowledged by LAPIC)
+     *   - Vector stored in EXIT_INTERRUPTION_INFO
+     *   - Handler discards it (Blue Pill: LAPIC considers it handled)
+     *   - VMRESUME → no pending interrupt → normal execution
+     */
+    {
+        ULONG RequestedExitCtls =
+            VMEXIT_HOST_ADDR_SPACE_SIZE |       /* 64-bit host */
+            VMEXIT_SAVE_IA32_EFER |
+            VMEXIT_LOAD_IA32_EFER;
+
+        if (CpuCtx->ExternalIntExitForced) {
+            RequestedExitCtls |= VMEXIT_ACK_INT_ON_EXIT;
+            LOG_INFO("CPU %u: Enabling ACK_INT_ON_EXIT (EXTERNAL_INT_EXIT is must-be-1)",
+                     CpuCtx->ProcessorNumber);
+        }
+
+        ExitCtls = VmxAdjustControls(
+            RequestedExitCtls,
+            State->TrueControlsSupported ? State->TrueExitCap : State->ExitCap
+        );
+    }
     VmxWrite(VMCS_CTRL_VMEXIT_CONTROLS, ExitCtls);
     VmxWrite(VMCS_CTRL_VMEXIT_MSR_STORE_COUNT, 0);
     VmxWrite(VMCS_CTRL_VMEXIT_MSR_LOAD_COUNT, 0);
@@ -505,6 +670,10 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_CTRL_VMENTRY_CONTROLS, EntryCtls);
     VmxWrite(VMCS_CTRL_VMENTRY_MSR_LOAD_COUNT, 0);
     VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO, 0);
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: Exit+Entry controls done\n",
+               CpuCtx->ProcessorNumber);
 
     /* ===== Guest State ===== */
 
@@ -584,6 +753,12 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_GUEST_PENDING_DBG_EXCEPTIONS, 0);
     VmxWrite(VMCS_GUEST_VMCS_LINK_PTR, 0xFFFFFFFFFFFFFFFF);
 
+    LOG_INFO("CPU %u: Guest state done", CpuCtx->ProcessorNumber);
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: Guest state done\n",
+               CpuCtx->ProcessorNumber);
+
     /* ===== Host State ===== */
 
     VmxWrite(VMCS_HOST_CR0, Cr0);
@@ -632,6 +807,10 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
     /* Host RIP: VM-Exit handler entry point */
     VmxWrite(VMCS_HOST_RIP, (ULONG64)AsmVmxExitHandler);
+
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: Host state done, VMCS complete\n",
+               CpuCtx->ProcessorNumber);
 
     LOG_INFO("VMCS setup complete for CPU %u", CpuCtx->ProcessorNumber);
     return STATUS_SUCCESS;
@@ -770,12 +949,18 @@ static VOID VmxInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
      * On success, execution continues at the next line after AsmVmxLaunch()
      * because AsmVmxLaunch sets Guest RIP to the return-success path.
      */
+    LOG_INFO("CPU %u: About to VMLAUNCH...", CpuNum);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: >>> VMLAUNCH NOW <<<\n", CpuNum);
     VmLaunchResult = AsmVmxLaunch();
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: <<< VMLAUNCH returned %u >>>\n",
+               CpuNum, (ULONG)VmLaunchResult);
+    LOG_INFO("CPU %u: VMLAUNCH returned %u", CpuNum, (ULONG)VmLaunchResult);
 
     if (VmLaunchResult != 0) {
         /* VMLAUNCH failed */
-        LOG_ERROR("VMLAUNCH failed on CPU %u, result=%u",
-                  CpuNum, (ULONG)VmLaunchResult);
+        LOG_ERROR("VMLAUNCH failed on CPU %u, result=%u", CpuNum, (ULONG)VmLaunchResult);
         VmxDisableOnCpu(CpuCtx);
         DpcCtx->Status = STATUS_UNSUCCESSFUL;
         KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
@@ -795,8 +980,12 @@ static VOID VmxInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
         Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_ALL;
     }
 
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: DPC signaling Event (SUCCESS)\n", CpuNum);
     DpcCtx->Status = STATUS_SUCCESS;
     KeSetEvent(&DpcCtx->Event, IO_NO_INCREMENT, FALSE);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+               "[VMXToolbox] CHECKPOINT CPU %u: DPC KeSetEvent DONE, DPC returning\n", CpuNum);
 }
 
 static VOID VmxTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
@@ -887,6 +1076,30 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
                 VmxFreeCpuContext(&State->CpuContexts[j]);
             }
             return Status;
+        }
+    }
+
+    /*
+     * PRE-PROBE INVALID MSRs (before VMXON)
+     *
+     * This MUST happen before any CPU enters VMX root mode (VMXON).
+     * In normal kernel mode, __try/__except works reliably and we can
+     * safely probe each MSR to discover which ones cause #GP.
+     *
+     * After VMXON, SEH is unreliable in VMX root mode because the host
+     * stack is outside the thread stack region Windows requires for
+     * structured exception handling. The pre-probed bitmap eliminates
+     * the need for SEH when handling RDMSR/WRMSR VM-Exits.
+     *
+     * Note: The probe only needs to run once globally (not per-CPU)
+     * because MSR existence is a CPU model property, not per-core.
+     */
+    {
+        extern NTSTATUS MsrProbeInvalidMsrs(VOID);
+        Status = MsrProbeInvalidMsrs();
+        if (!NT_SUCCESS(Status)) {
+            LOG_WARN("MSR pre-probe failed: 0x%08X (unknown MSRs will execute directly)", Status);
+            /* Non-fatal but risky: without the bitmap, unknown MSRs may #GP in root mode */
         }
     }
 
@@ -985,13 +1198,53 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
             }
         }
 
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                   "[VMXToolbox] Main thread: About to queue DPC for CPU %u\n", i);
+
         if (!KeInsertQueueDpc(&Dpc, NULL, NULL)) {
             LOG_ERROR("Failed to queue init DPC for CPU %u", i);
             Status = STATUS_UNSUCCESSFUL;
             goto InitFailed;
         }
 
-        KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                   "[VMXToolbox] Main thread: DPC queued, now waiting for CPU %u...\n", i);
+
+        /*
+         * Wait with periodic timeout diagnostics.
+         * In nested virtualization, DPC dispatch can be very slow due to
+         * the L0→L1→L2 exit chain. Use 5-second polling to distinguish
+         * "slow" from "stuck" in WinDbg output.
+         */
+        {
+            LARGE_INTEGER Timeout;
+            NTSTATUS WaitStatus;
+            ULONG WaitCount = 0;
+
+            Timeout.QuadPart = -10000000LL;  /* 1 second (negative = relative) */
+            for (;;) {
+                WaitStatus = KeWaitForSingleObject(
+                    &DpcCtx.Event, Executive, KernelMode, FALSE, &Timeout);
+                if (WaitStatus == STATUS_SUCCESS) {
+                    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                               "[VMXToolbox] Main thread: CPU %u Event signaled after %u sec\n",
+                               i, WaitCount);
+                    break;  /* Event signaled */
+                }
+                WaitCount++;
+                DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                           "[VMXToolbox] Main thread: Still waiting for CPU %u DPC... "
+                           "(%u seconds elapsed)\n", i, WaitCount);
+                if (WaitCount >= 60) {  /* 60 second timeout */
+                    LOG_ERROR("CPU %u DPC timed out after 60 seconds!", i);
+                    Status = STATUS_TIMEOUT;
+                    goto InitFailed;
+                }
+            }
+        }
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                   "[VMXToolbox] Main thread: CPU %u DPC completed, status=0x%08X\n",
+                   i, DpcCtx.Status);
 
         if (!NT_SUCCESS(DpcCtx.Status)) {
             LOG_ERROR("VMX init failed on CPU %u: 0x%08X", i, DpcCtx.Status);
@@ -1000,10 +1253,14 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
         }
 
         LOG_INFO("CPU %u: VMX guest mode active", i);
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                   "[VMXToolbox] Main thread: CPU %u VMX guest mode active\n", i);
     }
 
     State->Initialized = TRUE;
     LOG_INFO("VMX initialization complete: %u CPUs virtualized", CpuCount);
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+               "[VMXToolbox] Main thread: VMX initialization COMPLETE (%u CPUs)\n", CpuCount);
 
     return STATUS_SUCCESS;
 
@@ -1034,6 +1291,10 @@ InitFailed:
     if (g_VmxHvCtx) {
         ExFreePoolWithTag(g_VmxHvCtx, 'xvhC');
         g_VmxHvCtx = NULL;
+    }
+    {
+        extern VOID MsrCleanupInvalidBitmap(VOID);
+        MsrCleanupInvalidBitmap();
     }
     if (State->CpuContexts) {
         ExFreePoolWithTag(State->CpuContexts, 'xmvC');
@@ -1099,6 +1360,12 @@ VOID VmxTerminate(PVMX_STATE State)
     if (g_VmxHvCtx) {
         ExFreePoolWithTag(g_VmxHvCtx, 'xvhC');
         g_VmxHvCtx = NULL;
+    }
+
+    /* Free the invalid MSR pre-probe bitmap */
+    {
+        extern VOID MsrCleanupInvalidBitmap(VOID);
+        MsrCleanupInvalidBitmap();
     }
 
     State->Initialized = FALSE;
@@ -1206,6 +1473,17 @@ static VOID VmxOpsWritePrimaryProcControls(ULONG64 Value)
     VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, Value);
 }
 
+static VOID VmxOpsWriteTscOffset(LONG64 Offset)
+{
+    /*
+     * Write the hardware TSC Offset to VMCS.
+     * When PROC_BASED_USE_TSC_OFFSETTING is enabled, the CPU automatically
+     * adds this value to the TSC seen by the guest on RDTSC/RDTSCP.
+     * A negative offset effectively subtracts time from the guest's view.
+     */
+    VmxWrite(VMCS_CTRL_TSC_OFFSET, (ULONG64)(-Offset));
+}
+
 static PHV_CPU_CONTEXT VmxOpsGetCurrentCpuContext(VOID)
 {
     /*
@@ -1264,5 +1542,6 @@ HV_OPS g_VmxOps = {
     VmxOpsDisableSingleStep,                /* DisableSingleStep */
     VmxOpsReadPrimaryProcControls,          /* ReadPrimaryProcControls */
     VmxOpsWritePrimaryProcControls,         /* WritePrimaryProcControls */
+    VmxOpsWriteTscOffset,                   /* WriteTscOffset */
     VmxOpsGetCurrentCpuContext,             /* GetCurrentCpuContext */
 };

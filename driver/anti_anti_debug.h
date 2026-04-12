@@ -102,11 +102,11 @@ VOID        AadRemoveHooks(VOID);
 
 /* VM-Exit handlers for anti-anti-debug */
 BOOLEAN     AadHandleDrAccess(PGUEST_CONTEXT GuestContext);
-BOOLEAN     AadHandleRdtsc(PGUEST_CONTEXT GuestContext);
 BOOLEAN     AadHandleCpuid(PGUEST_CONTEXT GuestContext);
 BOOLEAN     AadHandleException(PGUEST_CONTEXT GuestContext);
 
 /* TSC management */
+VOID        AadUpdateHwTscOffset(ULONG64 NewCr3);
 VOID        AadNotifyDebugPause(ULONG CpuIndex);
 VOID        AadNotifyDebugResume(ULONG CpuIndex);
 

@@ -1911,7 +1911,7 @@ BOOLEAN HandleEptViolation(PVOID GuestContext)
          * This shouldn't happen with our identity map.
          * Log and try to fix by setting RWX.
          */
-        LOG_WARN("EPT violation on non-hooked page: GPA=0x%llX, Qual=0x%llX",
+        VMXROOT_LOG_WARN("EPT violation on non-hooked page: GPA=0x%llX, Qual=0x%llX",
                  GuestPhysAddr, ExitQualification);
 
         Pte = EptGetPerCpuPte(CpuIndex, GuestPhysAddr);

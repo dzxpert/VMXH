@@ -189,15 +189,36 @@ ULONG64 HvEmulateHypercall(ULONG64 Rcx, ULONG64 Rdx, ULONG64 R8)
          */
         return HV_STATUS_SUCCESS;
 
-    /* ----- Everything else: return "not implemented" ----- */
+    /* ----- Everything else: return SUCCESS to avoid kernel panic ----- */
 
     default:
         /*
-         * Unknown hypercall code.  Return INVALID_HYPERCALL_CODE.
-         * Well-behaved Windows callers should handle this gracefully.
-         * The critical TLB flush calls are handled above, so this
-         * path should not be hit for any mandatory kernel hypercalls.
+         * Unknown hypercall code. Previously returned INVALID_HYPERCALL_CODE
+         * (0x0002), but this caused problems:
+         *
+         * Windows may issue hypercalls we don't recognize (e.g., performance
+         * counters, VP management, partition management). Some callers
+         * DON'T check the return value and assume the call succeeded.
+         * Returning an error code causes:
+         *   - Stale state / missed flush → eventual crash
+         *   - Unexpected error path → kernel hang or BSOD
+         *
+         * FIX: Return SUCCESS for ALL hypercalls. The worst case for
+         * returning success on a no-op is slightly suboptimal behavior
+         * (e.g., a timer hint we ignore). The worst case for returning
+         * error is a kernel crash or hang.
+         *
+         * Log unknown codes for diagnostic purposes.
          */
-        return HV_STATUS_INVALID_HYPERCALL_CODE;
+        {
+            static volatile LONG s_UnknownCallCount = 0;
+            LONG UCount = InterlockedIncrement(&s_UnknownCallCount);
+            if (UCount <= 10) {
+                VMXROOT_LOG_WARN("Unknown hypercall: code=%u (0x%04X) "
+                         "RCX=0x%llX RDX=0x%llX R8=0x%llX",
+                         CallCode, CallCode, Rcx, Rdx, R8);
+            }
+        }
+        return HV_STATUS_SUCCESS;
     }
 }

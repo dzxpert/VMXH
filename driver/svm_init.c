@@ -403,12 +403,14 @@ static VOID SvmInitVmcb(PSVM_CPU_CONTEXT CpuCtx)
 
     /*
      * Instruction intercepts (64-bit):
-     * CPUID, RDTSC/RDTSCP, MSR, VMMCALL, HLT, INVD, WBINVD, XSETBV, VMRUN
+     * CPUID, MSR, VMMCALL, HLT, INVD, WBINVD, XSETBV, VMRUN
+     *
+     * NOTE: RDTSC/RDTSCP are NOT intercepted. Instead, we use the hardware
+     * TSC Offset mechanism (VMCB.Control.TscOffset) to compensate TSC values.
+     * The offset is dynamically updated on CR3 switches via AadUpdateHwTscOffset().
      */
     Vmcb->Control.Intercept =
         (1ULL << SVM_INTERCEPT_CPUID) |
-        (1ULL << SVM_INTERCEPT_RDTSC) |
-        (1ULL << SVM_INTERCEPT_RDTSCP) |
         (1ULL << SVM_INTERCEPT_MSR_PROT) |
         (1ULL << SVM_INTERCEPT_VMMCALL) |
         (1ULL << SVM_INTERCEPT_HLT) |
@@ -795,6 +797,28 @@ NTSTATUS SvmInitialize(VOID)
     }
     RtlZeroMemory(g_SvmState.CpuContexts, CpuCount * sizeof(SVM_CPU_CONTEXT));
 
+    /*
+     * PRE-PROBE INVALID MSRs (before VMRUN)
+     *
+     * Same rationale as in VmxInitialize(): probe MSRs while __try/__except
+     * still works reliably. After VMRUN, the host runs in SVM root mode
+     * where SEH behavior is unreliable. The pre-probed bitmap lets us
+     * inject #GP for known-invalid MSRs without executing the real
+     * instruction during RDMSR/WRMSR VM-Exit handling.
+     *
+     * If VMX path already ran this probe (shared bitmap), it's a no-op
+     * since the bitmap is already populated. But in practice, only one
+     * backend (VMX or SVM) runs per system boot.
+     */
+    {
+        extern NTSTATUS MsrProbeInvalidMsrs(VOID);
+        Status = MsrProbeInvalidMsrs();
+        if (!NT_SUCCESS(Status)) {
+            LOG_WARN("MSR pre-probe failed: 0x%08X (falling back to SEH)", Status);
+            /* Non-fatal */
+        }
+    }
+
     /* Allocate per-CPU structures */
     for (i = 0; i < CpuCount; i++) {
         g_SvmState.CpuContexts[i].Common.ProcessorNumber = i;
@@ -882,6 +906,10 @@ SvmInitFailed:
     }
     NptCleanupPerCpu();
     NptCleanup();
+    {
+        extern VOID MsrCleanupInvalidBitmap(VOID);
+        MsrCleanupInvalidBitmap();
+    }
     if (g_SvmState.CpuContexts) {
         ExFreePoolWithTag(g_SvmState.CpuContexts, 'mvsC');
         g_SvmState.CpuContexts = NULL;
@@ -933,6 +961,12 @@ VOID SvmTerminate(VOID)
     if (g_SvmState.CpuContexts) {
         ExFreePoolWithTag(g_SvmState.CpuContexts, 'mvsC');
         g_SvmState.CpuContexts = NULL;
+    }
+
+    /* Free the invalid MSR pre-probe bitmap */
+    {
+        extern VOID MsrCleanupInvalidBitmap(VOID);
+        MsrCleanupInvalidBitmap();
     }
 
     SvmFreeGlobalResources();
@@ -1200,6 +1234,21 @@ static VOID SvmOpsWritePrimaryProcControls(ULONG64 Value)
     if (Vmcb) Vmcb->Control.Intercept = Value;
 }
 
+static VOID SvmOpsWriteTscOffset(LONG64 Offset)
+{
+    /*
+     * Write the hardware TSC Offset to VMCB.
+     * SVM automatically adds TscOffset to TSC on RDTSC/RDTSCP when
+     * TSC intercepts are cleared. A negative offset subtracts time.
+     */
+    PVMCB Vmcb = SvmGetCurrentVmcb();
+    if (Vmcb) {
+        Vmcb->Control.TscOffset = (ULONG64)(-Offset);
+        /* Mark VMCB clean bits dirty for control area (SVM auto-caches) */
+        Vmcb->Control.CleanBits &= ~(1UL << 0);  /* Intercepts/TSC */
+    }
+}
+
 static PHV_CPU_CONTEXT SvmOpsGetCurrentCpuContext(VOID)
 {
     PSVM_CPU_CONTEXT Ctx = SvmGetCurrentCpu();
@@ -1246,5 +1295,6 @@ HV_OPS g_SvmOps = {
     SvmOpsDisableSingleStep,                /* DisableSingleStep */
     SvmOpsReadPrimaryProcControls,          /* ReadPrimaryProcControls */
     SvmOpsWritePrimaryProcControls,         /* WritePrimaryProcControls */
+    SvmOpsWriteTscOffset,                   /* WriteTscOffset */
     SvmOpsGetCurrentCpuContext,             /* GetCurrentCpuContext */
 };
