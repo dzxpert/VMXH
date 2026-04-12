@@ -562,14 +562,42 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
                CpuCtx->ProcessorNumber);
 
     /* Secondary Processor-Based Controls */
-    ProcBased2 = VmxAdjustControls(
-        PROC_BASED2_ENABLE_EPT |
-        PROC_BASED2_ENABLE_RDTSCP |
-        PROC_BASED2_ENABLE_VPID |
-        PROC_BASED2_ENABLE_INVPCID |
-        PROC_BASED2_ENABLE_XSAVES,      /* Allow guest XSAVES/XRSTORS (used by SwapContext) */
-        State->ProcBased2Cap
-    );
+    {
+        ULONG RequestedProcBased2 =
+            PROC_BASED2_ENABLE_EPT |
+            PROC_BASED2_ENABLE_RDTSCP |
+            PROC_BASED2_ENABLE_VPID |
+            PROC_BASED2_ENABLE_INVPCID |
+            PROC_BASED2_ENABLE_XSAVES;      /* Allow guest XSAVES/XRSTORS (used by SwapContext) */
+
+        ProcBased2 = VmxAdjustControls(
+            RequestedProcBased2,
+            State->ProcBased2Cap
+        );
+
+        /*
+         * DIAGNOSTIC: Log forced secondary proc-based bits.
+         * Critical for nested VMware: VMware may force-enable bits like
+         * DESC_TABLE_EXIT, WBINVD_EXIT, etc. via must-be-1 constraints.
+         */
+        {
+            ULONG ForcedBits2 = ProcBased2 & ~RequestedProcBased2;
+            if (ForcedBits2) {
+                LOG_WARN("CPU %u: Secondary ProcBased2 forced bits: 0x%08X (final: 0x%08X)",
+                         CpuCtx->ProcessorNumber, ForcedBits2, ProcBased2);
+                if (ForcedBits2 & PROC_BASED2_DESC_TABLE_EXIT)
+                    LOG_WARN("  -> DESC_TABLE_EXIT forced ON (LGDT/LIDT/LLDT/LTR will VM-Exit!)");
+                if (ForcedBits2 & PROC_BASED2_WBINVD_EXIT)
+                    LOG_WARN("  -> WBINVD_EXIT forced ON");
+                if (ForcedBits2 & PROC_BASED2_VIRT_APIC_ACCESS)
+                    LOG_WARN("  -> VIRT_APIC_ACCESS forced ON");
+                if (ForcedBits2 & PROC_BASED2_RDRAND_EXIT)
+                    LOG_WARN("  -> RDRAND_EXIT forced ON");
+                if (ForcedBits2 & PROC_BASED2_RDSEED_EXIT)
+                    LOG_WARN("  -> RDSEED_EXIT forced ON");
+            }
+        }
+    }
     VmxWrite(VMCS_CTRL_SECONDARY_VM_EXEC, ProcBased2);
 
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
@@ -1246,8 +1274,11 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
         /*
          * Wait with periodic timeout diagnostics.
          * In nested virtualization, DPC dispatch can be very slow due to
-         * the L0→L1→L2 exit chain. Use 5-second polling to distinguish
+         * the L0→L1→L2 exit chain. Use 1-second polling to distinguish
          * "slow" from "stuck" in WinDbg output.
+         *
+         * Also monitor VM-Exit counts for already-launched CPUs to detect
+         * VM-Exit storms that prevent DPC completion.
          */
         {
             LARGE_INTEGER Timeout;
@@ -1265,9 +1296,18 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
                     break;  /* Event signaled */
                 }
                 WaitCount++;
-                DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
-                           "[VMXToolbox] Main thread: Still waiting for CPU %u DPC... "
-                           "(%u seconds elapsed)\n", i, WaitCount);
+
+                /* Report VM-Exit counts for all CPUs (including already-launched ones) */
+                {
+                    ULONG k;
+                    for (k = 0; k <= i && k < CpuCount; k++) {
+                        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
+                                   "[VMXToolbox] Main thread: Still waiting for CPU %u DPC... "
+                                   "(%u seconds elapsed) CPU%u exits=%lld\n",
+                                   i, WaitCount, k,
+                                   State->CpuContexts[k].ExitCount);
+                    }
+                }
                 if (WaitCount >= 60) {  /* 60 second timeout */
                     LOG_ERROR("CPU %u DPC timed out after 60 seconds!", i);
                     Status = STATUS_TIMEOUT;

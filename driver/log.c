@@ -213,8 +213,8 @@ static VOID LogFlushThreadRoutine(PVOID Context)
 
     UNREFERENCED_PARAMETER(Context);
 
-    /* 50ms polling interval */
-    PollInterval.QuadPart = -500000LL;  /* 50ms in 100ns units, negative = relative */
+    /* 5ms polling interval (reduced from 50ms for faster diagnosis in nested VMware) */
+    PollInterval.QuadPart = -50000LL;  /* 5ms in 100ns units, negative = relative */
 
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
                LOG_PREFIX "[INF] PID=0: Log flush thread started (50ms poll interval)\n");

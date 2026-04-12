@@ -440,15 +440,21 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         if (CpuIndex < 64) {
             s_EarlyExitCount[CpuIndex] = Count;
 
-            /* Heartbeat: every 100 exits (lowered for debugging nested VMware stalls) */
-            if ((Count % 100) == 0 && Count <= 5000) {
+            /*
+             * Heartbeat: Log periodically FOREVER (no upper bound).
+             * - Every 100 exits for the first 5000 (detailed early diagnosis)
+             * - Every 10000 exits thereafter (low-overhead long-term monitoring)
+             * Uses ring buffer only — safe in VMX root mode.
+             */
+            if ((Count <= 5000 && (Count % 100) == 0) ||
+                (Count > 5000 && (Count % 10000) == 0)) {
                 VMXROOT_LOG_INFO("HEARTBEAT CPU%u: count=%lld reason=%u qual=0x%llX RIP=0x%llX",
                            CpuIndex, Count, (ULONG)(ExitReason & 0xFFFF),
                            VmxRead(VMCS_EXIT_QUALIFICATION),
                            VmxRead(VMCS_GUEST_RIP));
             }
 
-            /* Rapid-fire detection at 1K intervals (lowered for debugging) */
+            /* Rapid-fire detection at 1K intervals (first 10K only) */
             if (Count - s_LastReportedCount[CpuIndex] >= 1000) {
                 s_LastReportedCount[CpuIndex] = Count;
                 if (Count <= 10000) {
@@ -481,17 +487,13 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     /*
      * EARLY DIAGNOSTIC: Log the first N VM-Exits from each CPU.
-     * Now uses per-CPU counters so we see BOTH CPUs' first exits,
-     * not just whichever CPU is fastest.
-     *
-     * For RDMSR/WRMSR exits, also log the MSR number (Guest RCX)
-     * to identify which MSR caused the exit.
+     * Uses lock-free ring buffer (VMXROOT_LOG_*) — safe in VMX root mode.
      */
     {
         static volatile LONG s_EarlyLogCountPerCpu[64] = { 0 };
         if (CpuIndex < 64) {
             LONG EarlyCount = InterlockedIncrement(&s_EarlyLogCountPerCpu[CpuIndex]);
-            if (EarlyCount <= 100) {
+            if (EarlyCount <= 30) {
                 USHORT Reason = (USHORT)(ExitReason & 0xFFFF);
                 if (Reason == EXIT_REASON_RDMSR || Reason == EXIT_REASON_WRMSR) {
                     VMXROOT_LOG_INFO("VM-Exit CPU%u #%d: reason=%u (%s) MSR=0x%08X RIP=0x%llX",
@@ -1070,7 +1072,6 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     /*
      * DIAGNOSTIC: Confirm handler completion for first 10 exits per CPU.
-     * If we see exit #N but NOT "DONE #N", the handler is stuck/crashed.
      */
     {
         static volatile LONG s_DoneLogCount[64] = { 0 };
@@ -1879,7 +1880,22 @@ static BOOLEAN HandleTripleFault(PGUEST_CONTEXT Ctx)
 {
     UNREFERENCED_PARAMETER(Ctx);
 
-    LOG_ERROR("Triple fault! Shutting down VMX.");
+    VMXROOT_LOG_ERROR("TRIPLE FAULT! CPU=%u RIP=0x%llX RSP=0x%llX CR3=0x%llX "
+              "CS=0x%llX RFLAGS=0x%llX Activity=%llu Interruptibility=0x%llX",
+              KeGetCurrentProcessorNumber(),
+              VmxRead(VMCS_GUEST_RIP),
+              VmxRead(VMCS_GUEST_RSP),
+              VmxRead(VMCS_GUEST_CR3),
+              VmxRead(VMCS_GUEST_CS_SEL),
+              VmxRead(VMCS_GUEST_RFLAGS),
+              VmxRead(VMCS_GUEST_ACTIVITY_STATE),
+              VmxRead(VMCS_GUEST_INTERRUPTIBILITY));
+    VMXROOT_LOG_ERROR("TRIPLE FAULT context: IDT-vectoring=0x%llX, "
+              "entry-int=0x%llX, exit-int=0x%llX, exit-reason=%llu",
+              VmxRead(VMCS_IDT_VECTORING_INFO),
+              VmxRead(VMCS_CTRL_VMENTRY_INT_INFO),
+              VmxRead(VMCS_EXIT_INTERRUPTION_INFO),
+              VmxRead(VMCS_EXIT_REASON) & 0xFFFF);
     return FALSE;
 }
 
