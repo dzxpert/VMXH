@@ -8,6 +8,7 @@
 #include "log.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
+#include "hv_hypercall.h"
 
 /* ========================================================================= */
 /*  Forward Declarations                                                     */
@@ -445,18 +446,50 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
      * the vector appears in EXIT_INTERRUPTION_INFO. We simply discard it
      * (the LAPIC considers it handled; devices have timeout/retry mechanisms).
      *
-     * NMI_EXIT is kept for WinDbg Ctrl+Break and proper NMI blocking semantics.
+     * NMI_EXIT: On bare metal, we request NMI_EXIT for WinDbg Ctrl+Break
+     * and proper NMI blocking semantics.
+     *
+     * BUG FIX: In nested virtualization (VMware, KVM, etc.), NMI_EXIT
+     * creates an infinite NMI reinjection loop:
+     *   L1 injects NMI → L0 re-delivers as VM-Exit → L1 injects again → ...
+     * Even dropping NMIs in the handler is insufficient because the VM-Exit
+     * round-trip overhead itself (Guest→Host→Guest in nested = L2→L1→L0→L1→L2)
+     * consumes 100% CPU, starving the Guest scheduler.
+     *
+     * Fix: Do NOT request NMI_EXIT when an outer hypervisor is present.
+     * NMIs will be delivered directly to Guest via Guest IDT (KiNmiInterrupt),
+     * generating zero VM-Exits.  WinDbg break-in still works because the
+     * kernel debugger stubs handle NMIs independently of VMX.
      */
-    PinBased = VmxAdjustControls(
-        PIN_BASED_NMI_EXIT,                 /* Intercept NMIs (needed for WinDbg) */
-        State->TrueControlsSupported ? State->TruePinBasedCap : State->PinBasedCap
-    );
+    {
+        ULONG RequestedPinBased = 0;
+
+        if (!g_OuterHypervisorPresent) {
+            RequestedPinBased |= PIN_BASED_NMI_EXIT;
+        } else {
+            LOG_INFO("CPU %u: NMI_EXIT disabled (outer hypervisor present — "
+                     "NMIs go directly to Guest IDT)",
+                     CpuCtx->ProcessorNumber);
+        }
+
+        PinBased = VmxAdjustControls(
+            RequestedPinBased,
+            State->TrueControlsSupported ? State->TruePinBasedCap : State->PinBasedCap
+        );
+    }
 
     /* Detect if EXTERNAL_INT_EXIT was forced on by must-be-1 bits */
     CpuCtx->ExternalIntExitForced = !!(PinBased & PIN_BASED_EXTERNAL_INT_EXIT);
     if (CpuCtx->ExternalIntExitForced) {
         LOG_WARN("CPU %u: PIN_BASED_EXTERNAL_INT_EXIT forced by must-be-1 bits! "
                  "Will enable ACK_INT_ON_EXIT to prevent infinite VM-Exit loop.",
+                 CpuCtx->ProcessorNumber);
+    }
+
+    /* Detect if NMI_EXIT was forced on by must-be-1 bits despite not requesting it */
+    if (g_OuterHypervisorPresent && (PinBased & PIN_BASED_NMI_EXIT)) {
+        LOG_WARN("CPU %u: PIN_BASED_NMI_EXIT forced by must-be-1 bits in nested mode! "
+                 "NMI handler will suppress all NMIs to prevent reinjection storm.",
                  CpuCtx->ProcessorNumber);
     }
 

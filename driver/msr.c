@@ -5,6 +5,7 @@
 
 #include "vmx.h"
 #include "hv_ops.h"
+#include "hv_hypercall.h"
 #include "log.h"
 #include "process.h"
 #include "../common/shared.h"
@@ -398,6 +399,37 @@ BOOLEAN HandleRdmsrImpl(PGUEST_CONTEXT GuestContext)
     }
 
     /*
+     * SAFETY NET: Reject MSRs outside all known ranges on BARE METAL.
+     *
+     * MSRs outside the bitmap-covered ranges (0x0-0x1FFF, 0xC0000000-0xC0001FFF)
+     * and outside our handled synthetic ranges (0x40000000-0x400000FF) ALWAYS
+     * cause VM-Exit regardless of bitmap settings. On bare metal, executing
+     * __readmsr() on a non-existent MSR causes #GP in VMX root mode
+     * (unrecoverable → triple fault → VM shutdown).
+     *
+     * In NESTED VIRTUALIZATION (VMware, KVM, etc.), __readmsr() in L1 VMX root
+     * mode is safe because L0 intercepts the RDMSR and handles it (e.g., VMware
+     * uses MSRs in 0xE0000000+ for guest-host communication). Injecting #GP
+     * here would BREAK the Guest — Windows expects these MSR reads to succeed.
+     */
+    if (!((Msr <= 0x1FFF) || (Msr >= 0xC0000000 && Msr <= 0xC0001FFF))) {
+        if (!g_OuterHypervisorPresent) {
+            /* Bare metal: unknown MSR → inject #GP (real HW would #GP too) */
+            static volatile LONG s_UnknownRdmsrLogCount = 0;
+            LONG LogCount = InterlockedIncrement(&s_UnknownRdmsrLogCount);
+            if (LogCount <= 20) {
+                VMXROOT_LOG_WARN("RDMSR: Unknown MSR 0x%08X outside handled ranges, injecting #GP "
+                                 "(RIP=0x%llX)",
+                                 Msr, HvReadGuestRip());
+            }
+            HvInjectException(13, INTERRUPT_TYPE_HARDWARE_EXCEPTION, TRUE, 0);
+            HvSetEntryInstructionLength(HvReadExitInstructionLength());
+            return TRUE;
+        }
+        /* Nested: fall through to __readmsr() — L0 handles it safely */
+    }
+
+    /*
      * Read the actual MSR value.
      *
      * This MSR passed the pre-probe check (it's either known-valid in the
@@ -501,6 +533,37 @@ BOOLEAN HandleWrmsrImpl(PGUEST_CONTEXT GuestContext)
         HvInjectException(13, INTERRUPT_TYPE_HARDWARE_EXCEPTION, TRUE, 0);
         HvSetEntryInstructionLength(HvReadExitInstructionLength());
         return TRUE;
+    }
+
+    /*
+     * SAFETY NET: Reject MSRs outside all known ranges on BARE METAL.
+     *
+     * MSRs outside the bitmap-covered ranges (0x0-0x1FFF, 0xC0000000-0xC0001FFF)
+     * and outside our handled synthetic ranges (0x40000000-0x400000FF) ALWAYS
+     * cause VM-Exit regardless of bitmap settings. On bare metal, executing
+     * __writemsr() on a non-existent MSR causes #GP in VMX root mode
+     * (unrecoverable → triple fault → VM shutdown).
+     *
+     * In NESTED VIRTUALIZATION (VMware, KVM, etc.), __writemsr() in L1 VMX root
+     * mode is safe because L0 intercepts the WRMSR and handles it (e.g., VMware
+     * uses MSRs in 0xE0000000+ for guest-host communication). Injecting #GP
+     * here would BREAK the Guest — Windows expects these MSR writes to succeed.
+     */
+    if (!((Msr <= 0x1FFF) || (Msr >= 0xC0000000 && Msr <= 0xC0001FFF))) {
+        if (!g_OuterHypervisorPresent) {
+            /* Bare metal: unknown MSR → inject #GP (real HW would #GP too) */
+            static volatile LONG s_UnknownWrmsrLogCount = 0;
+            LONG LogCount = InterlockedIncrement(&s_UnknownWrmsrLogCount);
+            if (LogCount <= 20) {
+                VMXROOT_LOG_WARN("WRMSR: Unknown MSR 0x%08X outside handled ranges, injecting #GP "
+                                 "(value=0x%llX, RIP=0x%llX)",
+                                 Msr, Value, HvReadGuestRip());
+            }
+            HvInjectException(13, INTERRUPT_TYPE_HARDWARE_EXCEPTION, TRUE, 0);
+            HvSetEntryInstructionLength(HvReadExitInstructionLength());
+            return TRUE;
+        }
+        /* Nested: fall through to __writemsr() — L0 handles it safely */
     }
 
     /*

@@ -15,6 +15,11 @@ VMCS_GUEST_RFLAGS_ENCODING EQU 06820h
 
 .code
 
+; Format strings for hard-coded VM-Exit checkpoints (DbgPrintEx in root mode)
+szCheckpoint1  DB '[VMXToolbox-ASM] CHECKPOINT: VM-Exit received, entering handler', 0
+szCheckpoint2  DB '[VMXToolbox-ASM] CHECKPOINT: VmxExitHandler returned al=', 0
+szCheckpoint3  DB '[VMXToolbox-ASM] CHECKPOINT: about to vmresume', 0
+
 ; =========================================================================
 ;  Segment Register Accessors
 ; =========================================================================
@@ -161,8 +166,24 @@ AsmVmxInvvpid ENDP
 ; =========================================================================
 
 GUEST_CTX_SIZE EQU 128
+VMCS_EXIT_REASON_ENCODING EQU 04402h
+VMCS_GUEST_RIP_ENCODING   EQU 0681Eh
+
+; DbgPrintEx import (used for hard-coded debug checkpoints in VMX root mode)
+EXTERN DbgPrintEx:PROC
 
 AsmVmxExitHandler PROC
+
+    ; ================================================================
+    ; HARDCODED CHECKPOINT #1: VM-Exit received (bypasses ring buffer)
+    ; This ALWAYS outputs to WinDbg, even if Flush Thread is stuck.
+    ; ================================================================
+    sub     rsp, 28h + 80h          ; shadow space + temp buffer for format string
+    mov     rcx, 0Dh                ; DPFLTR_IHVDRIVER_ID
+    mov     rdx, 7                  ; DPFLTR_INFO_LEVEL
+    lea     r8, [szCheckpoint1]      ; format string
+    call    DbgPrintEx
+    add     rsp, 28h + 80h
 
     sub     rsp, GUEST_CTX_SIZE
 
@@ -188,10 +209,36 @@ AsmVmxExitHandler PROC
 
     call    VmxExitHandler
 
+    ; ================================================================
+    ; HARDCODED CHECKPOINT #2: VmxExitHandler returned
+    ; Shows return value (al) to diagnose if handler crashed or hung.
+    ; ================================================================
+    movzx   rax, al                  ; zero-extend return value
+    push    rax                      ; save for later
+    sub     rsp, 28h + 80h
+    mov     rcx, 0Dh                ; DPFLTR_IHVDRIVER_ID
+    mov     rdx, 7                  ; DPFLTR_INFO_LEVEL
+    lea     r8, [szCheckpoint2]
+    call    DbgPrintEx
+    add     rsp, 28h + 80h
+    pop     rax                      ; restore original rax (was return value)
+
     add     rsp, 28h
 
     test    al, al
     jz      VmxShutdown
+
+    ; ================================================================
+    ; HARDCODED CHECKPOINT #3: about to vmresume
+    ; If we see this but never see Checkpoint#1 again → vmresume hangs
+    ; or Guest runs forever without VM-Exits.
+    ; ================================================================
+    sub     rsp, 28h + 80h
+    mov     rcx, 0Dh
+    mov     rdx, 7
+    lea     r8, [szCheckpoint3]
+    call    DbgPrintEx
+    add     rsp, 28h + 80h
 
     mov     rax, [rsp + 000h]
     mov     rcx, [rsp + 008h]
