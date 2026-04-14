@@ -42,7 +42,7 @@ hv_hook_asm.asm (ASM 分发器)
   |  返回给原始调用者
   v
 EPT/NPT 引擎
-  |  Execute-Only 页拆分 (Intel) / R=0,W=0,X=0 回退 (嵌套虚拟化)
+  |  Execute-Only 页拆分 (Intel) / R=0,W=0,X=0 回退 (不支持 Execute-Only 时)
   |  12 字节 MOV+JMP -> Thunk 存根
   |  Per-CPU PT 隔离：每 CPU 独立 PTE 切换，消除多核竞争
   |  MTF/TF 单步恢复（INVEPT SINGLE_CONTEXT 优化）
@@ -505,25 +505,6 @@ GENERIC_HOOK_STATE（全局单例）
 
 ---
 
-## VMCALL/VMMCALL Hyper-V Hypercall 兼容层
-
-### 必要性
-
-在嵌套虚拟化环境（VMware / Hyper-V / KVM）中运行时，Windows 内核在 `SwapContext` 等热路径中使用 VMCALL enlightenment 进行 TLB 刷新。当我们的 hypervisor 拦截这些 VMCALL 后，如果仅返回错误码而不执行真正的 TLB 刷新，会导致 CPU 从陈旧 TLB 缓存的错误物理页取指 → 非法指令 → BSOD。
-
-### 模拟实现
-
-`hv_hypercall.c` 中的 `HvEmulateHypercall()` 根据 RCX 低 16 位（Hyper-V Call Code）分派处理：
-
-- **TLB flush 系列** (`0x0001`-`0x0003`, `0x0013`-`0x0014`): 执行 INVVPID all + INVEPT all (Intel) 或 ASID flush (AMD)，然后返回 `HV_STATUS_SUCCESS`
-- **IPI 系列** (`0x000B`, `0x0015`): 直接返回 SUCCESS（内核有 APIC fallback）
-- **SpinWait 通知** (`0x0008`): 直接返回 SUCCESS（仅为调度提示）
-- **其他**: 返回 `HV_STATUS_INVALID_HYPERCALL_CODE (0x0002)`
-
-该模块在三种环境下均安全工作：裸机上无 VMCALL enlightenment 到达；VMware/KVM 下正确模拟 TLB flush；Hyper-V 下同时使用 Enlightened VMCS 优化。
-
----
-
 ## Per-CPU EPT/NPT Hook 页隔离
 
 ### 问题：多核竞争条件
@@ -680,7 +661,7 @@ HandleMtf()
 
 ## Execute-Only 回退 (Mode A / Mode B)
 
-EPT Hook 依赖页权限分离来区分执行和数据访问。在硬件支持 Execute-Only 的平台上使用 Mode A；否则（常见于嵌套虚拟化环境）使用 Mode B。
+EPT Hook 依赖页权限分离来区分执行和数据访问。在硬件支持 Execute-Only 的平台上使用 Mode A；否则使用 Mode B。
 
 ### Mode A: Execute-Only (R=0, W=0, X=1)
 
@@ -738,7 +719,7 @@ if ((RipPa & PAGE_MASK_4KB) == HookTargetPhysicalAddr) {
 /* EptInitialize() 中检测 Execute-Only 支持 */
 ULONG64 EptVpidCap = __readmsr(MSR_IA32_VMX_EPT_VPID_CAP);
 g_EptHookState.ExecuteOnlySupported = (EptVpidCap & 1) != 0;
-/* 嵌套虚拟化（VMware/Hyper-V）通常不暴露此位 → 自动回退 Mode B */
+/* 某些 CPU 型号可能不支持此位 → 自动回退 Mode B */
 ```
 
 ---
