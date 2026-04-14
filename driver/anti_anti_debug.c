@@ -608,6 +608,21 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
     ULONG       SubLeaf = (ULONG)GuestContext->Rcx;
     ULONG64     GuestCr3;
 
+    /*
+     * CPUID Backdoor: quick hypervisor presence probe.
+     * CPUID(EAX=0x4CAFE000) returns EAX=0x564D5854 ("VMXT").
+     * Allows user/kernel code to verify hypervisor is active without
+     * relying on standard CPUID leaves (which may be spoofed by anti-debug).
+     */
+    if (Leaf == CPUID_BACKDOOR_LEAF) {
+        GuestContext->Rax = CPUID_BACKDOOR_MAGIC;
+        GuestContext->Rbx = 0;
+        GuestContext->Rcx = 0;
+        GuestContext->Rdx = 0;
+        VmxAdvanceGuestRip();
+        return TRUE;
+    }
+
     GuestCr3 = HvReadGuestCr3();
 
     /* Execute real CPUID */

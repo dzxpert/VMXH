@@ -8,9 +8,8 @@
 EXTERN VmxExitHandler:PROC
 EXTERN VmxResumeFailedHandler:PROC
 
-; VMCS field encodings used by AsmVmxLaunch and AsmVmxExitHandler
-VMCS_GUEST_RSP_ENCODING EQU 0681Ch
-VMCS_GUEST_RIP_ENCODING EQU 0681Eh
+; VMCS field encodings — defined before AsmVmxExitHandler (which uses them first).
+; AsmVmxLaunch also uses VMCS_GUEST_RSP_ENCODING and VMCS_GUEST_RIP_ENCODING.
 
 .code
 
@@ -162,7 +161,10 @@ AsmVmxInvvpid ENDP
 GUEST_CTX_SIZE EQU 128
 VMCS_EXIT_REASON_ENCODING EQU 04402h
 VMCS_GUEST_RIP_ENCODING   EQU 0681Eh
+VMCS_GUEST_RSP_ENCODING   EQU 0681Ch
 VMCS_GUEST_RFLAGS_ENCODING EQU 06820h
+VMCS_GUEST_CS_ENCODING    EQU 00802h
+VMCS_GUEST_SS_ENCODING    EQU 00804h
 
 AsmVmxExitHandler PROC
 
@@ -234,70 +236,92 @@ VmxShutdown:
     ; We're on the Host stack with the saved GUEST_CONTEXT at [rsp].
     ; VmxAdvanceGuestRip() has already advanced Guest RIP past VMCALL.
     ;
-    ; BUG FIX (Problem H): Also restore Guest RFLAGS via vmread + popfq.
-    ; The original code did not restore RFLAGS, leaving Host RFLAGS active
-    ; after vmxoff. While most flags are quickly overwritten by subsequent
-    ; instructions, special flags (TF, DF, IF) could cause subtle issues.
+    ; Strategy (IRETQ-based, inspired by NBP Trampoline):
+    ;   1. vmread Guest RSP/RIP/RFLAGS/CS/SS (must happen before vmxoff)
+    ;   2. vmxoff — exit VMX operation
+    ;   3. Build IRETQ frame on Guest stack
+    ;   4. Restore all Guest GP registers from GUEST_CONTEXT
+    ;   5. Switch to Guest stack and IRETQ
     ;
-    ; Strategy:
-    ;   1. vmread Guest RSP/RIP/RFLAGS (must happen before vmxoff)
-    ;   2. Push Guest RIP onto Guest stack (so we can 'ret' to it)
-    ;   3. vmxoff
-    ;   4. Restore all guest GP registers from GUEST_CONTEXT
-    ;   5. Push Guest RFLAGS and popfq to restore flags
-    ;   6. Set RSP = (Guest RSP - 8), then ret -> Guest RIP
+    ; IRETQ atomically restores CS:RIP + SS:RSP + RFLAGS, which is more
+    ; canonical than the previous popfq+ret approach (which didn't restore
+    ; CS/SS segments). In Blue Pill mode Host CS == Guest CS, but using
+    ; IRETQ is future-proof for independent Host GDT scenarios.
     ; ---------------------------------------------------------------
 
-    ; 1. Read Guest RSP, Guest RIP, and Guest RFLAGS from VMCS
+    ; ---- Phase 1: vmread Guest state (before vmxoff!) ----
+    ; Allocate 40 bytes (5 qwords) below GUEST_CONTEXT for temporaries.
+    ; Stack layout: [rsp+0..0x27] = temp, [rsp+0x28..0xA7] = GUEST_CONTEXT
+    sub     rsp, 28h
+
     mov     rcx, VMCS_GUEST_RSP_ENCODING
-    vmread  rdx, rcx            ; rdx = Guest RSP
+    vmread  rax, rcx
+    mov     [rsp + 00h], rax                ; Guest RSP
 
     mov     rcx, VMCS_GUEST_RIP_ENCODING
-    vmread  rax, rcx            ; rax = Guest RIP
+    vmread  rax, rcx
+    mov     [rsp + 08h], rax                ; Guest RIP
 
     mov     rcx, VMCS_GUEST_RFLAGS_ENCODING
-    vmread  rcx, rcx            ; rcx = Guest RFLAGS
+    vmread  rax, rcx
+    mov     [rsp + 10h], rax                ; Guest RFLAGS
 
-    ; 2. Push Guest RIP onto the Guest's stack
-    sub     rdx, 8
-    mov     [rdx], rax          ; Guest stack: [Guest RSP - 8] = Guest RIP
+    mov     rcx, VMCS_GUEST_CS_ENCODING
+    vmread  rax, rcx
+    mov     [rsp + 18h], rax                ; Guest CS
 
-    ; Save adjusted Guest RSP into GUEST_CONTEXT.Rsp slot (offset 0x20)
-    ; so we can load it later after restoring all other registers
-    mov     [rsp + 020h], rdx
+    mov     rcx, VMCS_GUEST_SS_ENCODING
+    vmread  rax, rcx
+    mov     [rsp + 20h], rax                ; Guest SS
 
-    ; Save Guest RFLAGS into GUEST_CONTEXT.Rax slot (offset 0x00) temporarily
-    ; (we'll read it back after restoring other GP regs, before restoring rax)
-    ; Actually, use a different approach: save on guest stack too
-    sub     rdx, 8
-    mov     [rdx], rcx          ; Guest stack: [Guest RSP - 16] = Guest RFLAGS
-    mov     [rsp + 020h], rdx   ; Update saved Guest RSP to account for RFLAGS
-
-    ; 3. vmxoff — exit VMX operation
+    ; ---- Phase 2: vmxoff ----
     vmxoff
 
-    ; 4. Restore guest GP registers from GUEST_CONTEXT
-    mov     rax, [rsp + 000h]
-    mov     rcx, [rsp + 008h]
-    mov     rdx, [rsp + 010h]
-    mov     rbx, [rsp + 018h]
-    ; skip rsp (020h) — we load it last
-    mov     rbp, [rsp + 028h]
-    mov     rsi, [rsp + 030h]
-    mov     rdi, [rsp + 038h]
-    mov     r8,  [rsp + 040h]
-    mov     r9,  [rsp + 048h]
-    mov     r10, [rsp + 050h]
-    mov     r11, [rsp + 058h]
-    mov     r12, [rsp + 060h]
-    mov     r13, [rsp + 068h]
-    mov     r14, [rsp + 070h]
-    mov     r15, [rsp + 078h]
+    ; ---- Phase 3: Build IRETQ frame on Guest stack ----
+    ; IRETQ pops: [RSP+0]=RIP, [RSP+8]=CS, [RSP+16]=RFLAGS, [RSP+24]=RSP, [RSP+32]=SS
+    mov     rax, [rsp + 00h]                ; Guest RSP
+    sub     rax, 28h                        ; 5 * 8 bytes for IRETQ frame
 
-    ; 5. Load Guest RSP (with RFLAGS and RIP on top) and restore RFLAGS
-    mov     rsp, [rsp + 020h]   ; switch to guest stack
-    popfq                       ; restore Guest RFLAGS (was at [Guest RSP - 16])
-    ret                         ; pops Guest RIP, resumes guest execution
+    mov     rcx, [rsp + 08h]               ; Guest RIP
+    mov     [rax + 00h], rcx                ; IRETQ frame: RIP
+
+    mov     rcx, [rsp + 18h]               ; Guest CS
+    mov     [rax + 08h], rcx                ; IRETQ frame: CS
+
+    mov     rcx, [rsp + 10h]               ; Guest RFLAGS
+    mov     [rax + 10h], rcx                ; IRETQ frame: RFLAGS
+
+    mov     rcx, [rsp + 00h]               ; Guest RSP (original, pre-frame)
+    mov     [rax + 18h], rcx                ; IRETQ frame: RSP
+
+    mov     rcx, [rsp + 20h]               ; Guest SS
+    mov     [rax + 20h], rcx                ; IRETQ frame: SS
+
+    ; Save IRETQ frame base into temp area for later use
+    mov     [rsp + 00h], rax
+
+    ; ---- Phase 4: Restore Guest GP registers ----
+    ; GUEST_CONTEXT is at [rsp + 0x28] (offset by the 40-byte temp area)
+    mov     rax, [rsp + 028h]
+    mov     rcx, [rsp + 030h]
+    mov     rdx, [rsp + 038h]
+    mov     rbx, [rsp + 040h]
+    ; skip rsp (048h) — loaded last as stack switch
+    mov     rbp, [rsp + 050h]
+    mov     rsi, [rsp + 058h]
+    mov     rdi, [rsp + 060h]
+    mov     r8,  [rsp + 068h]
+    mov     r9,  [rsp + 070h]
+    mov     r10, [rsp + 078h]
+    mov     r11, [rsp + 080h]
+    mov     r12, [rsp + 088h]
+    mov     r13, [rsp + 090h]
+    mov     r14, [rsp + 098h]
+    mov     r15, [rsp + 0A0h]
+
+    ; ---- Phase 5: Switch to Guest stack and IRETQ ----
+    mov     rsp, [rsp + 00h]               ; RSP → IRETQ frame on Guest stack
+    iretq                                   ; Atomically restore CS:RIP + SS:RSP + RFLAGS
 
 VmxResumeFailed:
     ; vmresume failed - this is a critical error.

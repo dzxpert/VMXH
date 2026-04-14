@@ -474,6 +474,18 @@
 #define VMCALL_MAGIC_SHUTDOWN               0xDEADCAFEULL
 
 /* ========================================================================= */
+/*  CPUID Backdoor for Hypervisor Detection                                  */
+/* ========================================================================= */
+
+/*
+ * CPUID(EAX=0x4CAFE000) → EAX=0x564D5854 ("VMXT")
+ * Quick probe to verify hypervisor is active from user/kernel mode.
+ * Usage: __cpuid(info, 0x4CAFE000); if (info[0] == 0x564D5854) → active
+ */
+#define CPUID_BACKDOOR_LEAF                 0x4CAFE000
+#define CPUID_BACKDOOR_MAGIC                0x564D5854  /* "VMXT" */
+
+/* ========================================================================= */
 /*  Interruption Info Field                                                  */
 /* ========================================================================= */
 

@@ -218,8 +218,12 @@ static NTSTATUS VmxAllocateCpuContext(PVMX_CPU_CONTEXT CpuCtx, ULONG VmcsRevisio
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* Host Stack (16KB) */
-    CpuCtx->HostStackSize = 4 * PAGE_SIZE_4KB;
+    /* Host Stack (32KB) — increased from 16KB for safety margin.
+     * Normal VM-Exit handler uses ~2-4KB, but deep call chains (EPT violation →
+     * hook lookup → logging) and unoptimized builds can use significantly more.
+     * NBP uses 64KB; 32KB is a conservative middle ground.
+     * Cost: 16KB extra per CPU (e.g., 2 CPUs = 32KB total increase). */
+    CpuCtx->HostStackSize = 8 * PAGE_SIZE_4KB;
     CpuCtx->HostStackBase = ExAllocatePoolWithTag(
         NonPagedPool,
         CpuCtx->HostStackSize,
@@ -543,15 +547,27 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     LOG_INFO("CPU %u: VMCS controls + EPT done", CpuCtx->ProcessorNumber);
 
     /* CR0/CR4 guest/host masks and read shadows */
-    VmxWrite(VMCS_CTRL_CR0_GUEST_HOST_MASK, 0);    /* Don't intercept CR0 */
+
     /*
-     * BUG FIX (Problem B): CR0 ReadShadow should store the Guest's original
-     * CR0 value (before VMX fixed bits adjustment). At initial setup time,
-     * Cr0 read from __readcr0() already has VMX fixed bits set (since we're
-     * running in VMX root mode after VMXON which requires them). So the value
-     * is effectively the same here, but we use it consistently.
+     * CR0 Guest-Host Mask: intercept writes to VMX-restricted bits.
+     *
+     * VMX requires certain CR0 bits to match MSR_IA32_VMX_CR0_FIXED0/FIXED1.
+     * If the Guest directly modifies these bits (MOV CR0) without going through
+     * our handler, the value may violate Fixed Bit constraints, causing the
+     * next VM-Entry to fail.
+     *
+     * By setting the Mask to CR0_FIXED0 (bits that must be 1), any Guest write
+     * that touches these bits triggers a VM-Exit → HandleCrAccess applies
+     * Fixed0/Fixed1 adjustment before writing to VMCS Guest CR0.
+     *
+     * ReadShadow stores the Guest's view of the masked bits so that MOV-from-CR0
+     * returns the value the Guest expects (before VMX adjustment).
      */
-    VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, Cr0);
+    {
+        ULONG64 Cr0Fixed0 = __readmsr(MSR_IA32_VMX_CR0_FIXED0);
+        VmxWrite(VMCS_CTRL_CR0_GUEST_HOST_MASK, Cr0Fixed0);
+        VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, Cr0 & Cr0Fixed0);
+    }
     VmxWrite(VMCS_CTRL_CR4_GUEST_HOST_MASK, CR4_VMXE);  /* Hide VMXE from guest */
     VmxWrite(VMCS_CTRL_CR4_READ_SHADOW, Cr4 & ~CR4_VMXE);
 

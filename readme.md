@@ -225,7 +225,7 @@ VmxInitialize()
   |     +-- VMXON Region (4KB, 物理连续, 页对齐)
   |     +-- VMCS Region  (4KB, 物理连续, 页对齐)
   |     +-- MSR Bitmap   (4KB, 物理连续)
-  |     +-- Host Stack    (16KB, NonPagedPool)
+  |     +-- Host Stack    (32KB, NonPagedPool)
   +-- EptInitialize()             构建 EPT 恒等映射
 ```
 
@@ -270,14 +270,16 @@ VMCS 配置是整个 Hypervisor 的核心, 决定了哪些事件会触发 VM-Exi
 |---------|---------|------|
 | **Pin-Based** | NMI Exiting | 拦截 NMI |
 | **Primary Proc** | Use MSR Bitmaps | 选择性拦截 MSR 访问 |
+| | Use I/O Bitmaps | I/O 端口拦截控制 (全零=无 I/O 退出) |
 | | Secondary Controls | 启用二级控制 |
 | | CR3 Load Exiting | 监控进程切换 (CR3 写入) |
 | | MOV-DR Exiting | 拦截调试寄存器访问 |
-| | RDTSC Exiting | 拦截时间戳读取 |
+| | Use TSC Offsetting | 硬件 TSC 偏移 (反时间检测) |
 | **Secondary Proc** | Enable EPT | 启用扩展页表 |
 | | Enable RDTSCP | 允许 RDTSCP 指令 (拦截处理) |
 | | Enable VPID | 虚拟处理器标识 (TLB 优化) |
 | | Enable INVPCID | 允许 INVPCID 指令 |
+| | Enable XSAVES | 允许 XSAVES/XRSTORS 指令 |
 | **Exception Bitmap** | #DB (bit 1) | 拦截调试异常 |
 | | #BP (bit 3) | 拦截断点异常 |
 
@@ -291,15 +293,23 @@ VMCS 配置是整个 Hypervisor 的核心, 决定了哪些事件会触发 VM-Exi
 
 #### Host State (VM-Exit 恢复目标)
 
-- Host RSP: 指向 Host Stack 顶部
+- Host RSP: 指向 Host Stack 顶部 (32KB, 16 字节对齐 - 8)
 - Host RIP: 指向 `AsmVmxExitHandler` (汇编入口)
 - 段选择子: RPL 清零 (& 0xFFF8)
 - CR4.VMXE: 保持置位
+- IA32_EFER: VM-Exit 时自动保存/加载
 
-#### CR4 隐藏技巧
+#### CR0/CR4 Guest-Host Mask 与 Read Shadow
 
 ```c
-// Guest 实际 CR4 含 VMXE, 但 Guest 读 CR4 时看到的是 shadow (不含 VMXE)
+// CR0: 拦截 VMX Fixed Bits (PE, NE, PG 等必须为 1 的位)
+// Guest 修改这些位时触发 VM-Exit → HandleCrAccess 应用 Fixed0/Fixed1 调整
+// 防止 Guest 写入违反 VMX 约束的 CR0 值导致 VM-Entry 失败
+ULONG64 Cr0Fixed0 = __readmsr(MSR_IA32_VMX_CR0_FIXED0);
+VmxWrite(VMCS_CTRL_CR0_GUEST_HOST_MASK, Cr0Fixed0);
+VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, Cr0 & Cr0Fixed0);
+
+// CR4: 仅拦截 VMXE 位, 对 Guest 隐藏 VMX 操作
 VmxWrite(VMCS_CTRL_CR4_GUEST_HOST_MASK, CR4_VMXE);
 VmxWrite(VMCS_CTRL_CR4_READ_SHADOW, Cr4 & ~CR4_VMXE);
 ```
@@ -323,37 +333,46 @@ VM-Exit 发生时 CPU 自动跳转到 Host RIP, 即此函数:
      恢复 RAX~R15
      add rsp, 128
      vmresume            // 恢复 Guest 执行
-   else:                 // 关闭 VMX
+   else:                 // 关闭 VMX (IRETQ 方式)
+     vmread Guest RSP/RIP/RFLAGS/CS/SS  // vmxoff 前读取
+     vmxoff                              // 退出 VMX 操作
+     在 Guest 栈上构建 IRETQ 帧         // [RIP, CS, RFLAGS, RSP, SS]
      恢复 RAX~R15
-     add rsp, 128
-     vmxoff
-     ret
+     mov rsp, Guest 栈
+     iretq               // 原子恢复 CS:RIP + SS:RSP + RFLAGS
 ```
 
 #### C 分发器 (`VmxExitHandler`)
 
 ```c
 BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext) {
+    GuestContext->Rsp = VmxRead(VMCS_GUEST_RSP);  // 同步 Guest RSP
     ExitReason = VmxRead(VMCS_EXIT_REASON) & 0xFFFF;
     InterlockedIncrement64(&CpuContext->ExitCount);
 
     switch (ExitReason) {
-        case EXIT_REASON_CPUID:          -> AadHandleCpuid()
+        case EXIT_REASON_CPUID:          -> AadHandleCpuid() (含 0x4CAFE000 后门)
         case EXIT_REASON_RDMSR:          -> HandleRdmsrImpl()
         case EXIT_REASON_WRMSR:          -> HandleWrmsrImpl()
-        case EXIT_REASON_CR_ACCESS:      -> HandleCrAccess()
+        case EXIT_REASON_CR_ACCESS:      -> HandleCrAccess() (CR0 Fixed Bits 保护)
         case EXIT_REASON_DR_ACCESS:      -> AadHandleDrAccess()
-        case EXIT_REASON_EXCEPTION_NMI:  -> AadHandleException()
-        case EXIT_REASON_RDTSC:          -> AadHandleRdtsc()
-        case EXIT_REASON_RDTSCP:         -> AadHandleRdtsc() + TSC_AUX
+        case EXIT_REASON_EXCEPTION_NMI:  -> HandleException() (NMI 重注入)
         case EXIT_REASON_EPT_VIOLATION:  -> HandleEptViolation()
-        case EXIT_REASON_MTF:            -> HandleMtf()
-        case EXIT_REASON_VMCALL:         -> 关闭请求 (RAX=0xDEADCAFE)
-        case EXIT_REASON_XSETBV:         -> AsmXsetbv()
+        case EXIT_REASON_MTF:            -> HandleMtf() (per-CPU hook 恢复)
+        case EXIT_REASON_VMCALL:         -> HandleVmcall() (关闭/内存读写)
+        case EXIT_REASON_XSETBV:         -> HandleXsetbv() (XCR0 验证)
+        case EXIT_REASON_HLT:           -> Activity State = HLT
+        case EXIT_REASON_IO:            -> I/O 直通模拟
         ...
     }
+
+    // IDT-Vectoring 事件重注入 (防止 Guest 丢失异常)
+    if (IDT_VECTORING_INFO.Valid && !VMENTRY_INT_INFO.Valid)
+        重注入原始 IDT 事件;
+
+    VmxWrite(VMCS_GUEST_RSP, GuestContext->Rsp);  // 写回 Guest RSP
     return TRUE;  // VMRESUME
-    return FALSE; // VMXOFF
+    return FALSE; // VMXOFF (IRETQ 恢复)
 }
 ```
 
@@ -361,15 +380,19 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext) {
 
 | Exit Reason | 策略 | 说明 |
 |-------------|------|------|
-| CPUID | 修改返回值 | 清除 Hypervisor Present 位 |
+| CPUID | 后门 + 修改返回值 | 0x4CAFE000 后门, 清除 VMX/Hypervisor 位 |
 | RDMSR/WRMSR | 代理执行 + 伪造 | 修改 IA32_DEBUGCTL 返回值 |
 | CR3 Load | 透传 + 记录 | 监控进程切换 |
+| CR0 Write | Fixed Bits 调整 | 应用 VMX CR0 Fixed0/Fixed1 约束 |
 | DR Access | 伪造读取 / 允许写入 | DR0-3=0, DR7=0x400 |
-| Exception | 重新注入 | 正常传递给 Guest SEH |
-| RDTSC | 修改返回值 | 减去调试暂停时间 |
+| Exception/NMI | 重注入 / NMI-window | NMI 始终重注入, 异常传递给 Guest |
 | EPT Violation | 页面切换 + MTF | Execute-Only Hook 核心 |
 | MTF | 恢复 EPT 权限 | Hook 读写后恢复 Execute-Only |
-| VMCALL | 控制通道 | 0xDEADCAFE = 关闭 VMX |
+| VMCALL | 控制通道 | 0xDEADCAFE = 关闭, 内存读写 |
+| HLT | Activity State = HLT | Guest 安全休眠 |
+| XSETBV | 验证 + 执行 | XCR0 合法性检查 |
+| I/O | 直通执行 | 模拟 IN/OUT (must-be-1 位强制) |
+| IDT-Vectoring | 自动重注入 | 防止 VM-Exit 丢失 Guest 异常 |
 
 ### EPT 引擎与 Hook 机制
 
@@ -640,6 +663,11 @@ AadNotifyDebugResume(): TscOffset += (当前TSC - 暂停开始TSC)
 
 ```c
 AadHandleCpuid():
+  // CPUID 后门：快速检测 Hypervisor 是否活跃
+  if Leaf == 0x4CAFE000:
+    EAX = 0x564D5854 ("VMXT"), EBX=ECX=EDX=0
+    return   // 不执行真实 CPUID
+
   执行真实 CPUID
   if 是目标进程 && AAD_HIDE_CPUID:
     Leaf 1:
@@ -702,7 +730,7 @@ HandleRdmsrImpl():
 
 #### 设计原则
 
-Hypervisor 日志面临一个核心挑战：**VMX root 模式下不能调用 `DbgPrintEx`**。原因是 `DbgPrintEx` 内部使用自旋锁和 `INT 3` 触发调试器中断，而 VMX root 模式运行在 Host 栈（16KB `ExAllocatePool` 分配的内存）上，不是 Windows 线程内核栈——SEH 异常链无效，`INT 3` 导致递归 VM-Exit 或死锁。
+Hypervisor 日志面临一个核心挑战：**VMX root 模式下不能调用 `DbgPrintEx`**。原因是 `DbgPrintEx` 内部使用自旋锁和 `INT 3` 触发调试器中断，而 VMX root 模式运行在 Host 栈（32KB `ExAllocatePool` 分配的内存）上，不是 Windows 线程内核栈——SEH 异常链无效，`INT 3` 导致递归 VM-Exit 或死锁。
 
 解决方案：**统一的 Lock-free Ring Buffer + Flush Thread 架构**。
 
@@ -926,7 +954,20 @@ Guest OS + 应用                        ← 看到伪造的裸机环境
 
 **文件**: `anti_anti_debug.c` — `AadHandleCpuid()`
 
-对所有进程无条件生效（不依赖反反调试标志）：
+**CPUID 后门** (对所有进程无条件生效)：
+
+| Leaf | 返回值 | 目的 |
+|------|--------|------|
+| `CPUID(0x4CAFE000)` | `EAX=0x564D5854` ("VMXT") | 快速检测 Hypervisor 是否活跃 |
+
+```c
+// 用户态/内核态检测代码示例:
+int info[4];
+__cpuid(info, 0x4CAFE000);
+if (info[0] == 0x564D5854) printf("Hypervisor active!\n");
+```
+
+**虚拟化隐藏** (对所有进程无条件生效)：
 
 | Leaf | 修改 | 目的 |
 |------|------|------|
