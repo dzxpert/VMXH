@@ -7,7 +7,6 @@
 #include "ept.h"
 #include "hv_ops.h"
 #include "hv_mem.h"
-#include "hv_hypercall.h"
 #include "log.h"
 #include "process.h"
 #include "anti_anti_debug.h"
@@ -41,333 +40,6 @@ extern BOOLEAN HandleWrmsrImpl(PGUEST_CONTEXT Ctx);
 static ULONG64 GetGpRegValue(PGUEST_CONTEXT Ctx, ULONG RegIndex);
 static VOID    SetGpRegValue(PGUEST_CONTEXT Ctx, ULONG RegIndex, ULONG64 Value);
 
-/* =========================================================================
- * PRODUCTION-GRADE NMI DISCRIMINATION SYSTEM
- *
- * Goal: Distinguish real hardware NMIs from virtualization-artifact NMIs
- * in nested virtualization environments (L0=VMware, L1=Our Driver).
- *
- * Real hardware NMIs MUST be forwarded to Guest OS (KiNmiInterrupt).
- * Virtualization artifacts MUST be silently dropped to prevent loops.
- *
- * Architecture: Hash Map with multi-slot per-CPU injection tracking.
- *
- *   When we inject an NMI to Guest: compute fingerprint → store in map slot.
- *   When an NMI VM-Exit arrives:   compute fingerprint → lookup map.
- *     Match found (echo) → drop as artifact.
- *     No match           → inject to Guest and record in map.
- *
- * Discrimination signals (all deterministic):
- *   Signal A — Echo match via hash fingerprint correlation
- *   Signal B — Exit Qualification bit 11 (IRET unblocking)
- *   Signal C — IDT Vectoring Info field validity
- *   Signal D — Guest RIP stasis detection
- * ======================================================================== */
-
-/*
- * NMI Fingerprint — compact hash representing a specific injection event.
- * Composed from Guest execution context at the moment of injection.
- */
-typedef struct _NMI_FINGERPRINT {
-    ULONG64 GuestRip;      /* Guest RIP at injection / arrival time       */
-    ULONG64 GuestRsp;      /* Guest RSP at injection / arrival time       */
-} NMI_FINGERPRINT, *PNMI_FINGERPRINT;
-
-/*
- * Injection Map Slot — one entry per pending injection awaiting echo.
- * Each CPU has NMI_MAP_SLOTS slots for concurrent injection tracking.
- */
-#define NMI_MAP_SLOTS              4        /* max concurrent injections  */
-#define NMI_ECHO_MAX_TSC_CYCLES    10000000 /* ~3.3ms @3GHz echo window  */
-#define NMI_RIP_STASIS_THRESHOLD   128      /* bytes ± tolerance          */
-
-typedef enum _NMI_SLOT_STATUS {
-    NMI_SLOT_FREE     = 0,  /* available for reuse                       */
-    NMI_SLOT_PENDING  = 1,  /* injected, waiting for echo                */
-    NMI_SLOT_MATCHED  = 2,  /* echo received and correlated              */
-    NMI_SLOT_EXPIRED  = 3,  /* timeout, echo never arrived               */
-} NMI_SLOT_STATUS;
-
-typedef struct _NMI_INJECTION_SLOT {
-    volatile NMI_FINGERPRINT Fp;          /* fingerprint at injection time  */
-    volatile LONG64        InjectedAtTsc; /* TSC timestamp at injection     */
-    volatile LONG          InjectionSeq;  /* global sequence number         */
-    volatile NMI_SLOT_STATUS Status;      /* slot lifecycle state           */
-} NMI_INJECTION_SLOT;
-
-/* Per-CPU injection map: tracks our NMI injections for echo correlation. */
-static volatile NMI_INJECTION_SLOT g_NmiInjectionMap[64][NMI_MAP_SLOTS];
-
-/* Global monotonic injection counter — unique ID per injection. */
-static volatile LONG g_NmiGlobalSeq = 0;
-
-/* Diagnostic counters — per-CPU visibility into discrimination behavior. */
-static volatile LONG64 g_DiagNmiTimestamp[64] = { 0 };
-static volatile LONG   g_DiagNmiTotalCount[64] = { 0 };
-static volatile LONG   g_DiagNmiDroppedCount[64] = { 0 };
-
-/* Signal D: Last known Guest RIP after NMI handling (stasis detection). */
-static volatile ULONG64 g_DiagNmiLastGuestRipAfterNmi[64] = { 0 };
-
-/* DIAGNOSTIC (Phase 3): External interrupt vector frequency - FILE-SCOPE */
-static volatile LONG g_DiagExtIntVectorCount[256] = { 0 };
-
-/* =========================================================================
- * NMI Fingerprint & Map Helper Functions
- *
- * These operate on per-CPU data only — no locks needed since VM-Exits
- * on a given vCPU are strictly serialized by hardware.
- * ======================================================================== */
-
-/*
- * NmiComputeHash — compute a 64-bit hash from NMI fingerprint.
- *
- * Uses xorshift-mix for good distribution with minimal CPU cost.
- * The hash is used to select a slot in the injection map (modulo NMI_MAP_SLOTS).
- */
-static ULONG64 NmiComputeHash(PNMI_FINGERPRINT Fp)
-{
-    ULONG64 h = Fp->GuestRip;
-    h ^= Fp->GuestRsp;
-    h ^= (h >> 33) * 0xff51afd7ed558ccdULL;
-    h ^= (h >> 33) * 0xc4ceb9fe1a85ec53ULL;
-    h ^= (h >> 33);
-    return h;
-}
-
-/*
- * NmiFindFreeOrOldestSlot — find a slot for new injection record.
- *
- * Strategy:
- *   1. Return first FREE slot if any (ideal case).
- *   2. Return the EXPIRED or MATCHED slot (safe to overwrite).
- *   3. Last resort: all slots are PENDING — evict the OLDEST injection
- *      (lowest InjectionSeq) because its echo is most likely already lost
- *      or will arrive soonest. This minimizes the window for a missed echo.
- */
-static ULONG NmiFindFreeOrOldestSlot(ULONG CpuIdx)
-{
-    ULONG i;
-    ULONG candidate = 0;
-    LONG  oldestSeq = 0x7FFFFFFF;  /* MAX LONG for initial comparison */
-
-    if (CpuIdx >= 64) CpuIdx = 0;
-
-    for (i = 0; i < NMI_MAP_SLOTS; i++) {
-        volatile NMI_INJECTION_SLOT *S = &g_NmiInjectionMap[CpuIdx][i];
-        if (S->Status == NMI_SLOT_FREE) {
-            return i;  /* ideal: empty slot */
-        }
-        /* Prefer non-pending slots for eviction */
-        if (S->Status != NMI_SLOT_PENDING) {
-            candidate = i;  /* EXPIRED or MATCHED → safe immediate reuse */
-        }
-        /*
-         * Track oldest PENDING slot for worst-case eviction.
-         * If all slots are PENDING, we'll evict the one with the lowest
-         * sequence number (injected longest ago). The lost echo risk is
-         * acceptable because 4+ concurrent pending injections are extremely
-         * rare in practice.
-         */
-        if (S->Status == NMI_SLOT_PENDING && S->InjectionSeq < oldestSeq) {
-            oldestSeq = S->InjectionSeq;
-            candidate = i;
-        }
-    }
-
-    /*
-     * DIAGNOSTIC v2: Log slot allocation type for map capacity analysis.
-     * Helps verify Fix #4 (seq-based eviction) is working correctly:
-     *   - "free"     → normal operation, plenty of room
-     *   - "expired"  → echo didn't arrive within window (expected occasionally)
-     *   - "matched"  → reuse after successful correlation
-     *   - "evict"    → all slots PENDING, evicted oldest (Fix #4)
-     *
-     * Throttled to first 50 calls per CPU to avoid log flooding.
-     */
-    {
-        static volatile LONG s_SlotLogCount[64] = { 0 };
-        volatile NMI_INJECTION_SLOT *ChosenSlot = &g_NmiInjectionMap[CpuIdx][candidate];
-        const CHAR *slotType;
-        LONG logN;
-
-        switch (ChosenSlot->Status) {
-        case NMI_SLOT_FREE:     slotType = "free"; break;
-        case NMI_SLOT_EXPIRED:  slotType = "expired"; break;
-        case NMI_SLOT_MATCHED:  slotType = "matched"; break;
-        default:                slotType = "evict(pending)"; break;
-        }
-
-        logN = (CpuIdx < 64)
-             ? InterlockedIncrement(&s_SlotLogCount[CpuIdx]) : 0;
-
-        if (logN <= 50 || (logN % 200 == 0)) {
-            LOG_INFO("NMI SLOT-ALLOC CPU%u #%ld: slot=%u type=%s old_seq=%d",
-                     CpuIdx, (LONG)logN, candidate,
-                     slotType, (int)(oldestSeq == 0x7FFFFFFF ? -1 : oldestSeq));
-        }
-    }
-
-    return candidate;  /* best available slot (free/expired/oldest-pending) */
-}
-
-/*
- * NmiRecordInjection — store a new injection fingerprint into the map.
- *
- * Called when we write an NMI to VMCS_ENTRY_INT_INFO. Records the
- * injection context so the echo can be correlated later.
- */
-static VOID NmiRecordInjection(ULONG CpuIdx, PNMI_FINGERPRINT Fp, LONG64 Tsc)
-{
-    ULONG SlotIdx;
-    volatile NMI_INJECTION_SLOT *Slot;
-
-    if (CpuIdx >= 64) CpuIdx = 0;
-
-    SlotIdx = NmiFindFreeOrOldestSlot(CpuIdx);
-    Slot = &g_NmiInjectionMap[CpuIdx][SlotIdx];
-
-    Slot->Fp.GuestRip     = Fp->GuestRip;
-    Slot->Fp.GuestRsp     = Fp->GuestRsp;
-    Slot->InjectedAtTsc    = Tsc;
-    Slot->InjectionSeq     = InterlockedIncrement(&g_NmiGlobalSeq);
-    Slot->Status           = NMI_SLOT_PENDING;
-
-    /*
-     * DIAGNOSTIC v2: Log injection recording for echo correlation verification.
-     * Shows which slot was allocated (free vs evicted), the sequence number,
-     * and the fingerprint. On the next NMI exit, look for ECHO-MATCH with
-     * the same seq to confirm the full inject→echo→drop cycle works.
-     */
-    {
-        LONG LocalTotal = (CpuIdx < 64) ? g_DiagNmiTotalCount[CpuIdx] : 0;
-        if (LocalTotal <= 30 || (LocalTotal % 500 == 0)) {
-            LOG_INFO("NMI RECORD-INJECT CPU%u #%ld: slot=%u seq=%d "
-                     "rip=0x%llX rsp=0x%llX tsc=%lld",
-                     CpuIdx, (LONG)LocalTotal, SlotIdx,
-                     (int)Slot->InjectionSeq,
-                     Fp->GuestRip, Fp->GuestRsp, Tsc);
-        }
-    }
-}
-
-/*
- * NmiLookupEcho — search map for an echo match of the current NMI.
- *
- * For each PENDING slot, check:
- *   1. RIP proximity (within ±NMI_RIP_STASIS_THRESHOLD bytes)
- *   2. TSC elapsed within echo window (<NMI_ECHO_MAX_TSC_CYCLES)
- *
- * If matched: consumes the slot (sets MATCHED), returns TRUE.
- * If no match: returns FALSE (this is an independent NMI).
- */
-static BOOLEAN NmiLookupEcho(ULONG CpuIdx,
-                              PNMI_FINGERPRINT CurrentFp,
-                              LONG64 CurrentTsc,
-                              LONG *MatchedSeqOut)
-{
-    ULONG i;
-
-    if (CpuIdx >= 64) CpuIdx = 0;
-    if (MatchedSeqOut) *MatchedSeqOut = -1;
-
-    for (i = 0; i < NMI_MAP_SLOTS; i++) {
-        volatile NMI_INJECTION_SLOT *Slot = &g_NmiInjectionMap[CpuIdx][i];
-
-        if (Slot->Status != NMI_SLOT_PENDING) {
-            continue;
-        }
-
-        /* Check RIP proximity: echo should arrive at nearly same RIP */
-        {
-            LONG64 RipDelta = (LONG64)(CurrentFp->GuestRip - Slot->Fp.GuestRip);
-            if (RipDelta <= -NMI_RIP_STASIS_THRESHOLD ||
-                RipDelta >=  NMI_RIP_STASIS_THRESHOLD) {
-                continue;  /* RIP moved too far → not our echo */
-            }
-        }
-
-        /*
-         * FIX v2: RSP correlation check — prevents false positive on
-         * independent HW NMIs that arrive while Guest RIP happens to be
-         * within ±128 bytes of a recent injection point.
-         *
-         * An echo returns with nearly identical RSP (NMI stack frame is
-         * tiny: just flags/CS/RIP pushed by hardware). An independent HW
-         * NMI arriving during normal execution typically has a very
-         * different RSP (deep in some kernel call chain).
-         *
-         * Tolerance: ±256 bytes (generous for NMI stack variance).
-         */
-#define NMI_RSP_CORRELATION_THRESHOLD   256
-        {
-            LONG64 RspDelta = (LONG64)(CurrentFp->GuestRsp - Slot->Fp.GuestRsp);
-            if (RspDelta <= -NMI_RSP_CORRELATION_THRESHOLD ||
-                RspDelta >=  NMI_RSP_CORRELATION_THRESHOLD) {
-                /*
-                 * DIAGNOSTIC v2: Log RSP mismatch to verify Fix #1 is working.
-                 * This proves an independent HW NMI was saved from being falsely
-                 * identified as an echo by the RSP guard.
-                 *
-                 * Uses g_DiagNmiTotalCount[CpuIdx] for throttling (available
-                 * since function already has CpuIdx).
-                 */
-                LONG LocalTotal = (CpuIdx < 64) ? g_DiagNmiTotalCount[CpuIdx] : 0;
-                if (LocalTotal <= 30 || (LocalTotal % 500 == 0)) {
-                    LOG_WARN("NMI SIGNAL-A [RSP-guard] CPU%u #%ld: "
-                             "slot=%u seq=%d rip_ok(delta=%lld) "
-                             "rsp_rejected(inj_rsp=0x%llX cur_rsp=0x%llX rsp_delta=%lld)",
-                             CpuIdx, (LONG)LocalTotal, i,
-                             (int)Slot->InjectionSeq,
-                             (LONG64)(CurrentFp->GuestRip - Slot->Fp.GuestRip),
-                             Slot->Fp.GuestRsp, CurrentFp->GuestRsp, RspDelta);
-                }
-                continue;  /* RSP differs too much → independent NMI, not echo */
-            }
-        }
-
-        /* Check time window: echo must arrive within latency limit */
-        {
-            LONG64 TscElapsed = CurrentTsc - Slot->InjectedAtTsc;
-            if ((ULONG64)TscElapsed >= (ULONG64)NMI_ECHO_MAX_TSC_CYCLES) {
-                /*
-                 * DIAGNOSTIC v2: Log slot expiration.
-                 * An echo never arrived for this injection — either the echo
-                 * was consumed by another signal (B/C/D) or it genuinely
-                 * didn't come back (rare but possible in VMware).
-                 */
-                LONG LocalTotal2 = (CpuIdx < 64) ? g_DiagNmiTotalCount[CpuIdx] : 0;
-                if (LocalTotal2 <= 30 || (LocalTotal2 % 500 == 0)) {
-                    LOG_WARN("NMI SLOT-EXPIRE CPU%u #%ld: slot=%u seq=%d "
-                             "tsc_elapsed=%lld > max=%ld rip=0x%llX",
-                             CpuIdx, (LONG)LocalTotal2, i,
-                             (int)Slot->InjectionSeq,
-                             TscElapsed, (LONG)NMI_ECHO_MAX_TSC_CYCLES,
-                             Slot->Fp.GuestRip);
-                }
-                Slot->Status = NMI_SLOT_EXPIRED;
-                continue;
-            }
-        }
-
-        /* === ECHO MATCH FOUND === */
-        Slot->Status = NMI_SLOT_MATCHED;
-        if (MatchedSeqOut) *MatchedSeqOut = Slot->InjectionSeq;
-
-        LOG_WARN("NMI ECHO-MATCH CPU%u: seq=%d current_rip=0x%llX "
-                 "inj_rip=0x%llX rip_delta=%lld rsp_delta=%lld tsc_elapsed=%lld",
-                 CpuIdx, (int)Slot->InjectionSeq,
-                 CurrentFp->GuestRip, Slot->Fp.GuestRip,
-                 (LONG64)(CurrentFp->GuestRip - Slot->Fp.GuestRip),
-                 (LONG64)(CurrentFp->GuestRsp - Slot->Fp.GuestRsp),
-                 CurrentTsc - Slot->InjectedAtTsc);
-
-        return TRUE;
-    }
-
-    return FALSE;  /* no echo match found */
-}
-
 /* ========================================================================= */
 /*  Main VM-Exit Handler (called from ASM)                                   */
 /* ========================================================================= */
@@ -388,7 +60,7 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
      * DIAGNOSTIC: Per-CPU early exit counting with rapid-fire detection.
      *
      * When VM-Exits fire at extremely high frequency (e.g., millions per
-     * second due to unhandled UNCONDITIONAL_IO_EXIT), the VMware host
+     * second due to unhandled UNCONDITIONAL_IO_EXIT), the system
      * becomes unresponsive because each exit involves a VMEXIT → handler →
      * VMRESUME round-trip overhead.
      *
@@ -432,7 +104,7 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         /*
          * HEARTBEAT DIAGNOSTIC: Log every 10000th exit per-CPU.
          * This creates a timeline showing what exit reasons appear
-         * over time. When VMware freezes, the last heartbeat message
+         * over time. When the system freezes, the last heartbeat message
          * in WinDbg tells us exactly where the system got stuck.
          *
          * Also includes rapid-fire detection at 100K intervals.
@@ -574,17 +246,17 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         Result = HandleTripleFault(GuestContext);
         break;
 
-    /* ===== VMX Instruction Intercepts (nested virtualization) ===== */
+    /* ===== VMX Instruction Intercepts ===== */
     /*
      * When the guest executes VMX/EPT/VPID instructions (VMXON, VMXOFF,
      * VMCLEAR, VMLAUNCH, VMPTRLD, VMPTRST, VMREAD, VMRESUME, VMWRITE,
      * INVEPT, INVVPID), these unconditionally cause VM-Exit in VMX
      * non-root operation (Intel SDM Vol. 3C, Section 25.1.2).
      *
-     * Since we don't implement full nested virtualization, inject #UD
-     * to the guest. The CPUID handler already hides the VMX capability
-     * bit (CPUID.1:ECX[5]), so well-behaved software won't attempt these.
-     * This handles malicious or VMX-probing code gracefully.
+     * We inject #UD to the guest. The CPUID handler already hides the
+     * VMX capability bit (CPUID.1:ECX[5]), so well-behaved software
+     * won't attempt these. This handles malicious or VMX-probing code
+     * gracefully.
      *
      * Note: VMCALL is handled separately above as our hypercall interface.
      */
@@ -610,8 +282,8 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
         /*
          * HLT exit — Guest wants to sleep until an interrupt arrives.
          *
-         * In nested virtualization (VMware), HLT_EXIT is forced by must-be-1
-         * bits, so every Guest HLT causes a VM-Exit.
+         * HLT_EXIT may be forced by must-be-1 bits, so every Guest HLT
+         * causes a VM-Exit.
          *
          * IMPORTANT: We CANNOT execute native HLT in VMX root mode!
          * Doing _enable() + __halt() in VMX root would cause interrupts to
@@ -719,9 +391,9 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     case EXIT_REASON_APIC_ACCESS:
         /*
-         * APIC access VM-Exit. This can happen if VMware forces
-         * "APIC-register virtualization" or "virtualize APIC accesses"
-         * via must-be-1 bits. Just advance RIP.
+         * APIC access VM-Exit. This can happen if must-be-1 bits force
+         * "APIC-register virtualization" or "virtualize APIC accesses".
+         * Just advance RIP.
          */
         VmxAdvanceGuestRip();
         break;
@@ -760,11 +432,9 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
          * If VmxAdjustControls forced "unconditional I/O exiting" (bit 24)
          * or "use I/O bitmaps" (bit 25) via must-be-1 bits, every IN/OUT
          * instruction will cause a VM-Exit. Without handling this, the guest
-         * re-executes the instruction → VM-Exit → infinite loop → VMware hangs.
+         * re-executes the instruction → VM-Exit → infinite loop → system hangs.
          *
          * We emulate by executing the I/O instruction natively in host mode.
-         * NOTE: In nested VMware, executing I/O in VMX root is safe because
-         * VMware (L0) handles its own I/O virtualization independently.
          *
          * Exit Qualification bits for I/O:
          *   Bits 2:0  = Size (0=1 byte, 1=2 bytes, 3=4 bytes)
@@ -815,7 +485,6 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
                  * instructions execute without #GP for any port. The only
                  * risk is accessing non-existent hardware, which on x86
                  * simply returns 0xFF for IN (bus float) and is a NOP for OUT.
-                 * VMware virtualizes all I/O ports, so no exception can occur.
                  */
                 if (IsIn) {
                     ULONG Value = 0;
@@ -854,173 +523,33 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
 
     case EXIT_REASON_EXTERNAL_INT:
         /*
-         * External interrupt VM-Exit.
-         *
-         * This occurs when PIN_BASED_EXTERNAL_INT_EXIT is set (forced by
-         * must-be-1 bits in nested virtualization — VMware, Hyper-V).
-         *
-         * With ACK_INT_ON_EXIT enabled:
-         *   - The interrupt is automatically acknowledged by the LAPIC
-         *   - The vector is stored in EXIT_INTERRUPTION_INFO
-         *
-         * BUG FIX: The old code DISCARDED the interrupt entirely, which
-         * caused critical failures:
-         *   - IPIs (inter-processor interrupts) are one-shot — discarding them
-         *     means DPC dispatch, TLB shootdowns, and CPU wake-ups are lost
-         *   - Timer interrupts lost → scheduler stalls → system freezes
-         *   - This was a major contributor to the "VMware hangs" symptom
-         *
-         * Fix: Re-inject the interrupt into the Guest via VM-Entry interruption
-         * info. The vector from EXIT_INTERRUPTION_INFO is re-packed as an
-         * external interrupt injection for VM-Entry.
-         *
-         * If Guest RFLAGS.IF=0 (interrupts disabled), we cannot inject
-         * immediately. Set "interrupt-window exiting" and defer.
-         *
-         * HLT Activity State handling: If Guest was in HLT state (set by our
-         * HLT handler), injecting an external interrupt at VM-Entry causes
-         * hardware to automatically transition Activity State from HLT to
-         * Active (Intel SDM Vol. 3C, 26.6.2). For the deferred path (IF=0),
-         * we must explicitly reset Activity State to Active so the Guest can
-         * execute and eventually enable interrupts.
+         * On bare metal, PIN_BASED_EXTERNAL_INT_EXIT is not requested.
+         * External interrupts pass directly through Guest IDT.
+         * If this fires unexpectedly, just resume — the interrupt was
+         * already acknowledged if ACK_INT_ON_EXIT happened to be set.
          */
-        {
-            ULONG64 IntInfo = VmxRead(VMCS_EXIT_INTERRUPTION_INFO);
-            if (IntInfo & INTERRUPT_INFO_VALID) {
-                ULONG Vector = (ULONG)(IntInfo & INTERRUPT_INFO_VECTOR_MASK);
-                ULONG64 GuestRflags = VmxRead(VMCS_GUEST_RFLAGS);
-                ULONG64 Interruptibility = VmxRead(VMCS_GUEST_INTERRUPTIBILITY);
-                ULONG64 ActivityState = VmxRead(VMCS_GUEST_ACTIVITY_STATE);
-
-                /*
-                 * Check if Guest can accept the interrupt:
-                 *   - RFLAGS.IF must be 1
-                 *   - No blocking by STI or MOV SS
-                 */
-                if ((GuestRflags & (1ULL << 9)) &&
-                    !(Interruptibility & 0x3)) {
-                    /* Guest is interruptible — inject immediately.
-                     * If Guest was in HLT state, hardware auto-transitions
-                     * to Active when injecting an external interrupt. */
-                    VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
-                             INTERRUPT_INFO_VALID |
-                             (INTERRUPT_TYPE_EXTERNAL << INTERRUPT_INFO_TYPE_SHIFT) |
-                             Vector);
-                } else {
-                    /*
-                     * Guest has interrupts disabled (CLI / STI shadow / MOV SS).
-                     * We cannot inject now. Save the vector and request an
-                     * interrupt-window exit to inject when IF becomes 1.
-                     *
-                     * NOTE: We store only one pending interrupt per CPU.
-                     * If another external interrupt arrives before injection,
-                     * the older one is lost. In practice this is acceptable
-                     * because VMware coalesces rapid external interrupts.
-                     */
-                    if (CpuIndex < g_MaxProcessors) {
-                        g_VmxState.CpuContexts[CpuIndex].PendingInterrupt = TRUE;
-                        g_VmxState.CpuContexts[CpuIndex].PendingInterruptVector = Vector;
-                    }
-
-                    /* Enable interrupt-window exiting */
-                    {
-                        ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
-                        ProcBased |= PROC_BASED_INT_WINDOW_EXIT;
-                        VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
-                    }
-
-                    /*
-                     * If Guest was in HLT activity state, we MUST reset it to
-                     * Active (0). Otherwise the CPU stays halted and can never
-                     * execute instructions to enable interrupts (STI), so the
-                     * interrupt-window exit would never fire → permanent hang.
-                     */
-                    if (ActivityState == 1) {
-                        VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);
-                    }
-                }
-            }
-            /* If IntInfo is not valid (shouldn't happen with ACK_INT_ON_EXIT),
-             * the interrupt was not acknowledged — it stays pending in the LAPIC
-             * and will be delivered to Guest on next VMRESUME when IF=1. */
-        }
         break;
 
     case EXIT_REASON_INT_WINDOW:
-        /*
-         * Interrupt window exit — Guest is now ready to accept interrupts.
-         *
-         * This fires because we set PROC_BASED_INT_WINDOW_EXIT when an
-         * external interrupt arrived while Guest had IF=0. Now IF=1 and
-         * we can inject the deferred interrupt.
-         *
-         * BUG FIX: Old code just cleared the bit. New code injects the
-         * pending interrupt that was saved in CpuContext.
-         */
+        /* Clear interrupt-window exiting bit */
         {
             ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
             ProcBased &= ~PROC_BASED_INT_WINDOW_EXIT;
             VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
-
-            /* Inject pending interrupt if any */
-            if (CpuIndex < g_MaxProcessors &&
-                g_VmxState.CpuContexts[CpuIndex].PendingInterrupt) {
-                ULONG Vector = g_VmxState.CpuContexts[CpuIndex].PendingInterruptVector;
-                g_VmxState.CpuContexts[CpuIndex].PendingInterrupt = FALSE;
-
-                VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
-                         INTERRUPT_INFO_VALID |
-                         (INTERRUPT_TYPE_EXTERNAL << INTERRUPT_INFO_TYPE_SHIFT) |
-                         Vector);
-            }
         }
         break;
 
     case EXIT_REASON_NMI_WINDOW:
-        /*
-         * NMI window opened: Guest is now ready to accept NMIs.
-         * This exit fires because we deferred NMI injection when "blocking
-         * by NMI" was set in HandleException.
-         *
-         * FIX v2: Record injection fingerprint BEFORE writing ENTRY_INT_INFO
-         * so the echo of this delayed injection can be matched by Signal A
-         * on a future NMI VM-Exit.
-         */
+        /* NMI window opened — inject the deferred NMI now */
         {
-            ULONG   DeferredCpuIdx;
-            LONG64  DeferredTsc;
-            NMI_FINGERPRINT DeferredFp;
-
-            DeferredCpuIdx = KeGetCurrentProcessorNumber();
-            DeferredTsc    = __rdtsc();
-            DeferredFp.GuestRip = VmxRead(VMCS_GUEST_RIP);
-            DeferredFp.GuestRsp = VmxRead(VMCS_GUEST_RSP);
-
-            /* Record in map BEFORE injection (same as immediate path) */
-            NmiRecordInjection(DeferredCpuIdx, &DeferredFp, DeferredTsc);
-
-            /* Clear NMI-window exiting bit */
-            {
-                ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
-                ProcBased &= ~PROC_BASED_NMI_WINDOW_EXIT;
-                VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
-            }
-
-            /* Update tracking state */
-            if (DeferredCpuIdx < 64) {
-                g_DiagNmiTimestamp[DeferredCpuIdx] = DeferredTsc;
-                g_DiagNmiLastGuestRipAfterNmi[DeferredCpuIdx] = DeferredFp.GuestRip;
-            }
-
-            /* Inject the deferred NMI */
-            VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
-                     INTERRUPT_INFO_VALID |
-                     (INTERRUPT_TYPE_NMI << INTERRUPT_INFO_TYPE_SHIFT) |
-                     2);  /* NMI vector */
-
-            LOG_INFO("NMI INJECT [deferred/window] CPU%u: rip=0x%llX rsp=0x%llX tsc=%lld",
-                     DeferredCpuIdx, DeferredFp.GuestRip, DeferredFp.GuestRsp, DeferredTsc);
+            ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
+            ProcBased &= ~PROC_BASED_NMI_WINDOW_EXIT;
+            VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
         }
+        VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                 INTERRUPT_INFO_VALID |
+                 (INTERRUPT_TYPE_NMI << INTERRUPT_INFO_TYPE_SHIFT) |
+                 2);  /* NMI vector */
         break;
 
     default:
@@ -1029,7 +558,7 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
          *
          * If the same exit reason fires repeatedly at the same RIP, we're
          * in an infinite loop (instruction re-executes → same VM-Exit →
-         * resume → repeat). This makes VMware appear to "hang".
+         * resume → repeat). This makes the system appear to "hang".
          *
          * At 3 repetitions we shut down immediately.
          */
@@ -1082,6 +611,85 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
                            CpuIndex, (int)DoneCount,
                            (ULONG)(ExitReason & 0xFFFF), (int)Result);
             }
+        }
+    }
+
+    /*
+     * IDT-VECTORING EVENT RE-INJECTION
+     *
+     * Intel SDM Vol. 3C, Section 27.2.4:
+     * When a VM-Exit occurs during delivery of an event through the IDT
+     * (e.g., a page fault is being delivered but an EPT violation occurs
+     * mid-delivery), the VMCS IDT-vectoring information field records
+     * the interrupted event.
+     *
+     * If we do NOT re-inject this event, the Guest LOSES it silently:
+     *   - Lost #PF → process accesses unmapped page → memory corruption
+     *   - Lost #GP → Guest enters undefined state
+     *   - Lost #DF → next exception becomes triple fault → CPU shutdown
+     *   - Lost external interrupt → device stall, timer loss, DPC starvation
+     *
+     * Fix: Check IDT-vectoring info at the END of every VM-Exit handler.
+     * If valid AND no other event is already being injected via
+     * VMENTRY_INT_INFO, re-inject the original event.
+     *
+     * IMPORTANT: Only re-inject if the current handler did NOT already
+     * write VMENTRY_INT_INFO (check the Valid bit). Some handlers
+     * (e.g., HandleException for NMI) may have already set up an injection.
+     * Double-injection is a VMCS consistency check failure → VM-Entry fail.
+     */
+    if (Result) {
+        ULONG64 IdtVecInfo = VmxRead(VMCS_IDT_VECTORING_INFO);
+
+        if (IdtVecInfo & INTERRUPT_INFO_VALID) {
+            ULONG64 CurrentEntryInfo = VmxRead(VMCS_CTRL_VMENTRY_INT_INFO);
+
+            if (!(CurrentEntryInfo & INTERRUPT_INFO_VALID)) {
+                /* No injection pending — safe to re-inject the IDT event */
+                VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO, (ULONG)IdtVecInfo);
+
+                /* Re-inject error code if the original event had one */
+                if (IdtVecInfo & INTERRUPT_INFO_DELIVER_ERR_CODE) {
+                    ULONG64 IdtVecErrCode = VmxRead(VMCS_IDT_VECTORING_ERRCODE);
+                    VmxWrite(VMCS_CTRL_VMENTRY_EXCEPTION_ERRCODE, (ULONG)IdtVecErrCode);
+                }
+
+                /*
+                 * Re-inject instruction length for software interrupts/exceptions.
+                 * Intel SDM: VM-Entry instruction length is required when injecting
+                 * software interrupts (INT n), software exceptions (#BP, #OF), or
+                 * privileged software exceptions (INT1).
+                 */
+                {
+                    ULONG IntType = (ULONG)((IdtVecInfo >> INTERRUPT_INFO_TYPE_SHIFT) & 0x7);
+                    if (IntType == INTERRUPT_TYPE_SOFTWARE_INT ||
+                        IntType == INTERRUPT_TYPE_SOFTWARE_EXCEPTION ||
+                        IntType == INTERRUPT_TYPE_PRIV_SOFTWARE_INT) {
+                        VmxWrite(VMCS_CTRL_VMENTRY_INSTR_LENGTH,
+                                 VmxRead(VMCS_EXIT_INSTRUCTION_LENGTH));
+                    }
+                }
+
+                {
+                    static volatile LONG s_IdtReinjectCount = 0;
+                    LONG cnt = InterlockedIncrement(&s_IdtReinjectCount);
+                    if (cnt <= 20 || (cnt % 1000 == 0)) {
+                        VMXROOT_LOG_INFO("IDT-REINJECT #%d: vec=%u type=%u err=%s "
+                                   "exit-reason=%u CPU=%u RIP=0x%llX",
+                                   (int)cnt,
+                                   (ULONG)(IdtVecInfo & INTERRUPT_INFO_VECTOR_MASK),
+                                   (ULONG)((IdtVecInfo >> INTERRUPT_INFO_TYPE_SHIFT) & 0x7),
+                                   (IdtVecInfo & INTERRUPT_INFO_DELIVER_ERR_CODE) ? "yes" : "no",
+                                   (ULONG)(ExitReason & 0xFFFF),
+                                   CpuIndex,
+                                   VmxRead(VMCS_GUEST_RIP));
+                    }
+                }
+            }
+            /* else: handler already injected an event, IDT event is lost.
+             * This is a known limitation — the handler's injection takes
+             * priority. The Guest OS will re-trigger the original exception
+             * when it re-executes the faulting instruction. */
         }
     }
 
@@ -1283,296 +891,31 @@ static BOOLEAN HandleDrAccess(PGUEST_CONTEXT Ctx)
     return AadHandleDrAccess(Ctx);
 }
 
-/* Exception/NMI — Production-grade discrimination + anti-anti-debug delegation */
+/* Exception/NMI — bare-metal NMI reinject + anti-anti-debug delegation */
 static BOOLEAN HandleException(PGUEST_CONTEXT Ctx)
 {
     ULONG64 IntInfo = VmxRead(VMCS_EXIT_INTERRUPTION_INFO);
     ULONG   IntType = (ULONG)((IntInfo & INTERRUPT_INFO_TYPE_MASK) >> INTERRUPT_INFO_TYPE_SHIFT);
 
-    /*
-     * PRODUCTION-GRADE NMI DISCRIMINATION AND HANDLING
-     *
-     * Goal: Distinguish real hardware NMIs from virtualization-artifact NMIs.
-     * Real hardware NMIs MUST be forwarded to Guest OS (KiNmiInterrupt).
-     * Virtualization artifacts MUST be silently dropped to prevent loops.
-     *
-     * Architecture: Per-CPU Hash Map with multi-slot injection tracking.
-     *
-     * Discrimination signals (all deterministic):
-     *   Signal A — Echo match via hash fingerprint correlation
-     *              (RIP proximity + TSC window check in map lookup)
-     *   Signal B — Exit Qualification bit 11 (IRET unblocking)
-     *   Signal C — IDT Vectoring Information field validity
-     *   Signal D — Guest RIP stasis detection
-     */
     if (IntType == INTERRUPT_TYPE_NMI) {
-        ULONG64 Interruptibility;
-        ULONG64 ExitQual;
-        ULONG64 IdtVectoringInfo;
-        ULONG64 GuestRsp;
-        ULONG   CpuIdx;
-        LONG64  NowTsc;
-        LONG    TotalNmi;
-        BOOLEAN IsArtifact;      /* TRUE if proven virtualization artifact */
-        ULONG   ArtifactReasons; /* Bitfield: which signals triggered */
-        NMI_FINGERPRINT CurrentFp;
-        LONG EchoMatchSeq;
-
-        /* C89: All variable declarations at block start */
-        Interruptibility = VmxRead(VMCS_GUEST_INTERRUPTIBILITY);
-        ExitQual         = VmxRead(VMCS_EXIT_QUALIFICATION);
-        IdtVectoringInfo = VmxRead(VMCS_IDT_VECTORING_INFO);
-        CurrentFp.GuestRip = VmxRead(VMCS_GUEST_RIP);
-        CurrentFp.GuestRsp = VmxRead(VMCS_GUEST_RSP);
-        CpuIdx           = KeGetCurrentProcessorNumber();
-        NowTsc           = __rdtsc();
-        if (CpuIdx < 64) {
-            TotalNmi = InterlockedIncrement(&g_DiagNmiTotalCount[CpuIdx]);
-        } else {
-            static volatile LONG s_FallbackCount = 0;
-            TotalNmi = InterlockedIncrement(&s_FallbackCount);
-        }
-        IsArtifact       = FALSE;
-        ArtifactReasons  = 0;
-        EchoMatchSeq    = -1;
-
-        /* Log first 5 NMIs with full diagnostic detail */
-        if (TotalNmi <= 5) {
-            LOG_INFO("NMI #%d cpu=%u intinfo=0x%llX qual=0x%llX "
-                     "idt_vec=0x%llX intr=0x%llX blocked=%u "
-                     "rip=0x%llX rsp=0x%llX tsc=%lld hash=0x%llX",
-                     (int)TotalNmi, CpuIdx, IntInfo, ExitQual,
-                     IdtVectoringInfo, Interruptibility,
-                     (ULONG)((Interruptibility >> 3) & 1),
-                     CurrentFp.GuestRip, CurrentFp.GuestRsp,
-                     NowTsc, NmiComputeHash(&CurrentFp));
-        }
-
-        /* ====================================================================
-         * NESTED VIRT NMI SUPPRESSION
-         *
-         * In nested virtualization (VMware, KVM, etc.), NMI VM-Exits are
-         * almost always artifacts of the L0 ↔ L1 interaction:
-         *
-         *   L1 injects NMI → L0 re-delivers as VM-Exit → L1 injects again
-         *   → infinite loop → both vCPUs consumed → VM freeze
-         *
-         * The discrimination signals (A-D) and rate limiter are insufficient
-         * because even allowing a FEW NMI reinjections per second creates
-         * thousands of VM-Exits (each injection echoes back), and the
-         * cumulative L1→L0→L1 round-trip overhead freezes the VM.
-         *
-         * Real hardware NMIs (ECC errors, watchdog, etc.) are handled by
-         * L0 (VMware/KVM) directly — they never reach L1 as VM-Exits.
-         * NMIs that DO reach our L1 handler are exclusively:
-         *   - Echo bounces from our own injections
-         *   - Virtual NMIs generated by L0 for internal bookkeeping
-         *   - IRET-unblocking artifacts
-         *
-         * Fix: When running under an outer hypervisor, drop ALL NMIs
-         * unconditionally.  Zero injections = zero echoes = zero storms.
-         * ==================================================================== */
-        if (g_OuterHypervisorPresent) {
-            if (CpuIdx < 64) {
-                InterlockedIncrement(&g_DiagNmiDroppedCount[CpuIdx]);
-            }
-
-            if (TotalNmi <= 5 || (TotalNmi % 10000 == 0)) {
-                LOG_WARN("NMI NESTED-DROP CPU%u #%d: rip=0x%llX (outer HV present, all NMIs suppressed)",
-                         CpuIdx, (int)TotalNmi, CurrentFp.GuestRip);
-            }
-            return TRUE;  /* Drop — do NOT reinject */
-        }
-
-        /* ====================================================================
-         * DISCRIMINATION PHASE: Determine if this NMI is real or artifact
-         * ==================================================================== */
-
-        /*
-         * SIGNAL A — Echo Match via Hash Map Lookup
-         *
-         * Search all per-CPU slots for a pending injection whose fingerprint
-         * correlates with the current NMI (RIP proximity + TSC window).
-         * If found: this NMI IS the echo of our own injection → artifact.
-         *
-         * Key advantage over naive boolean flag:
-         *   Independent NMIs from L0 do NOT consume a pending slot — only
-         *   true echoes (matching RIP+TSC) are accepted as matches.
-         */
-        if (NmiLookupEcho(CpuIdx, &CurrentFp, NowTsc, &EchoMatchSeq)) {
-            IsArtifact = TRUE;
-            ArtifactReasons |= 0x01;  /* bit 0 = Signal A */
-            LOG_WARN("NMI ARTIFACT [A-echo-match] CPU%u #%d: seq=%d",
-                     CpuIdx, (int)TotalNmi, (int)EchoMatchSeq);
-        }
-
-        /*
-         * SIGNAL B — Exit Qualification bit 11 (NMI-unblocking due to IRET)
-         *
-         * Intel SDM Table 27-3, EXIT_QUALIFICATION for Exception/NMI:
-         *   bit 11 = NMI-unblocking due to IRET
-         * When set: Guest executed IRET which cleared NMI blocking → CPU
-         * delivers the deferred/pending NMI. This is NOT a new hardware event.
-         * In nested virtualization, L0 may generate these spuriously.
-         */
-        if (!IsArtifact && (ExitQual & (1ULL << 11))) {
-            IsArtifact = TRUE;
-            ArtifactReasons |= 0x02;  /* bit 1 = Signal B */
-            LOG_WARN("NMI ARTIFACT [B-IRET-unblock] CPU%u #%d: qual=0x%llX",
-                     CpuIdx, (int)TotalNmi, ExitQual);
-        }
-
-        /*
-         * SIGNAL C — IDT Vectoring Info during NMI exit
-         *
-         * Intel SDM 26.6.1: If VMCS field IDT_VECTORING_INFO has VALID bit
-         * set when NMI exits, it means the CPU was already delivering an
-         * event (exception/interrupt) through IDT when NMI occurred.
-         * Real hardware NMIs don't typically arrive during IDT delivery.
-         * In nested virt, indicates L0's virtual NMI injection colliding
-         * with another L0-injected event.
-         */
-        if (!IsArtifact && (IdtVectoringInfo & INTERRUPT_INFO_VALID)) {
-            IsArtifact = TRUE;
-            ArtifactReasons |= 0x04;  /* bit 2 = Signal C */
-            LOG_WARN("NMI ARTIFACT [C-IDT-vectoring] CPU%u #%d: idt_vec=0x%llX",
-                     CpuIdx, (int)TotalNmi, IdtVectoringInfo);
-        }
-
-        /*
-         * SIGNAL D — Guest RIP Stasis Detection (with grace-period guard)
-         *
-         * After injecting NMI, Guest should enter KiNmiInterrupt and execute
-         * thousands of instructions before returning. If Guest RIP hasn't
-         * advanced beyond the last known RIP (within ±128 bytes), Guest made
-         * no progress since last NMI — likely trapped in injection loop.
-         *
-         * FIX v2: Grace-period guard to protect real HW NMIs that arrive
-         * during active injection windows.
-         *
-         * Problem: If we inject NMI at RIP=X, then a genuine HW NMI fires
-         * before Guest executes much code (Guest still near RIP=X), the old
-         * Signal D would kill this real HW NMI as "stasis" artifact.
-         *
-         * Fix: Require a minimum time gap (NMI_D_GRACE_PERIOD_TSC cycles,
-         * ~100us @3GHz) between our last injection timestamp and now. If the
-         * NMI arrived too quickly after injection, it's almost certainly a
-         * real hardware event (echoes need at least one VM-Entry/VM-Exit
-         * round-trip which takes longer), so we skip Signal D entirely
-         * to avoid false positive on legitimate HW NMIs.
-         */
-#define NMI_D_GRACE_PERIOD_TSC    300000  /* ~100us @3GHz: min time before D activates */
-        if (!IsArtifact && CpuIdx < 64 &&
-            g_DiagNmiLastGuestRipAfterNmi[CpuIdx] != 0) {
-            LONG64 TimeSinceLastInject = NowTsc - g_DiagNmiTimestamp[CpuIdx];
-            if (TimeSinceLastInject > (LONG64)NMI_D_GRACE_PERIOD_TSC) {
-                /* Grace period elapsed: safe to check RIP stasis */
-                LONG64 RipDelta = (LONG64)(CurrentFp.GuestRip -
-                                  g_DiagNmiLastGuestRipAfterNmi[CpuIdx]);
-                if (RipDelta > -NMI_RIP_STASIS_THRESHOLD &&
-                    RipDelta <  NMI_RIP_STASIS_THRESHOLD) {
-                    IsArtifact = TRUE;
-                    ArtifactReasons |= 0x08;  /* bit 3 = Signal D */
-                    LOG_WARN("NMI ARTIFACT [D-RIP-stasis] CPU%u #%d: "
-                             "rip=0x%llX last=0x%llX delta=%lld tsc_since=%lld",
-                             CpuIdx, (int)TotalNmi, CurrentFp.GuestRip,
-                             g_DiagNmiLastGuestRipAfterNmi[CpuIdx], RipDelta,
-                             TimeSinceLastInject);
-                }
-            } else if (TotalNmi <= 30 || (TotalNmi % 500 == 0)) {
-                /*
-                 * DIAGNOSTIC v2: Log when Signal D is skipped by grace period.
-                 * This proves Fix #3 is working — a real HW NMI arrived during
-                 * the active injection window and was protected from D's
-                 * stasis false-positive.
-                 */
-                LOG_WARN("NMI SIGNAL-D [grace-skip] CPU%u #%d: "
-                         "tsc_since=%lld < threshold=%ld rip=0x%llX",
-                         CpuIdx, (int)TotalNmi, TimeSinceLastInject,
-                         (LONG)NMI_D_GRACE_PERIOD_TSC, CurrentFp.GuestRip);
-            }
-        }
-
-        /* ====================================================================
-         * DECISION PHASE
-         * ==================================================================== */
-
-        if (IsArtifact) {
-            /* PROVEN ARTIFECT: Drop silently, do NOT reinject */
-            if (CpuIdx < 64) {
-                InterlockedIncrement(&g_DiagNmiDroppedCount[CpuIdx]);
-                g_DiagNmiTimestamp[CpuIdx] = NowTsc;
-            }
-
-            if (TotalNmi <= 30 || (TotalNmi % 1000 == 0)) {
-                LOG_WARN("NMI DROP CPU%u #%d: reasons=0x%X dropped=%d",
-                         CpuIdx, (int)TotalNmi, (unsigned)ArtifactReasons,
-                         CpuIdx < 64 ? g_DiagNmiDroppedCount[CpuIdx] : 0);
-            }
-            return TRUE;  /* Resume without reinjection */
-        }
-
-        /*
-         * REAL HARDWARE NMI:
-         * None of the artifact signals fired → treat as legitimate hardware
-         * NMI and forward to Guest OS (KiNmiInterrupt handles ECC errors,
-         * watchdog events, etc.)
-         *
-         * DIAGNOSTIC v2: Log the forward decision with full context.
-         * This is the critical path — proves real NMIs are not being
-         * silently dropped by our discriminator. Search for this tag
-         * in WinDbg output to count how many HW NMIs reach Guest OS.
-         */
-        LOG_INFO("NMI [REAL-HW-FORWARD] CPU%u #%d: rip=0x%llX rsp=0x%llX tsc=%lld "
-                 "(all 4 signals negative → injecting to Guest)",
-                 CpuIdx, (int)TotalNmi,
-                 CurrentFp.GuestRip, CurrentFp.GuestRsp, NowTsc);
-
-        /* Update tracking state before injection */
-        if (CpuIdx < 64) {
-            g_DiagNmiTimestamp[CpuIdx] = NowTsc;
-            g_DiagNmiLastGuestRipAfterNmi[CpuIdx] = CurrentFp.GuestRip;
-        }
+        /* Bare metal: always reinject NMI to Guest */
+        ULONG64 Interruptibility = VmxRead(VMCS_GUEST_INTERRUPTIBILITY);
 
         if (!(Interruptibility & (1ULL << 3))) {
-            /* Not blocked by NMI: safe to inject immediately.
-             * Record fingerprint in map BEFORE writing ENTRY_INT_INFO so
-             * the echo can be correlated on next NMI exit. */
-            NmiRecordInjection(CpuIdx, &CurrentFp, NowTsc);
-
-            LOG_INFO("NMI INJECT CPU%u #%d: rip=0x%llX rsp=0x%llX tsc=%lld",
-                     CpuIdx, (int)TotalNmi,
-                     CurrentFp.GuestRip, CurrentFp.GuestRsp, NowTsc);
-
+            /* Not blocked by NMI — inject immediately */
             VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
                      INTERRUPT_INFO_VALID |
                      (INTERRUPT_TYPE_NMI << INTERRUPT_INFO_TYPE_SHIFT) |
                      2);  /* NMI vector */
         } else {
-            /* Blocked by NMI: request NMI-window exiting for deferred injection */
+            /* Blocked by NMI — defer via NMI-window exiting */
             ULONG64 ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
             ProcBased |= PROC_BASED_NMI_WINDOW_EXIT;
             VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
 
-            /*
-             * DIAGNOSTIC v2: Log deferred injection request.
-             * The actual injection will happen in EXIT_REASON_NMI_WINDOW handler
-             * which now also calls NmiRecordInjection and logs there.
-             * This log helps correlate: NMI INJECT[deferred] → NMI-WINDOW exit
-             * → NMI INJECT[deferred/window] with matching RIP/RSP.
-             */
-            LOG_INFO("NMI INJECT [deferred] CPU%u #%d: rip=0x%llX rsp=0x%llX tsc=%lld "
-                     "(waiting for NMI window)",
-                     CpuIdx, (int)TotalNmi,
-                     CurrentFp.GuestRip, CurrentFp.GuestRsp, NowTsc);
-
-            /* If Guest was in HLT state, wake it so NMI-window can fire */
-            {
-                ULONG64 ActivityState = VmxRead(VMCS_GUEST_ACTIVITY_STATE);
-                if (ActivityState == 1) {
-                    VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);
-                }
-            }
+            /* Wake from HLT if needed */
+            if (VmxRead(VMCS_GUEST_ACTIVITY_STATE) == 1)
+                VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);
         }
         return TRUE;
     }
@@ -1746,44 +1089,22 @@ static BOOLEAN HandleVmcall(PGUEST_CONTEXT Ctx)
     }
 
     /*
-     * Unknown VMCALL - not ours.
-     *
-     * Windows issues VMCALL for Hyper-V enlightenments (TLB flush,
-     * VP scheduling hints, etc.) when it detects a hypervisor via
-     * CPUID.  VMware/KVM also trigger this.  We must NOT inject #UD
-     * or the OS will crash (e.g. SwapContext uses VMCALL for TLB flush).
-     *
-     * FIX: Instead of blindly returning HV_STATUS_INVALID_HYPERCALL_CODE
-     * (0x0002) — which causes SwapContext to crash because TLB is not
-     * actually flushed — we now parse the Hyper-V hypercall input value
-     * in RCX and emulate the critical TLB flush hypercalls.
-     *
-     * For emulated calls: RAX = 0 (HV_STATUS_SUCCESS)
-     * For unknown calls:  RAX = 2 (HV_STATUS_INVALID_HYPERCALL_CODE)
+     * Unknown VMCALL — not ours.
+     * On bare metal, CPUID reports "Hv#0" (non-conformant), so Windows
+     * should not issue VMCALLs for enlightenments. Inject #UD.
      */
     {
-        static volatile LONG s_VmcallLogCount = 0;
-        LONG Count = InterlockedIncrement(&s_VmcallLogCount);
-        if (Count <= 20) {
-            ULONG64 GuestRip = VmxRead(VMCS_GUEST_RIP);
-            VMXROOT_LOG_INFO("VMCALL[%d]: RAX=0x%llX RCX=0x%llX "
-                     "callcode=%u RDX=0x%llX R8=0x%llX RIP=0x%llX CPU=%u",
-                     (int)Count, Rax, Ctx->Rcx,
-                     (ULONG)(Ctx->Rcx & 0xFFFF),
-                     Ctx->Rdx, Ctx->R8, GuestRip,
-                     KeGetCurrentProcessorNumber());
-        }
-        Ctx->Rax = HvEmulateHypercall(Ctx->Rcx, Ctx->Rdx, Ctx->R8);
-        
-        /* Log if hypercall returned error (might indicate problematic call) */
-        if (Ctx->Rax != 0 && Count <= 20) {
-            LOG_WARN("VMCALL[%d] RETURNED ERROR: status=0x%llX "
-                     "callcode=%u",
-                     (int)Count, Ctx->Rax,
-                     (ULONG)(Ctx->Rcx & 0xFFFF));
+        static volatile LONG s_UnknownVmcallCount = 0;
+        LONG Count = InterlockedIncrement(&s_UnknownVmcallCount);
+        if (Count <= 10) {
+            VMXROOT_LOG_WARN("Unknown VMCALL: RAX=0x%llX RCX=0x%llX RIP=0x%llX",
+                             Rax, Ctx->Rcx, VmxRead(VMCS_GUEST_RIP));
         }
     }
-    VmxAdvanceGuestRip();
+    VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+             INTERRUPT_INFO_VALID |
+             (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) |
+             6);  /* #UD */
     return TRUE;
 }
 

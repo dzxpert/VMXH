@@ -10,7 +10,6 @@
 #include "svm.h"
 #include "npt.h"
 #include "vmx.h"        /* For VMCALL_MAGIC_SHUTDOWN */
-#include "hv_hypercall.h"
 #include "log.h"
 #include "process.h"
 #include "anti_anti_debug.h"
@@ -615,22 +614,16 @@ static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
         }
     }
 
-    /*
-     * Unknown VMMCALL - not ours.
-     *
-     * Windows issues VMMCALL for Hyper-V enlightenments (TLB flush,
-     * VP scheduling hints, etc.) when it detects a hypervisor via CPUID.
-     * VMware/KVM also trigger this.  We must NOT inject #UD.
-     *
-     * FIX: Instead of blindly returning HV_STATUS_INVALID_HYPERCALL_CODE
-     * (0x0002) — which causes SwapContext to crash because TLB is not
-     * actually flushed — we now parse the Hyper-V hypercall input value
-     * in RCX and emulate the critical TLB flush hypercalls.
-     *
-     * For emulated calls: RAX = 0 (HV_STATUS_SUCCESS)
-     * For unknown calls:  RAX = 2 (HV_STATUS_INVALID_HYPERCALL_CODE)
-     */
-    Ctx->Rax = HvEmulateHypercall(Ctx->Rcx, Ctx->Rdx, Ctx->R8);
+    /* Unknown VMMCALL — inject #UD */
+    {
+        static volatile LONG s_UnknownVmmcallCount = 0;
+        LONG Count = InterlockedIncrement(&s_UnknownVmmcallCount);
+        if (Count <= 10) {
+            VMXROOT_LOG_WARN("Unknown VMMCALL: RAX=0x%llX RCX=0x%llX",
+                             Ctx->Rax, Ctx->Rcx);
+        }
+    }
+    HvInjectException(6, INTERRUPT_TYPE_HARDWARE_EXCEPTION, FALSE, 0);
     HvAdvanceGuestRip();
     return TRUE;
 }

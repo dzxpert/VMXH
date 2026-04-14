@@ -460,10 +460,6 @@ typedef struct _SVM_CPU_CONTEXT {
     /* Original EFER value (for restoration) */
     ULONG64         OriginalEfer;
 
-    /* Enlightened VMCB (nested mode only) */
-    PVOID           PartitionAssistPageVa;
-    ULONG64         PartitionAssistPagePa;
-
 } SVM_CPU_CONTEXT, *PSVM_CPU_CONTEXT;
 
 /* ========================================================================= */

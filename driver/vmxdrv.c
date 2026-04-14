@@ -7,7 +7,6 @@
 #include "svm.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
-#include "hv_hypercall.h"
 #include "hv_mem.h"
 #include "hv_hook.h"
 #include "ssdt.h"
@@ -100,7 +99,7 @@ NTSTATUS DriverEntry(
     LogInitialize();
     /* Start the flush thread to relay VMX root mode ring buffer logs to WinDbg */
     LogFlushThreadStart();
-    LOG_INFO("VMX Anti-Anti-Debug Driver loading... [BUILD 20260411-v2 hv_hypercall]");
+    LOG_INFO("VMX Anti-Anti-Debug Driver loading... [BUILD 20260414-bare-metal]");
 
     /* Detect active processor count early (used for all per-CPU allocations) */
     g_MaxProcessors = KeQueryActiveProcessorCount(NULL);
@@ -122,15 +121,6 @@ NTSTATUS DriverEntry(
 
     /* Detect CPU vendor and select hypervisor backend */
     g_CpuVendor = HvDetectCpuVendor();
-
-    /* Check if we're inside Hyper-V (nested virtualization) */
-    HvDetectNestedMode();
-    if (g_IsNestedMode) {
-        LOG_INFO("Hyper-V detected — using enlightened interface for nested operation");
-    }
-    if (g_OuterHypervisorPresent) {
-        LOG_INFO("Outer hypervisor present — VMCALL/VMMCALL hypercall emulation active");
-    }
 
     switch (g_CpuVendor) {
     case CPU_VENDOR_INTEL:

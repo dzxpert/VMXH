@@ -44,42 +44,4 @@ BOOLEAN HvCheckNptSupport(VOID);
 ULONG HvGetSvmRevision(VOID);
 ULONG HvGetMaxAsid(VOID);
 
-/* ========================================================================= */
-/*  Hyper-V / Outer Hypervisor Detection                                     */
-/* ========================================================================= */
-
-/*
- * TRUE if running under Hyper-V as a nested hypervisor (enlightened VMCS).
- * Set once during DriverEntry and never changed.
- *
- * Note: This is TRUE only for Hyper-V (which supports Enlightened VMCS).
- * For VMware/KVM/unknown hypervisors, g_IsNestedMode = FALSE but
- * g_OuterHypervisorPresent = TRUE (see hv_hypercall.h).
- */
-extern BOOLEAN g_IsNestedMode;
-
-/*
- * Maximum CPUID leaf supported by the Hyper-V interface (0x4000000x range).
- * Only valid when g_IsNestedMode == TRUE.
- */
-extern ULONG g_HypervisorMaxLeaf;
-
-/*
- * Detect if we are running inside an outer hypervisor.
- *
- * Checks CPUID.1:ECX[31] (Hypervisor Present) and identifies the outer
- * hypervisor via the vendor string at leaf 0x40000000:
- *   - "Microsoft Hv" → Hyper-V (sets g_IsNestedMode = TRUE)
- *   - "VMwareVMware" → VMware Workstation/ESXi
- *   - "KVMKVMKVM"    → Linux KVM
- *   - Other          → Unknown hypervisor
- *
- * If ANY hypervisor is detected, sets g_OuterHypervisorPresent = TRUE
- * (in hv_hypercall.h), which triggers Hyper-V hypercall emulation in
- * the VMCALL/VMMCALL handlers.
- *
- * Returns TRUE only if Hyper-V (enlightened VMCS) is detected.
- */
-BOOLEAN HvDetectNestedMode(VOID);
-
 #endif /* _HV_DETECT_H_ */

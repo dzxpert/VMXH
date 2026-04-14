@@ -8,7 +8,6 @@
 #include "ept.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
-#include "hv_hypercall.h"
 #include "log.h"
 #include "../common/shared.h"
 #include <ntstrsafe.h>
@@ -665,59 +664,25 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
          * EAX = Maximum hypervisor CPUID leaf
          * EBX/ECX/EDX = Hypervisor vendor signature.
          *
-         * CRITICAL DESIGN: Split behavior based on outer hypervisor presence.
-         *
-         * NESTED MODE (g_OuterHypervisorPresent == TRUE):
-         *   Windows already saw CPUID.1:ECX[31]=1 at boot and cached the
-         *   decision to use VMCALL enlightenments (SwapContext TLB flush, etc.).
-         *   We MUST report "Microsoft Hv" + "Hv#1" so Windows's cached decision
-         *   remains consistent. The hypercalls are emulated in hv_hypercall.c.
-         *
-         * BARE METAL (g_OuterHypervisorPresent == FALSE):
-         *   Windows booted without seeing any hypervisor. It never cached
-         *   VMCALL enlightenment decisions. We return "Hv#0" (non-conformant)
-         *   to prevent Windows from trying to use Hyper-V Synthetic MSRs
-         *   (0x40000100+) which don't exist on real hardware and would cause
-         *   #GP in VMX root mode.
-         *
-         * This dual-mode approach is the safest:
-         * - Nested: maintains compatibility with already-cached VMCALL paths
-         * - Bare metal: prevents BSOD 0x1AA from Synthetic MSR writes
+         * Report "Microsoft Hv" as vendor string (Windows expects this format),
+         * with max leaf = 0x40000001 (minimal). Leaf 0x40000001 returns "Hv#0"
+         * (non-conformant) so Windows will NOT use VMCALL enlightenments.
          */
-        if (g_OuterHypervisorPresent) {
-            /* Nested mode: maintain Microsoft Hv compatibility */
-            CpuInfo[0] = 0x40000006;   /* Max leaf = 0x40000006 (standard range) */
-            CpuInfo[1] = 0x7263694D;   /* "Micr" */
-            CpuInfo[2] = 0x666F736F;   /* "osof" */
-            CpuInfo[3] = 0x76482074;   /* "t Hv" */
-        } else {
-            /* Bare metal: don't claim Microsoft Hv conformance */
-            CpuInfo[0] = 0x40000001;   /* Max leaf = 0x40000001 (minimal) */
-            CpuInfo[1] = 0x7263694D;   /* "Micr" */
-            CpuInfo[2] = 0x666F736F;   /* "osof" */
-            CpuInfo[3] = 0x76482074;   /* "t Hv" */
-        }
+        CpuInfo[0] = 0x40000001;   /* Max leaf = 0x40000001 (minimal) */
+        CpuInfo[1] = 0x7263694D;   /* "Micr" */
+        CpuInfo[2] = 0x666F736F;   /* "osof" */
+        CpuInfo[3] = 0x76482074;   /* "t Hv" */
     }
     else if (Leaf == 0x40000001) {
         /*
          * Hypervisor interface identification.
          *
-         * NESTED MODE: "Hv#1" = standard Hyper-V interface.
-         *   Windows uses the standard VMCALL-based hypercall ABI, which we
-         *   emulate in hv_hypercall.c. This is required because Windows has
-         *   already compiled VMCALL into kernel hot paths.
-         *
-         * BARE METAL: "Hv#0" = non-conformant interface.
-         *   Tells Windows we do NOT conform to the Microsoft Hv interface.
-         *   Windows will NOT attempt to use Hyper-V Synthetic MSRs or SynIC,
-         *   preventing BSOD from writes to non-existent MSRs 0x40000100+.
-         *   Similar to HyperDbg's approach ("Hv#0").
+         * "Hv#0" = non-conformant interface.
+         * Tells Windows we do NOT conform to the Microsoft Hv interface.
+         * Windows will NOT attempt to use Hyper-V Synthetic MSRs or SynIC,
+         * preventing BSOD from writes to non-existent MSRs 0x40000100+.
          */
-        if (g_OuterHypervisorPresent) {
-            CpuInfo[0] = 0x31237648;   /* "Hv#1" — Microsoft Hv conformant */
-        } else {
-            CpuInfo[0] = 0x30237648;   /* "Hv#0" — NOT conformant */
-        }
+        CpuInfo[0] = 0x30237648;   /* "Hv#0" — NOT conformant */
         CpuInfo[1] = 0;
         CpuInfo[2] = 0;
         CpuInfo[3] = 0;
@@ -735,40 +700,9 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
     else if (Leaf == 0x40000003) {
         /*
          * Leaf 0x40000003: HV_X64_CPUID_FEATURES (Partition Privilege Flags).
-         *
-         * This tells Windows which Hyper-V enlightenments we support.
-         * In nested mode (g_OuterHypervisorPresent), we MUST advertise
-         * the features that Windows already cached at boot time, otherwise
-         * Windows may hang when it re-queries features and finds them
-         * missing (inconsistent with cached decisions).
-         *
-         * EAX = Partition Privileges (low 32 bits):
-         *   Bit 0:  AccessVpRunTimeReg       — VP runtime MSR
-         *   Bit 1:  AccessPartitionReferenceCounter — reference TSC
-         *   Bit 2:  AccessSynicRegs          — SynIC MSRs (SCONTROL, SIEFP, etc.)
-         *   Bit 3:  AccessSyntheticTimerRegs — Synthetic Timer MSRs (0x400000B0+)
-         *   Bit 4:  AccessIntrCtrlRegs       — APIC MSRs
-         *   Bit 5:  AccessHypercallMsrs      — Hypercall page MSR
-         *   Bit 9:  AccessVpIndex            — VP_INDEX MSR
-         *
-         * EDX = Miscellaneous features:
-         *   Bit 3:  available (AccessFrequencyRegs)
-         *
-         * We advertise ONLY the minimal set that Windows requires for
-         * the enlightenments it already uses. All the corresponding
-         * MSR reads/writes are absorbed in msr.c (silently return 0
-         * or absorb writes).
+         * Return zeros — no enlightenments advertised ("Hv#0" = non-conformant).
          */
-        if (g_OuterHypervisorPresent) {
-            CpuInfo[0] = (1 << 0)   /* AccessVpRunTimeReg */
-                       | (1 << 1)   /* AccessPartitionReferenceCounter */
-                       | (1 << 2)   /* AccessSynicRegs */
-                       | (1 << 3)   /* AccessSyntheticTimerRegs */
-                       | (1 << 5)   /* AccessHypercallMsrs */
-                       | (1 << 9);  /* AccessVpIndex */
-        } else {
-            CpuInfo[0] = 0;   /* Bare metal: no enlightenments */
-        }
+        CpuInfo[0] = 0;
         CpuInfo[1] = 0;
         CpuInfo[2] = 0;
         CpuInfo[3] = 0;
@@ -776,25 +710,9 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
     else if (Leaf == 0x40000004) {
         /*
          * Leaf 0x40000004: Implementation Recommendations.
-         *
-         * Bit 0: HvRecommendRelaxedTiming — recommend relaxed timing
-         * Bit 1: HvRecommendDmaRemapping — recommend DMA remapping
-         * Bit 3: HvRecommendUsingHypercallsForTlbFlush
-         * Bit 6: HvRecommendUsingHypercallsForLocalTlbFlush
-         * Bit 7: HvRecommendUsingHypercallsForRemoteTlbFlush
-         * Bit 11: HvRecommendUsingSpinlockAwarenessInterface
-         *
-         * We recommend TLB flush via hypercalls (which we emulate in
-         * hv_hypercall.c) to keep Windows using the paths it cached.
+         * Return zeros — no recommendations (non-conformant interface).
          */
-        if (g_OuterHypervisorPresent) {
-            CpuInfo[0] = (1 << 0)    /* RelaxedTiming */
-                       | (1 << 3)    /* TlbFlushHypercalls */
-                       | (1 << 6)    /* LocalTlbFlushHypercalls */
-                       | (1 << 7);   /* RemoteTlbFlushHypercalls */
-        } else {
-            CpuInfo[0] = 0;
-        }
+        CpuInfo[0] = 0;
         CpuInfo[1] = 0;
         CpuInfo[2] = 0;
         CpuInfo[3] = 0;
@@ -810,9 +728,8 @@ BOOLEAN AadHandleCpuid(PGUEST_CONTEXT GuestContext)
         CpuInfo[3] = 0;
     }
 
-    /* Additional spoofing for target processes with anti-anti-debug enabled.
-     * In nested mode, skip to avoid interfering with Hyper-V's own leaves. */
-    if (!g_IsNestedMode && IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
+    /* Additional spoofing for target processes with anti-anti-debug enabled. */
+    if (IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)) {
         /* Leaf 1 and 0x40000000+ already handled above for all processes.
          * Additional per-target spoofing can go here if needed. */
     }

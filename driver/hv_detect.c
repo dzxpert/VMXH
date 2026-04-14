@@ -4,7 +4,6 @@
  */
 
 #include "hv_detect.h"
-#include "hv_hypercall.h"
 #include "log.h"
 
 /* ========================================================================= */
@@ -178,103 +177,4 @@ ULONG HvGetMaxAsid(VOID)
     int CpuInfo[4];
     __cpuid(CpuInfo, SVM_CPUID_FUNC);
     return (ULONG)CpuInfo[1];  /* EBX = number of ASIDs */
-}
-
-/* ========================================================================= */
-/*  Hyper-V / Outer Hypervisor Detection                                     */
-/* ========================================================================= */
-
-BOOLEAN   g_IsNestedMode = FALSE;
-ULONG     g_HypervisorMaxLeaf = 0;
-
-BOOLEAN HvDetectNestedMode(VOID)
-{
-    int CpuInfo[4];
-
-    /*
-     * Step 1: Check CPUID.1:ECX[31] — Hypervisor Present bit.
-     * If clear, we are running on bare metal (or a hypervisor that
-     * doesn't set this bit). Either way, no nested mode.
-     */
-    __cpuid(CpuInfo, 1);
-    if (!(CpuInfo[2] & (1 << 31))) {
-        LOG_INFO("No hypervisor present (CPUID.1:ECX[31] = 0)");
-        g_OuterHypervisor = OUTER_HV_NONE;
-        g_OuterHypervisorPresent = FALSE;
-        return FALSE;
-    }
-
-    /*
-     * A hypervisor IS present. Record this fact immediately.
-     * Windows has already seen this bit at boot and may have compiled
-     * VMCALL enlightenments into kernel hot paths (SwapContext, etc.).
-     */
-    g_OuterHypervisorPresent = TRUE;
-    LOG_INFO("Hypervisor present (CPUID.1:ECX[31] = 1)");
-
-    /*
-     * Step 2: Identify the outer hypervisor via leaf 0x40000000.
-     * EAX = max hypervisor leaf
-     * EBX:ECX:EDX = vendor signature string (12 bytes, little-endian)
-     */
-    __cpuid(CpuInfo, 0x40000000);
-    g_HypervisorMaxLeaf = (ULONG)CpuInfo[0];
-
-    /* Check for Microsoft Hyper-V: "Microsoft Hv" */
-    if (CpuInfo[1] == 0x7263694D &&   /* "Micr" */
-        CpuInfo[2] == 0x666F736F &&   /* "osof" */
-        CpuInfo[3] == 0x76482074) {   /* "t Hv" */
-
-        g_OuterHypervisor = OUTER_HV_HYPERV;
-        g_IsNestedMode = TRUE;
-        LOG_INFO("Microsoft Hyper-V detected, max leaf: 0x%08X", g_HypervisorMaxLeaf);
-
-        /* Log nested virtualization enlightenments (informational) */
-        if (g_HypervisorMaxLeaf >= 0x4000000A) {
-            __cpuid(CpuInfo, 0x4000000A);
-            LOG_INFO("Nested virt enlightenments (leaf 0x4000000A): EAX=0x%08X",
-                     CpuInfo[0]);
-            if (CpuInfo[0] & (1 << 0)) {
-                LOG_INFO("  Enlightened VMCS supported");
-            }
-            if (CpuInfo[0] & (1 << 1)) {
-                LOG_INFO("  Direct virtual flush supported");
-            }
-        }
-
-        LOG_INFO("Running under Hyper-V — nested mode enabled");
-        return TRUE;
-    }
-
-    /* Check for VMware: "VMwareVMware" */
-    if (CpuInfo[1] == 0x61774D56 &&   /* "VMwa" */
-        CpuInfo[2] == 0x4D566572 &&   /* "reVM" */
-        CpuInfo[3] == 0x65726177) {   /* "ware" */
-
-        g_OuterHypervisor = OUTER_HV_VMWARE;
-        /* VMware does NOT support enlightened VMCS, so g_IsNestedMode stays FALSE.
-         * But g_OuterHypervisorPresent is TRUE — this triggers hypercall emulation. */
-        LOG_INFO("VMware detected (CPUID.40000000 = 'VMwareVMware'), max leaf: 0x%08X",
-                 g_HypervisorMaxLeaf);
-        LOG_INFO("VMware nested mode: hypercall emulation enabled, enlightened VMCS disabled");
-        return FALSE;   /* No enlightened VMCS for VMware */
-    }
-
-    /* Check for KVM: "KVMKVMKVM\0\0\0" */
-    if (CpuInfo[1] == 0x4B564D4B &&   /* "KVMK" */
-        CpuInfo[2] == 0x564D4B56 &&   /* "VMKV" */
-        (CpuInfo[3] & 0x00FFFFFF) == 0x004D564B) {  /* "KVM\0" - partial match */
-
-        g_OuterHypervisor = OUTER_HV_KVM;
-        LOG_INFO("KVM detected, max leaf: 0x%08X", g_HypervisorMaxLeaf);
-        LOG_INFO("KVM nested mode: hypercall emulation enabled, enlightened VMCS disabled");
-        return FALSE;   /* No enlightened VMCS for KVM */
-    }
-
-    /* Unknown hypervisor — still need hypercall emulation */
-    g_OuterHypervisor = OUTER_HV_UNKNOWN;
-    LOG_INFO("Unknown hypervisor present (EBX=0x%08X ECX=0x%08X EDX=0x%08X), max leaf: 0x%08X",
-             CpuInfo[1], CpuInfo[2], CpuInfo[3], g_HypervisorMaxLeaf);
-    LOG_INFO("Hypercall emulation enabled for unknown outer hypervisor");
-    return FALSE;   /* No enlightened VMCS for unknown hypervisor */
 }

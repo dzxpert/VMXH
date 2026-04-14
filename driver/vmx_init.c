@@ -8,7 +8,6 @@
 #include "log.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
-#include "hv_hypercall.h"
 
 /* ========================================================================= */
 /*  Forward Declarations                                                     */
@@ -207,8 +206,7 @@ static NTSTATUS VmxAllocateCpuContext(PVMX_CPU_CONTEXT CpuCtx, ULONG VmcsRevisio
     /* I/O Bitmaps A and B (4KB each, initialized to all zeros = no I/O VM-Exit).
      * When USE_IO_BITMAPS is enabled together with UNCONDITIONAL_IO_EXIT,
      * the bitmap takes precedence: only ports with bit=1 cause VM-Exit.
-     * All zeros = no I/O exits, effectively neutralizing the forced
-     * UNCONDITIONAL_IO_EXIT must-be-1 bit from VMware. */
+     * All zeros = no I/O exits. */
     CpuCtx->IoBitmapAVa = VmxAllocateAlignedMemory(PAGE_SIZE_4KB, &CpuCtx->IoBitmapAPa);
     if (!CpuCtx->IoBitmapAVa) {
         LOG_ERROR("Failed to allocate I/O bitmap A for CPU %u", CpuCtx->ProcessorNumber);
@@ -233,30 +231,6 @@ static NTSTATUS VmxAllocateCpuContext(PVMX_CPU_CONTEXT CpuCtx, ULONG VmcsRevisio
     }
     RtlZeroMemory(CpuCtx->HostStackBase, CpuCtx->HostStackSize);
 
-    /* Enlightened VMCS allocations (nested mode only) */
-    if (g_IsNestedMode) {
-        /* VP Assist Page (4KB, zeroed) */
-        CpuCtx->VpAssistPageVa = VmxAllocateAlignedMemory(
-            PAGE_SIZE_4KB, &CpuCtx->VpAssistPagePa);
-        if (!CpuCtx->VpAssistPageVa) {
-            LOG_ERROR("Failed to allocate VP Assist Page for CPU %u",
-                      CpuCtx->ProcessorNumber);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        /* Enlightened VMCS page (4KB, zeroed) */
-        CpuCtx->EvmcsVa = VmxAllocateAlignedMemory(
-            PAGE_SIZE_4KB, &CpuCtx->EvmcsPa);
-        if (!CpuCtx->EvmcsVa) {
-            LOG_ERROR("Failed to allocate Enlightened VMCS for CPU %u",
-                      CpuCtx->ProcessorNumber);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-
-        LOG_INFO("Enlightened VMCS allocated for CPU %u: eVMCS PA=0x%llX, VpAssist PA=0x%llX",
-                 CpuCtx->ProcessorNumber, CpuCtx->EvmcsPa, CpuCtx->VpAssistPagePa);
-    }
-
     return STATUS_SUCCESS;
 }
 
@@ -277,15 +251,6 @@ static VOID VmxFreeCpuContext(PVMX_CPU_CONTEXT CpuCtx)
     if (CpuCtx->HostStackBase) {
         ExFreePoolWithTag(CpuCtx->HostStackBase, VMX_TAG);
         CpuCtx->HostStackBase = NULL;
-    }
-    /* Enlightened VMCS resources (nested mode) */
-    if (CpuCtx->VpAssistPageVa) {
-        MmFreeContiguousMemory(CpuCtx->VpAssistPageVa);
-        CpuCtx->VpAssistPageVa = NULL;
-    }
-    if (CpuCtx->EvmcsVa) {
-        MmFreeContiguousMemory(CpuCtx->EvmcsVa);
-        CpuCtx->EvmcsVa = NULL;
     }
 }
 
@@ -385,29 +350,16 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     ULONG64     Rflags;
     NTSTATUS    Status;
 
-    /* Clear VMCS (skip in nested mode — eVMCS doesn't use VMCLEAR/VMPTRLD) */
-    if (!g_IsNestedMode) {
-        if (__vmx_vmclear(&CpuCtx->VmcsRegionPa) != 0) {
-            LOG_ERROR("VMCLEAR failed for CPU %u", CpuCtx->ProcessorNumber);
-            return STATUS_UNSUCCESSFUL;
-        }
+    /* Clear VMCS */
+    if (__vmx_vmclear(&CpuCtx->VmcsRegionPa) != 0) {
+        LOG_ERROR("VMCLEAR failed for CPU %u", CpuCtx->ProcessorNumber);
+        return STATUS_UNSUCCESSFUL;
+    }
 
-        /* Load VMCS */
-        if (__vmx_vmptrld(&CpuCtx->VmcsRegionPa) != 0) {
-            LOG_ERROR("VMPTRLD failed for CPU %u", CpuCtx->ProcessorNumber);
-            return STATUS_UNSUCCESSFUL;
-        }
-    } else {
-        /*
-         * In nested mode, the Enlightened VMCS is already active via
-         * VP Assist Page. All subsequent VmxWrite() calls go through
-         * EvmcsWrite() which writes directly into the eVMCS struct.
-         * Ensure all clean fields are cleared so L0 reads everything.
-         */
-        PHV_VMX_ENLIGHTENED_VMCS Evmcs = (PHV_VMX_ENLIGHTENED_VMCS)CpuCtx->EvmcsVa;
-        if (Evmcs) {
-            Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_NONE;
-        }
+    /* Load VMCS */
+    if (__vmx_vmptrld(&CpuCtx->VmcsRegionPa) != 0) {
+        LOG_ERROR("VMPTRLD failed for CPU %u", CpuCtx->ProcessorNumber);
+        return STATUS_UNSUCCESSFUL;
     }
 
     LOG_INFO("VmxSetupVmcs: starting on CPU %u", CpuCtx->ProcessorNumber);
@@ -435,63 +387,13 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
      * We do NOT request PIN_BASED_EXTERNAL_INT_EXIT — in a Blue Pill hypervisor,
      * external interrupts should be delivered directly to the Guest via Guest IDT.
      *
-     * HOWEVER: VmxAdjustControls may force EXTERNAL_INT_EXIT on due to must-be-1
-     * bits (common in VMware/Hyper-V nested virtualization). If that happens,
-     * we MUST also enable ACK_INT_ON_EXIT in the Exit Controls, otherwise:
-     *   - External interrupt → VM-Exit (interrupt NOT acknowledged)
-     *   - VMRESUME → interrupt still pending → immediate VM-Exit again
-     *   - Infinite loop → stack corruption → BSOD 0x1AA
-     *
-     * With ACK_INT_ON_EXIT: the interrupt is acknowledged during VM-Exit,
-     * the vector appears in EXIT_INTERRUPTION_INFO. We simply discard it
-     * (the LAPIC considers it handled; devices have timeout/retry mechanisms).
-     *
-     * NMI_EXIT: On bare metal, we request NMI_EXIT for WinDbg Ctrl+Break
-     * and proper NMI blocking semantics.
-     *
-     * BUG FIX: In nested virtualization (VMware, KVM, etc.), NMI_EXIT
-     * creates an infinite NMI reinjection loop:
-     *   L1 injects NMI → L0 re-delivers as VM-Exit → L1 injects again → ...
-     * Even dropping NMIs in the handler is insufficient because the VM-Exit
-     * round-trip overhead itself (Guest→Host→Guest in nested = L2→L1→L0→L1→L2)
-     * consumes 100% CPU, starving the Guest scheduler.
-     *
-     * Fix: Do NOT request NMI_EXIT when an outer hypervisor is present.
-     * NMIs will be delivered directly to Guest via Guest IDT (KiNmiInterrupt),
-     * generating zero VM-Exits.  WinDbg break-in still works because the
-     * kernel debugger stubs handle NMIs independently of VMX.
+     * NMI_EXIT: Requested for WinDbg Ctrl+Break support and proper NMI
+     * blocking semantics.
      */
-    {
-        ULONG RequestedPinBased = 0;
-
-        if (!g_OuterHypervisorPresent) {
-            RequestedPinBased |= PIN_BASED_NMI_EXIT;
-        } else {
-            LOG_INFO("CPU %u: NMI_EXIT disabled (outer hypervisor present — "
-                     "NMIs go directly to Guest IDT)",
-                     CpuCtx->ProcessorNumber);
-        }
-
-        PinBased = VmxAdjustControls(
-            RequestedPinBased,
-            State->TrueControlsSupported ? State->TruePinBasedCap : State->PinBasedCap
-        );
-    }
-
-    /* Detect if EXTERNAL_INT_EXIT was forced on by must-be-1 bits */
-    CpuCtx->ExternalIntExitForced = !!(PinBased & PIN_BASED_EXTERNAL_INT_EXIT);
-    if (CpuCtx->ExternalIntExitForced) {
-        LOG_WARN("CPU %u: PIN_BASED_EXTERNAL_INT_EXIT forced by must-be-1 bits! "
-                 "Will enable ACK_INT_ON_EXIT to prevent infinite VM-Exit loop.",
-                 CpuCtx->ProcessorNumber);
-    }
-
-    /* Detect if NMI_EXIT was forced on by must-be-1 bits despite not requesting it */
-    if (g_OuterHypervisorPresent && (PinBased & PIN_BASED_NMI_EXIT)) {
-        LOG_WARN("CPU %u: PIN_BASED_NMI_EXIT forced by must-be-1 bits in nested mode! "
-                 "NMI handler will suppress all NMIs to prevent reinjection storm.",
-                 CpuCtx->ProcessorNumber);
-    }
+    PinBased = VmxAdjustControls(
+        PIN_BASED_NMI_EXIT,
+        State->TrueControlsSupported ? State->TruePinBasedCap : State->PinBasedCap
+    );
 
     VmxWrite(VMCS_CTRL_PIN_BASED_VM_EXEC, PinBased);
 
@@ -499,24 +401,11 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     {
         ULONG RequestedProcBased =
             PROC_BASED_USE_MSR_BITMAPS |
-            PROC_BASED_USE_IO_BITMAPS |         /* I/O bitmap overrides UNCONDITIONAL_IO_EXIT:
-                                                 * when both are set, the bitmap controls which
-                                                 * ports trigger VM-Exit. All zeros = no I/O exits,
-                                                 * neutralizing the must-be-1 UNCONDITIONAL_IO_EXIT
-                                                 * forced by VMware in nested virtualization. */
+            PROC_BASED_USE_IO_BITMAPS |         /* I/O bitmap controls which ports trigger VM-Exit.
+                                                 * All zeros = no I/O exits. */
             PROC_BASED_SECONDARY_CONTROLS |
-            /* PROC_BASED_CR3_LOAD_EXIT |       -- DISABLED FOR TESTING: CR3 exit causes
-             *                                     extreme slowdown in nested VMware due to
-             *                                     high-frequency VM-Exits on every context
-             *                                     switch. Re-enable after confirming perf fix. */
-            /* PROC_BASED_MOV_DR_EXIT |         -- DISABLED FOR TESTING: DR access exits
-             *                                     cause extreme VM-Exit storm in nested VMware.
-             *                                     Windows kernel saves/restores DRx on EVERY
-             *                                     thread switch, generating thousands of exits
-             *                                     per second. In nested virt each exit costs
-             *                                     L1->L0->L1 round-trip = system freeze.
-             *                                     Only needed for anti-debug DR spoofing.
-             *                                     Re-enable after core VMX is stable. */
+            PROC_BASED_CR3_LOAD_EXIT |           /* Needed for process switch tracking */
+            PROC_BASED_MOV_DR_EXIT |             /* Needed for anti-debug DR spoofing */
             PROC_BASED_USE_TSC_OFFSETTING;      /* Use hardware TSC Offset (no VM-Exit) */
 
         ProcBased = VmxAdjustControls(
@@ -526,8 +415,6 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
         /*
          * DIAGNOSTIC: Log which bits were force-enabled by must-be-1 bits.
-         * This is critical for debugging VMware-nested hangs — VMware may
-         * force-enable UNCONDITIONAL_IO_EXIT, HLT_EXIT, MWAIT_EXIT, etc.
          */
         {
             ULONG ForcedBits = ProcBased & ~RequestedProcBased;
@@ -577,8 +464,6 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
         /*
          * DIAGNOSTIC: Log forced secondary proc-based bits.
-         * Critical for nested VMware: VMware may force-enable bits like
-         * DESC_TABLE_EXIT, WBINVD_EXIT, etc. via must-be-1 constraints.
          */
         {
             ULONG ForcedBits2 = ProcBased2 & ~RequestedProcBased2;
@@ -610,12 +495,9 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
     /* Exception Bitmap: no exceptions intercepted for now.
      *
-     * DISABLED FOR TESTING: #DB and #BP interception is only needed for
-     * anti-anti-debug exception normalization (AadHandleException).
-     * In nested VMware, every exception VM-Exit adds L1->L0->L1 overhead.
-     * With anti-debug features inactive, these exits serve no purpose.
-     * Re-enable (EXCEPTION_BITMAP_DB | EXCEPTION_BITMAP_BP) after core
-     * VMX is stable and anti-debug is being tested.
+     * #DB and #BP interception is only needed for anti-anti-debug exception
+     * normalization (AadHandleException). Enable (EXCEPTION_BITMAP_DB |
+     * EXCEPTION_BITMAP_BP) when anti-debug features are being tested.
      */
     VmxWrite(VMCS_CTRL_EXCEPTION_BITMAP, 0);
 
@@ -628,9 +510,7 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
 
     /* I/O Bitmaps A and B — physical addresses of the 4KB pages.
      * Both bitmaps are all zeros (set during allocation by VmxAllocateAlignedMemory),
-     * meaning no I/O port will trigger a VM-Exit.
-     * This effectively neutralizes the UNCONDITIONAL_IO_EXIT must-be-1 bit
-     * that VMware forces on in nested virtualization. */
+     * meaning no I/O port will trigger a VM-Exit. */
     VmxWrite(VMCS_CTRL_IO_BITMAP_A, CpuCtx->IoBitmapAPa);
     VmxWrite(VMCS_CTRL_IO_BITMAP_B, CpuCtx->IoBitmapBPa);
     LOG_INFO("CPU %u: I/O bitmaps configured (A PA=0x%llX, B PA=0x%llX) - all zeros, no I/O exits",
@@ -679,45 +559,10 @@ NTSTATUS VmxSetupVmcs(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     VmxWrite(VMCS_CTRL_TSC_OFFSET, 0);
 
     /* ===== VM-Exit Controls ===== */
-    /*
-     * ACK_INT_ON_EXIT handling:
-     *
-     * On bare metal (no outer hypervisor), PIN_BASED_EXTERNAL_INT_EXIT is NOT
-     * a must-be-1 bit, so external interrupts don't cause VM-Exit at all.
-     * In that case, ACK_INT_ON_EXIT is unnecessary.
-     *
-     * In nested virtualization (VMware, Hyper-V), PIN_BASED_EXTERNAL_INT_EXIT
-     * is typically must-be-1 (the outer hypervisor needs to intercept interrupts).
-     * If EXTERNAL_INT_EXIT is forced on, we MUST also set ACK_INT_ON_EXIT.
-     *
-     * Why? Without ACK_INT_ON_EXIT:
-     *   - External interrupt → VM-Exit (interrupt NOT acknowledged, still pending)
-     *   - VMRESUME → interrupt still pending → immediate VM-Exit again
-     *   - Infinite VM-Exit loop → eventual stack corruption → BSOD 0x1AA
-     *
-     * With ACK_INT_ON_EXIT:
-     *   - External interrupt → VM-Exit (interrupt acknowledged by LAPIC)
-     *   - Vector stored in EXIT_INTERRUPTION_INFO
-     *   - Handler discards it (Blue Pill: LAPIC considers it handled)
-     *   - VMRESUME → no pending interrupt → normal execution
-     */
-    {
-        ULONG RequestedExitCtls =
-            VMEXIT_HOST_ADDR_SPACE_SIZE |       /* 64-bit host */
-            VMEXIT_SAVE_IA32_EFER |
-            VMEXIT_LOAD_IA32_EFER;
-
-        if (CpuCtx->ExternalIntExitForced) {
-            RequestedExitCtls |= VMEXIT_ACK_INT_ON_EXIT;
-            LOG_INFO("CPU %u: Enabling ACK_INT_ON_EXIT (EXTERNAL_INT_EXIT is must-be-1)",
-                     CpuCtx->ProcessorNumber);
-        }
-
-        ExitCtls = VmxAdjustControls(
-            RequestedExitCtls,
-            State->TrueControlsSupported ? State->TrueExitCap : State->ExitCap
-        );
-    }
+    ExitCtls = VmxAdjustControls(
+        VMEXIT_HOST_ADDR_SPACE_SIZE | VMEXIT_SAVE_IA32_EFER | VMEXIT_LOAD_IA32_EFER,
+        State->TrueControlsSupported ? State->TrueExitCap : State->ExitCap
+    );
     VmxWrite(VMCS_CTRL_VMEXIT_CONTROLS, ExitCtls);
     VmxWrite(VMCS_CTRL_VMEXIT_MSR_STORE_COUNT, 0);
     VmxWrite(VMCS_CTRL_VMEXIT_MSR_LOAD_COUNT, 0);
@@ -909,43 +754,12 @@ static NTSTATUS VmxEnableOnCpu(PVMX_CPU_CONTEXT CpuCtx, PVMX_STATE State)
     CpuCtx->VmxEnabled = TRUE;
     LOG_INFO("VMXON succeeded on CPU %u", CpuCtx->ProcessorNumber);
 
-    /*
-     * Enlightened VMCS activation (nested mode only).
-     * After VMXON, we configure the VP Assist Page to tell L0 Hyper-V
-     * to use the Enlightened VMCS instead of the regular VMCS region.
-     */
-    if (g_IsNestedMode && CpuCtx->VpAssistPageVa && CpuCtx->EvmcsVa) {
-        PHV_VP_ASSIST_PAGE VpAssist = (PHV_VP_ASSIST_PAGE)CpuCtx->VpAssistPageVa;
-        PHV_VMX_ENLIGHTENED_VMCS Evmcs = (PHV_VMX_ENLIGHTENED_VMCS)CpuCtx->EvmcsVa;
-
-        /* Write VP Assist Page PA to Hyper-V MSR with enable bit */
-        __writemsr(HV_X64_MSR_VP_ASSIST_PAGE,
-                   CpuCtx->VpAssistPagePa | HV_VP_ASSIST_PAGE_ENABLE);
-
-        /* Configure VP Assist Page to activate Enlightened VMCS */
-        VpAssist->EnlightenedVmcsEnabled = 1;
-        VpAssist->CurrentEnlightenedVmcs = CpuCtx->EvmcsPa;
-
-        /* Initialize Enlightened VMCS version and clear all clean fields */
-        Evmcs->VersionNumber = 1;
-        Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_NONE;
-
-        LOG_INFO("Enlightened VMCS activated on CPU %u (eVMCS PA=0x%llX)",
-                 CpuCtx->ProcessorNumber, CpuCtx->EvmcsPa);
-
-        /* No VMPTRLD needed — Enlightened VMCS is activated via VP Assist Page */
-    }
-
     return STATUS_SUCCESS;
 }
 
 static VOID VmxDisableOnCpu(PVMX_CPU_CONTEXT CpuCtx)
 {
     if (CpuCtx->VmxEnabled) {
-        /* Deactivate VP Assist Page in nested mode */
-        if (g_IsNestedMode && CpuCtx->VpAssistPageVa) {
-            __writemsr(HV_X64_MSR_VP_ASSIST_PAGE, 0);
-        }
         /*
          * Only execute vmxoff if the guest was never fully launched
          * (VMXON succeeded but VMLAUNCH wasn't done or failed).
@@ -1030,16 +844,6 @@ static VOID VmxInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
 
     /* Success - we're now running as a guest! */
     CpuCtx->VmcsLaunched = TRUE;
-
-    /*
-     * In nested mode, after successful VM-Entry, mark all clean fields
-     * as "unchanged" so L0 Hyper-V can skip re-validation on VMRESUME.
-     * Fields will be dirtied individually as VmxWrite() is called.
-     */
-    if (g_IsNestedMode && CpuCtx->EvmcsVa) {
-        PHV_VMX_ENLIGHTENED_VMCS Evmcs = (PHV_VMX_ENLIGHTENED_VMCS)CpuCtx->EvmcsVa;
-        Evmcs->CleanFields = HV_VMX_ENLIGHTENED_CLEAN_FIELD_ALL;
-    }
 
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
                "[VMXToolbox] CHECKPOINT CPU %u: DPC signaling Event (SUCCESS)\n", CpuNum);
@@ -1273,8 +1077,7 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
 
         /*
          * Wait with periodic timeout diagnostics.
-         * In nested virtualization, DPC dispatch can be very slow due to
-         * the L0→L1→L2 exit chain. Use 1-second polling to distinguish
+         * Use 1-second polling to distinguish
          * "slow" from "stuck" in WinDbg output.
          *
          * Also monitor VM-Exit counts for already-launched CPUs to detect
