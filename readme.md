@@ -700,39 +700,95 @@ HandleRdmsrImpl():
 
 **文件**: `log.h` + `log.c`
 
-#### 环形缓冲区
+#### 设计原则
+
+Hypervisor 日志面临一个核心挑战：**VMX root 模式下不能调用 `DbgPrintEx`**。原因是 `DbgPrintEx` 内部使用自旋锁和 `INT 3` 触发调试器中断，而 VMX root 模式运行在 Host 栈（16KB `ExAllocatePool` 分配的内存）上，不是 Windows 线程内核栈——SEH 异常链无效，`INT 3` 导致递归 VM-Exit 或死锁。
+
+解决方案：**统一的 Lock-free Ring Buffer + Flush Thread 架构**。
+
+#### Lock-free Ring Buffer
 
 ```
-+---+---+---+---+---+---+---+---+
-| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | ... [1024 entries]
-+---+---+---+---+---+---+---+---+
-      ^               ^
-      |               |
-   ReadIndex      WriteIndex
+8192 entries, 每条 256 字节
 
-- 写满后覆盖最旧的条目 (ReadIndex 前进)
-- Spin Lock 保护并发访问
-- 用户态通过 IOCTL_VMX_GET_LOG 读取
+                   Lock-free 写入 (InterlockedIncrement)
+                            |
++---+---+---+---+---+---+---+---+
+| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | ... [8192 entries]
++---+---+---+---+---+---+---+---+
+          ^                   ^                ^
+          |                   |                |
+      FlushIndex         ReadIndex        WriteIndex
+
+Ready[i] = 0: 空槽位或正在写入
+Ready[i] = 1: 数据已完整写入, 可安全读取
 ```
 
-#### 双输出通道
+**无锁发布协议** (Multi-writer safe)：
+```
+写入者 (LogWrite, 任意 IRQL / VMX root 均安全):
+  1. InterlockedIncrement(&WriteIndex)    — 原子占位
+  2. 填写 Entry (Level, Pid, Timestamp, Message)
+  3. InterlockedExchange(&Ready[Idx], 1)  — RELEASE 屏障, 发布
+
+读取者 (Flush Thread / LogRead):
+  1. 检查 Ready[Idx] == 1                 — ACQUIRE 屏障
+  2. 读取 Entry 全部字段 (保证完整)
+  3. InterlockedExchange(&Ready[Idx], 0)  — 释放槽位
+```
+
+全程零自旋锁、零 IRQL 操作、纯 `Interlocked*` 原子操作。
+
+#### Flush Thread (System Thread)
+
+```
+LogFlushThreadRoutine():
+  运行级别: PASSIVE_LEVEL (普通内核线程栈)
+  轮询间隔: 5ms
+  
+  loop:
+    KeWaitForSingleObject(StopEvent, 5ms timeout)
+    while (FlushIndex < WriteIndex):
+      if Ready[Idx] == 1:
+        DbgPrintEx(...)    ← 在 PASSIVE_LEVEL 安全调用
+        Ready[Idx] = 0
+        FlushIndex++
+      else:
+        break              ← 写入者尚未完成, 下次再来
+```
+
+日志从写入到显示在 WinDbg 的延迟约 **5ms**（Flush Thread 轮询间隔）。
+
+#### 统一宏接口
 
 ```c
-LogWrite(Level, Pid, Format, ...):
-  1. 格式化消息 (RtlStringCbVPrintfA)
-  2. if Level <= INFO:
-       DbgPrintEx(...)    // -> WinDbg / DebugView
-  3. 写入环形缓冲区      // -> IOCTL 读取
+/* 普通上下文 (DriverEntry, IOCTL handler 等) */
+LOG_ERROR(fmt, ...)     // → LogWrite → Ring Buffer
+LOG_WARN(fmt, ...)
+LOG_INFO(fmt, ...)
+LOG_DEBUG(fmt, ...)
+
+/* VMX root 模式 (VM-Exit handler 内部) — 与上面完全相同 */
+VMXROOT_LOG_ERROR(fmt, ...)  // → LogWrite → Ring Buffer
+VMXROOT_LOG_WARN(fmt, ...)
+VMXROOT_LOG_INFO(fmt, ...)
+VMXROOT_LOG_DEBUG(fmt, ...)
 ```
 
-#### 日志级别
+两组宏最终都调用同一个 `LogWrite()`，统一走 Ring Buffer 路径。Flush Thread 负责所有 `DbgPrintEx` 输出。
 
-| 级别 | 值 | 用途 |
-|------|---|------|
-| ERROR | 0 | 致命错误 |
-| WARN  | 1 | 警告信息 |
-| INFO  | 2 | 常规信息 (驱动加载, Hook 安装等) |
-| DEBUG | 3 | 调试信息 (每次 DR 伪造, TSC 补偿等) |
+#### 输出过滤
+
+| 级别 | 值 | WinDbg 输出 | Ring Buffer | 用途 |
+|------|---|------------|-------------|------|
+| ERROR | 0 | ✅ (Flush Thread) | ✅ | 致命错误 |
+| WARN  | 1 | ✅ (Flush Thread) | ✅ | 警告信息 |
+| INFO  | 2 | ✅ (Flush Thread) | ✅ | 常规信息 (驱动加载, Hook 安装等) |
+| DEBUG | 3 | ❌ (仅 Ring Buffer) | ✅ | 调试信息 (高频, 通过 IOCTL 读取) |
+
+#### 用户态读取
+
+通过 `IOCTL_VMX_GET_LOG` 读取 Ring Buffer 中的条目，使用独立的 `ReadIndex`（与 Flush Thread 的 `FlushIndex` 互不干扰）。
 
 ---
 
