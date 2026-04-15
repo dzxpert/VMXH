@@ -488,3 +488,321 @@ EPT_CPU_STATE  *g_EptCpuStates        // 每CPU的 PML4+PDPT+EPTP
 EPT_PER_CPU_PD_PAGE **g_PerCpuPdPages // 每CPU的 PD 页面
 PEPT_PER_CPU_SPLIT  *g_PerCpuSplitPages // 每CPU的 PT 页面 (拆分页)
 ```
+
+---
+
+## 8. AMD NPT (Nested Page Tables) 分析
+
+### 8.1 NPT 概述
+
+NPT 是 **AMD SVM (Secure Virtual Machine)** 虚拟化技术中与 Intel EPT 对等的**第二级地址翻译**机制。核心目标相同：在 Guest 不知情的情况下，将 Guest Physical Address (GPA) 翻译为 Host Physical Address (HPA)。
+
+```
+Intel: Guest VA → [Guest CR3] → GPA → [EPT]  → HPA
+AMD:   Guest VA → [Guest CR3] → GPA → [NPT]  → HPA
+                                       ^^^^^^^^^^
+                                       功能完全等价
+```
+
+### 8.2 NPT 与 EPT 的相同点
+
+| 相同点 | 说明 |
+|--------|------|
+| **页表级数** | 都是 4 级：PML4 → PDPT → PD → PT |
+| **页表项格式** | 本项目中 NPT 直接复用 EPT 的结构体定义（`EPT_PML4E`, `EPT_PDPTE`, `EPT_PDE`, `EPT_PTE`） |
+| **地址位域拆分** | 完全相同：GPA[47:39]=PML4, [38:30]=PDPT, [29:21]=PD, [20:12]=PT, [11:0]=Offset |
+| **大页支持** | 都支持 2MB (PDE.LargePage=1) 和 1GB (PDPTE.LargePage=1) 大页 |
+| **恒等映射** | 本项目中 EPT 和 NPT 都使用恒等映射 512GB 物理空间 |
+| **Hook 原理** | 都是拆分 2MB→4KB 后修改单页 PTE 权限 + 物理地址重定向 |
+| **Per-CPU 隔离** | 都需要 Per-CPU 页表防止多核竞态 |
+| **TLB 性能代价** | 都有最坏 20 次内存访问的代价（4级 × 5次翻译） |
+| **Hash 加速** | 都使用 O(1) 哈希表加速 Hook 查找和 Split Page 查找 |
+| **Trampoline 构造** | NPT 复用 EPT 的指令长度解码器 (`EptGetInstructionLength`) 和 RIP-relative 重定位 |
+
+代码证据 — NPT 复用 EPT 类型定义 (`npt.h:21`):
+```c
+#include "ept.h"    /* Reuse EPT page table structure definitions */
+```
+
+### 8.3 NPT 与 EPT 的关键区别
+
+#### 区别一览表
+
+| 特性 | Intel EPT | AMD NPT |
+|------|-----------|---------|
+| **虚拟化架构** | VT-x (VMX) | AMD-V (SVM) |
+| **根指针位置** | VMCS 的 EPTP 字段 | VMCB 的 `nested_cr3` 字段 |
+| **根指针格式** | `EPT_POINTER` 联合体（含 MemoryType, PageWalkLength） | 裸物理地址（直接写入 PML4 PA） |
+| **Execute-Only** | **支持**（R=0, W=0, X=1）— 需检测 `IA32_VMX_EPT_VPID_CAP` bit 0 | **不支持** — AMD 架构不允许 R=0,X=1 的组合 |
+| **违例事件** | EPT Violation (VM-Exit) | #NPF = SVM_EXIT_NPF (0x400) (#VMEXIT) |
+| **TLB 刷新** | `INVEPT` 指令（Single-Context / All-Contexts） | VMCB 的 `TlbCtl` 字段（下次 VMRUN 时刷新） |
+| **单步恢复** | MTF (Monitor Trap Flag, VMCS 控制位) | RFLAGS.TF (#DB 异常) |
+| **内存类型** | EPTP 指定全局 MemoryType + PTE 可设 MemoryType[5:3] | 使用标准 PAT 机制 |
+
+#### 区别详解
+
+##### 区别 1: Execute-Only — 最核心的差异
+
+```
+Intel EPT (支持 Execute-Only):
+  ┌──────────────────────────────────────────────────────┐
+  │ Hook 状态: PTE = { R=0, W=0, X=1, PA=HookPage }    │
+  │                                                      │
+  │  Guest 执行代码 → X=1 允许 → 直接执行 HookPage     │
+  │  Guest 读取代码 → R=0 拒绝 → EPT Violation!         │
+  │    → Handler 切换到原始页 → PatchGuard 看到干净代码  │
+  │                                                      │
+  │  ★ 读和执行可以看到不同的物理页！最佳隐蔽性         │
+  └──────────────────────────────────────────────────────┘
+
+AMD NPT (不支持 Execute-Only):
+  ┌──────────────────────────────────────────────────────┐
+  │ Hook 状态: PTE = { R=1, W=0, X=1, PA=HookPage }    │
+  │                                                      │
+  │  Guest 执行代码 → X=1 允许 → 直接执行 HookPage     │
+  │  Guest 读取代码 → R=1 允许 → 读到 HookPage 内容!   │
+  │    → PatchGuard 会看到 JMP 补丁！                   │
+  │  Guest 写入代码 → W=0 拒绝 → #NPF!                 │
+  │    → Handler 临时切换原始页                         │
+  │                                                      │
+  │  ★ 读和执行看到同一个页面，隐蔽性略差              │
+  └──────────────────────────────────────────────────────┘
+```
+
+对应代码对比:
+```c
+// Intel EPT Hook 权限设置 (ept.c:1544)
+Pte->Read = 0;      // 读 → EPT Violation
+Pte->Write = 0;     // 写 → EPT Violation
+if (g_EptHookState.ExecuteOnlySupported)
+    Pte->Execute = 1;   // 执行直接到 HookPage ★
+else
+    Pte->Execute = 0;   // 不支持时降级
+
+// AMD NPT Hook 权限设置 (npt.c:747)
+Pte->Read = 1;      // 读允许 (无法设置 Execute-Only)
+Pte->Write = 0;     // 写 → #NPF
+Pte->Execute = 1;   // 执行直接到 HookPage
+```
+
+##### 区别 2: 根指针配置方式
+
+```
+Intel EPT:
+  VMCS.EPTP = {
+    MemoryType    : 3位  (WB=6)
+    PageWalkLength: 3位  (4级=3)
+    DirtyAccess   : 1位
+    Pml4PhysAddr  : 40位 (PML4 物理地址 >> 12)
+  }
+  → 通过 VmxWrite(VMCS_CTRL_EPT_POINTER, ...) 写入 VMCS
+
+AMD NPT:
+  VMCB.nested_cr3 = g_NptState.Pml4Pa  (裸物理地址, 无额外控制位)
+  → 直接写入 VMCB Control Area
+```
+
+对应代码:
+```c
+// Intel: 构造 EPTP 结构体 (ept.c:1013)
+g_EptState.Eptp.MemoryType = EPT_MEMORY_TYPE_WB;
+g_EptState.Eptp.PageWalkLength = EPT_PAGE_WALK_LENGTH_4;
+g_EptState.Eptp.Pml4PhysAddr = g_EptState.Pml4Pa >> 12;
+
+// AMD: 直接返回 PML4 物理地址 (npt.c:358)
+ULONG64 NptGetRootPageTablePa(VOID) {
+    return g_NptState.Pml4Pa;  // 直接写入 VMCB.nested_cr3
+}
+```
+
+##### 区别 3: TLB 刷新机制
+
+```
+Intel EPT:
+  VMX root 模式执行 INVEPT 指令:
+    AsmVmxInvept(INVEPT_ALL_CONTEXTS, &Desc);       // 刷新所有 EPTP 上下文
+    AsmVmxInvept(INVEPT_SINGLE_CONTEXT, &Desc);     // 只刷当前 EPTP
+  → 立即生效
+
+AMD NPT:
+  设置 VMCB.TlbCtl 字段:
+    Vmcb->Control.TlbCtl = TLB_CONTROL_FLUSH_ALL_ASID;
+  → 延迟到下次 VMRUN 时才刷新 (更高效)
+```
+
+对应代码:
+```c
+// Intel (ept.c:2335)
+VOID EptInvalidateAllContexts(VOID) {
+    INVEPT_DESCRIPTOR Desc = { 0 };
+    AsmVmxInvept(INVEPT_ALL_CONTEXTS, &Desc);   // 立即执行硬件指令
+}
+
+// AMD (npt.c:1333)
+VOID NptInvalidateAll(VOID) {
+    for (i = 0; i < g_SvmState.CpuCount; i++) {
+        // 标记所有 CPU 的 VMCB, 下次 VMRUN 时刷新
+        g_SvmState.CpuContexts[i].VmcbVa->Control.TlbCtl =
+            TLB_CONTROL_FLUSH_ALL_ASID;
+    }
+}
+```
+
+##### 区别 4: 单步恢复（Hook 临时放开权限后的恢复）
+
+```
+Intel EPT:                                AMD NPT:
+  ┌──────────────┐                          ┌──────────────┐
+  │ EPT Violation│                          │   #NPF       │
+  │ (VM-Exit)    │                          │ (SVM #VMEXIT)│
+  └──────┬───────┘                          └──────┬───────┘
+         ▼                                         ▼
+  放开 PTE 权限                             放开 PTE 权限
+  设置 MTF 位                               设置 RFLAGS.TF
+  (VMCS 控制位)                             (Guest RFLAGS)
+  vmresume                                  vmrun
+         │                                         │
+         ▼                                         ▼
+  Guest 执行 1 条指令                       Guest 执行 1 条指令
+         │                                         │
+         ▼                                         ▼
+  MTF VM-Exit                               #DB 异常 #VMEXIT
+  (Exit Reason 37)                          (SVM_EXIT_DB)
+  恢复 PTE 为 Hook 状态                    恢复 PTE 为 Hook 状态
+  清除 MTF 位                               清除 RFLAGS.TF
+```
+
+对应代码:
+```c
+// Intel: 启用 MTF (ept.c:1974)
+ProcBased = VmxRead(VMCS_CTRL_PROC_BASED_VM_EXEC);
+ProcBased |= PROC_BASED_MONITOR_TRAP_FLAG;
+VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
+
+// AMD: 启用 TF (npt.c:1127)
+Vmcb->Save.Rflags |= (1ULL << 8);  // Set Trap Flag
+```
+
+### 8.4 NPT 页表遍历过程
+
+NPT 的 GPA → HPA 遍历过程与 EPT 结构上完全相同，唯一区别是入口点和异常类型：
+
+```
+Guest 发起内存访问 (GPA)
+        │
+        ▼
+┌───────────────────────────────────────────────┐
+│ Step 1: CPU 从 VMCB.nested_cr3 读取根地址     │  ← 区别: 不是 VMCS EPTP
+│         → 得到 PML4 物理基地址               │
+└───────────────┬───────────────────────────────┘
+                ▼
+┌───────────────────────────────────────────────┐
+│ Step 2: PML4[GPA[47:39]]                     │
+│         → 得到 PDPT 物理基地址                │  (与 EPT 完全相同)
+└───────────────┬───────────────────────────────┘
+                ▼
+┌───────────────────────────────────────────────┐
+│ Step 3: PDPT[GPA[38:30]]                     │
+│         → 得到 PD 物理基地址                  │  (与 EPT 完全相同)
+└───────────────┬───────────────────────────────┘
+                ▼
+┌───────────────────────────────────────────────┐
+│ Step 4: PD[GPA[29:21]]                       │
+│         → LargePage? Yes → 完成               │  (与 EPT 完全相同)
+│           No → 得到 PT 物理基地址             │
+└───────────────┬───────────────────────────────┘
+                ▼
+┌───────────────────────────────────────────────┐
+│ Step 5: PT[GPA[20:12]]                       │
+│         → 4KB 页, 最终 HPA                   │
+│         → 权限检查 (R/W/X)                  │
+│         权限不足?                            │
+│           Yes → #NPF (SVM_EXIT_NPF)!        │  ← 区别: 不是 EPT Violation
+│           No  → 访问 HPA                     │
+└───────────────────────────────────────────────┘
+```
+
+### 8.5 NPT Hook 流程图
+
+由于 AMD 不支持 Execute-Only，Hook 策略与 EPT 有所不同：
+
+```
+                      ┌──────────────────────────────────┐
+                      │  初始状态: Hook 已安装            │
+                      │  PTE = { R=1, W=0, X=1 }         │
+                      │  PhysAddr → HookPage              │
+                      └──────────┬───────────────────────┘
+                                 │
+               ┌─────────────────┼─────────────────┐
+               ▼                 ▼                 ▼
+        Guest 执行代码    Guest 读取代码    Guest 写入代码
+        X=1 → 允许        R=1 → 允许        W=0 → #NPF!
+               │                 │                 │
+               ▼                 ▼                 ▼
+        执行 HookPage     读到 HookPage     NptHandlePageFault():
+        上的 JMP 补丁     上的 JMP 补丁       1. 切换到原始页 (RWX)
+        → 跳转到我们      (隐蔽性不如EPT)     2. RFLAGS.TF = 1
+          的 Hook 函数                         3. 重新执行写指令
+                                                      │
+                                                      ▼
+                                               Guest 执行 1 条指令
+                                               (写入成功, 操作原始页)
+                                                      │
+                                                      ▼
+                                               #DB 异常 → SVM #VMEXIT
+                                               SvmHandleDbException():
+                                                 1. 清除 RFLAGS.TF
+                                                 2. PTE 恢复为
+                                                    { R=1, W=0, X=1 }
+                                                    PhysAddr → HookPage
+```
+
+### 8.6 本项目中 EPT / NPT 的代码对称性
+
+本项目同时实现了 Intel EPT 和 AMD NPT，两者的 API 完全对称：
+
+| 功能 | Intel EPT (`ept.c`) | AMD NPT (`npt.c`) |
+|------|---------------------|--------------------|
+| 初始化 | `EptInitialize()` | `NptInitialize()` |
+| 清理 | `EptCleanup()` | `NptCleanup()` |
+| 安装 Hook | `EptHookFunction()` | `NptHookFunction()` |
+| 移除 Hook | `EptUnhookFunction()` | `NptUnhookFunction()` |
+| 移除所有 Hook | `EptUnhookAll()` | `NptUnhookAll()` |
+| 违例处理 | `HandleEptViolation()` | `NptHandlePageFault()` |
+| 拆分大页 | `EptSplitLargePage()` | `NptSplitLargePage()` |
+| PTE 查找 | `EptGetPteForPhysicalAddress()` | `NptGetPteForPhysicalAddress()` |
+| Hook 查找 | `EptFindHookByPhysicalAddress()` | `NptFindHookByPhysicalAddress()` |
+| TLB 刷新 | `EptInvalidateAllContexts()` | `NptInvalidateAll()` |
+| Per-CPU 初始化 | `EptInitPerCpu()` | `NptInitPerCpu()` |
+| Per-CPU PTE | `EptGetPerCpuPte()` | `NptGetPerCpuPte()` |
+| 单步追踪 | `EptMtfTrackRelaxedPage()` | `NptDbTrackRelaxedPage()` |
+| 单步恢复 | `EptMtfGetAndClearRelaxedPage()` | `NptDbGetAndClearRelaxedPage()` |
+
+### 8.7 总结: EPT vs NPT 核心差异速查
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                    EPT vs NPT 核心差异                        │
+├───────────────────┬──────────────────┬────────────────────────┤
+│                   │  Intel EPT       │  AMD NPT               │
+├───────────────────┼──────────────────┼────────────────────────┤
+│ 虚拟化技术        │  VT-x / VMX      │  AMD-V / SVM           │
+│ 根指针            │  VMCS EPTP       │  VMCB nested_cr3       │
+│ Execute-Only      │  ✅ 支持          │  ❌ 不支持             │
+│ Hook 隐蔽性       │  极高 (读≠执行)  │  中等 (读=执行)        │
+│ 违例事件          │  EPT Violation   │  #NPF (Nested PF)      │
+│ TLB 刷新          │  INVEPT 指令     │  VMCB.TlbCtl 字段      │
+│ 单步机制          │  MTF (VMCS 控制) │  RFLAGS.TF (#DB)       │
+│ 页表结构          │  4级, 自定义格式 │  4级, 复用标准 x86 格式│
+│ 页表项类型复用    │  EPT_PML4E 等    │  复用 EPT_PML4E 等     │
+│ 恒等映射范围      │  512 GB          │  512 GB                │
+│ 大页拆分          │  2MB → 4KB       │  2MB → 4KB             │
+│ Per-CPU 隔离      │  ✅ 支持          │  ✅ 支持               │
+│ Hash 加速         │  ✅ O(1)          │  ✅ O(1)               │
+└───────────────────┴──────────────────┴────────────────────────┘
+
+核心结论:
+  页表结构和遍历逻辑 → 完全相同
+  Hook 拆分和管理    → 完全相同
+  关键差异只在:      → Execute-Only / 根指针 / TLB刷新 / 单步恢复
+```
