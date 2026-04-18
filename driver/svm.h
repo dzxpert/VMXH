@@ -442,9 +442,42 @@ typedef struct _SVM_CPU_CONTEXT {
     PVMCB           VmcbVa;             /* Virtual address of VMCB */
     ULONG64         VmcbPa;             /* Physical address of VMCB */
 
-    /* Host Save Area (required by SVM for host state) */
+    /*
+     * Hardware-managed Host Save Area — pointed to by MSR_VM_HSAVE_PA.
+     * The CPU implicitly saves a *subset* of host state here on VMRUN
+     * (CR3, RFLAGS, RAX, RSP, RIP, CS, SS, DS, ES — per AMD APM Vol.2
+     * §15.5.1).  Additional host state (FS/GS/TR/LDTR bases,
+     * KernelGsBase, LSTAR, STAR, CSTAR, SFMASK, SYSENTER_*, Efer) is NOT
+     * touched by the CPU here — the hypervisor is responsible for it.
+     */
     PVOID           HostSaveAreaVa;
     ULONG64         HostSaveAreaPa;
+
+    /*
+     * Software-managed Host VMCB — used as the target of the explicit
+     * VMSAVE / VMLOAD instructions executed in the VMRUN loop.  VMSAVE
+     * saves FS/GS/TR/LDTR base + the syscall/sysret MSRs; VMLOAD reloads
+     * them.
+     *
+     * CRITICAL FIX (post-2nd-review): without this, the symmetric VMLOAD
+     * that our launch loop runs just before every VMRUN would OVERWRITE
+     * the host's FS/GS/TR/LSTAR/... with GUEST values coming from VMCB.Save,
+     * and when we VMEXIT back into host mode we'd never restore the host
+     * versions — Windows' GS_BASE (KPCR), TR.base (TSS), LSTAR (syscall
+     * entry), etc. would stay poisoned, BSOD guaranteed.
+     *
+     * The VMRUN loop therefore looks like:
+     *    first time only:           VMSAVE HostVmcbPa   (capture real host)
+     *    every VMEXIT:              VMLOAD HostVmcbPa   (restore host)
+     *    every VMRUN (non-first):   VMLOAD VmcbPa       (load guest extra)
+     *                               VMRUN
+     *
+     * This VMCB is the same 4KB layout as the normal VMCB but only the
+     * Save-area fields touched by VMSAVE/VMLOAD are meaningful; the
+     * Control area is unused.
+     */
+    PVMCB           HostVmcbVa;
+    ULONG64         HostVmcbPa;
 
     /* MSRPM (MSR Permission Map, 8KB = 2 pages) */
     PVOID           MsrpmVa;
@@ -530,13 +563,37 @@ NTSTATUS    SvmInitialize(VOID);
 VOID        SvmTerminate(VOID);
 BOOLEAN     SvmIsSupported(VOID);
 
+/*
+ * C-3: dynamically enable / disable #DB / #BP intercepts across all CPUs.
+ *
+ * Each sub-feature owns a single bit:
+ *   - SvmSetExceptionInterceptDb() is called by the NPT hook engine
+ *     (hook count > 0 ⇒ TRUE, count == 0 ⇒ FALSE).
+ *   - SvmSetExceptionInterceptBp() is called by the anti-anti-debug
+ *     subsystem when AAD_HIDE_EXCEPTIONS is toggled.
+ *
+ * Internally the two bits are ORed into VMCB.Control.InterceptExceptions,
+ * so they can be toggled independently without interfering with each
+ * other.  The change takes effect on each CPU's next VMEXIT → VMRUN.
+ */
+VOID        SvmSetExceptionInterceptDb(BOOLEAN Enable);
+VOID        SvmSetExceptionInterceptBp(BOOLEAN Enable);
+
+/*
+ * One-time init for the intercept-flag lock.  Called from SvmInitialize()
+ * before any Set*ExceptionIntercept* call can happen — removes the race
+ * in the old lazy-init pattern.
+ */
+VOID        SvmInterceptLockInitialize(VOID);
+
 /* svm_exit.c */
 BOOLEAN     SvmExitHandler(struct _GUEST_CONTEXT *GuestContext);
 
 /* svm_asm.asm */
 extern VOID  AsmSvmVmrun(ULONG64 VmcbPa, struct _GUEST_CONTEXT *GuestContext);
-extern UCHAR AsmSvmLaunch(ULONG64 VmcbPa, PVOID VmcbVa);
+extern UCHAR AsmSvmLaunch(ULONG64 VmcbPa, PVOID VmcbVa, ULONG64 HostVmcbPa);
 extern VOID  AsmSvmVmmcall(ULONG64 HypercallValue);
+extern VOID  AsmSvmVmmcall2(ULONG64 HypercallValue, ULONG64 Arg1);
 extern VOID  AsmClgi(VOID);
 extern VOID  AsmStgi(VOID);
 extern VOID  AsmSvmExitHandler(VOID);

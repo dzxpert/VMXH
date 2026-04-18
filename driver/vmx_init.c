@@ -8,6 +8,7 @@
 #include "log.h"
 #include "hv_ops.h"
 #include "hv_detect.h"
+#include "process.h"   /* AAD-BP: ProcessRegisterExceptionHideToggle */
 
 /* ========================================================================= */
 /*  Forward Declarations                                                     */
@@ -891,7 +892,8 @@ static VOID VmxTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID A
      * (causing #UD). Just restore CR4 to clear VMXE and update flags.
      */
     if (CpuCtx->VmcsLaunched) {
-        AsmVmxVmcall(VMCALL_MAGIC_SHUTDOWN);
+        /* M-6: pass the per-boot nonce in RCX so the handler can auth us. */
+        AsmVmxVmcall2(VMCALL_MAGIC_SHUTDOWN, g_VmcallShutdownNonce);
 
         /* vmxoff already executed by VmxShutdown ASM path.
          * Just restore original CR4 (clears VMXE) and update flags. */
@@ -1129,6 +1131,37 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
                 }
                 if (WaitCount >= 60) {  /* 60 second timeout */
                     LOG_ERROR("CPU %u DPC timed out after 60 seconds!", i);
+
+                    /*
+                     * H-6 FIX: Dpc and DpcCtx live on this stack frame.
+                     * If we goto InitFailed while the DPC is still queued
+                     * or in-progress on the target CPU, the DPC routine
+                     * would later dereference freed stack memory and
+                     * probably BSOD.
+                     *
+                     * Proper teardown sequence:
+                     *   1. Try KeRemoveQueueDpc — succeeds if the DPC was
+                     *      still queued (not yet executed) and removes it
+                     *      from the queue.  In that case, we can safely
+                     *      unwind.
+                     *   2. If KeRemoveQueueDpc returns FALSE, the DPC has
+                     *      already started running on the target CPU but
+                     *      is hung for some reason.  We CANNOT unwind
+                     *      this stack without corrupting DpcCtx.  We wait
+                     *      forever for Event — there's no recovery path
+                     *      other than a manual bugcheck, which is better
+                     *      than silent memory corruption.
+                     */
+                    if (KeRemoveQueueDpc(&Dpc)) {
+                        LOG_WARN("CPU %u DPC removed from queue; safe to unwind", i);
+                    } else {
+                        LOG_ERROR("CPU %u DPC has started — waiting indefinitely "
+                                  "to avoid stack corruption", i);
+                        KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode,
+                                              FALSE, NULL);
+                        LOG_ERROR("CPU %u DPC finally completed after timeout", i);
+                    }
+
                     Status = STATUS_TIMEOUT;
                     goto InitFailed;
                 }
@@ -1150,6 +1183,14 @@ NTSTATUS VmxInitialize(PVMX_STATE State)
     }
 
     State->Initialized = TRUE;
+
+    /*
+     * AAD-BP (post-2nd-review): register exception-intercept toggle
+     * callback with the process-tracking subsystem.  See svm_init.c for
+     * the same pattern on the SVM side.
+     */
+    ProcessRegisterExceptionHideToggle(VmxSetExceptionInterceptBp);
+
     LOG_INFO("VMX initialization complete: %u CPUs virtualized", CpuCount);
     DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_WARNING_LEVEL,
                "[VMXToolbox] Main thread: VMX initialization COMPLETE (%u CPUs)\n", CpuCount);
@@ -1193,6 +1234,111 @@ InitFailed:
         State->CpuContexts = NULL;
     }
     return Status;
+}
+
+/* ========================================================================= */
+/*  AAD-BP: Dynamic Exception Bitmap (Intel VMX)                             */
+/* ========================================================================= */
+
+/*
+ * See vmx.h for the rationale — exception bitmap is maintained as a
+ * global "desired" value plus a per-CPU "last applied" generation.
+ *
+ * g_VmxDesiredExceptionBitmap contains the OR of every feature-flag:
+ *   bit 1 = #DB wanted (set by NPT/EPT hook subsystem once on its side,
+ *                       TODO: wire up when EPT-side #DB single-step is
+ *                       added — currently unused on Intel because EPT
+ *                       uses MTF, not TF, for single-step)
+ *   bit 3 = #BP wanted (set when any target process has AAD_HIDE_EXCEPTIONS)
+ *
+ * Generation counter: incremented on every change to the desired value.
+ * Each CPU stores its last-applied generation in g_VmxExcBmpCpuGen[cpu].
+ * VmxSyncExceptionBitmap (called from the exit handler) compares and,
+ * if behind, VMWRITEs the new value.  Because the VMCS is loaded on the
+ * current CPU (we're in its exit handler), the VMWRITE always targets
+ * the right VMCS — no VMPTRLD dance needed.
+ */
+static volatile ULONG  g_VmxDesiredExceptionBitmap = 0;
+static volatile LONG   g_VmxExcBmpGeneration       = 0;
+static volatile LONG  *g_VmxExcBmpCpuGen           = NULL;  /* [g_MaxProcessors] */
+static KSPIN_LOCK      g_VmxExcBmpLock;
+static BOOLEAN         g_VmxExcBmpInited           = FALSE;
+
+static VOID VmxExcBmpEnsureInit(VOID)
+{
+    /*
+     * Called from SvmInitialize-analogue / VmxInitialize path.  We run
+     * under PASSIVE_LEVEL exactly once, before any per-CPU state could
+     * race — but we use InterlockedCompareExchange out of paranoia.
+     */
+    if (InterlockedCompareExchange((LONG *)&g_VmxExcBmpInited, TRUE, FALSE) == FALSE) {
+        KeInitializeSpinLock(&g_VmxExcBmpLock);
+        if (g_MaxProcessors > 0) {
+            g_VmxExcBmpCpuGen = (volatile LONG *)ExAllocatePoolWithTag(
+                NonPagedPool, g_MaxProcessors * sizeof(LONG), 'xmvG');
+            if (g_VmxExcBmpCpuGen) {
+                RtlZeroMemory((PVOID)g_VmxExcBmpCpuGen,
+                              g_MaxProcessors * sizeof(LONG));
+            }
+        }
+    }
+}
+
+static VOID VmxExcBmpSet(ULONG BitMask, BOOLEAN Enable)
+{
+    KIRQL OldIrql;
+    ULONG Old, New;
+
+    VmxExcBmpEnsureInit();
+
+    KeAcquireSpinLock(&g_VmxExcBmpLock, &OldIrql);
+    Old = g_VmxDesiredExceptionBitmap;
+    New = Enable ? (Old | BitMask) : (Old & ~BitMask);
+    if (New != Old) {
+        g_VmxDesiredExceptionBitmap = New;
+        InterlockedIncrement(&g_VmxExcBmpGeneration);
+    }
+    KeReleaseSpinLock(&g_VmxExcBmpLock, OldIrql);
+}
+
+VOID VmxSetExceptionInterceptDb(BOOLEAN Enable)
+{
+    VmxExcBmpSet(EXCEPTION_BITMAP_DB, Enable);
+}
+
+VOID VmxSetExceptionInterceptBp(BOOLEAN Enable)
+{
+    VmxExcBmpSet(EXCEPTION_BITMAP_BP, Enable);
+}
+
+VOID VmxSyncExceptionBitmap(VOID)
+{
+    ULONG CpuIndex;
+    LONG  CurGen;
+
+    /*
+     * Called at the top of the VMX exit handler.  If init never ran
+     * (called before VmxInitialize fully completed?), g_VmxExcBmpCpuGen
+     * will be NULL — bail safely.
+     */
+    if (!g_VmxExcBmpCpuGen) return;
+
+    CpuIndex = KeGetCurrentProcessorNumber();
+    if (CpuIndex >= g_MaxProcessors) return;
+
+    CurGen = g_VmxExcBmpGeneration;
+    if (g_VmxExcBmpCpuGen[CpuIndex] == CurGen) {
+        /* Already in sync on this CPU — fast path, no VMWRITE. */
+        return;
+    }
+
+    /*
+     * Apply the current desired mask.  VMWRITE implicitly targets the
+     * VMCS that is LOAD'd on the current CPU — which is THIS CPU's
+     * VMCS (we are in its exit handler, VMPTRLD was done at VMENTRY).
+     */
+    VmxWrite(VMCS_CTRL_EXCEPTION_BITMAP, g_VmxDesiredExceptionBitmap);
+    g_VmxExcBmpCpuGen[CpuIndex] = CurGen;
 }
 
 VOID VmxTerminate(PVMX_STATE State)
@@ -1259,6 +1405,20 @@ VOID VmxTerminate(PVMX_STATE State)
         extern VOID MsrCleanupInvalidBitmap(VOID);
         MsrCleanupInvalidBitmap();
     }
+
+    /* AAD-BP: free per-CPU generation counter for Exception Bitmap sync. */
+    if (g_VmxExcBmpCpuGen) {
+        ExFreePoolWithTag((PVOID)g_VmxExcBmpCpuGen, 'xmvG');
+        g_VmxExcBmpCpuGen = NULL;
+    }
+    /*
+     * Leave g_VmxExcBmpInited TRUE so a second Init in the same driver
+     * lifecycle won't re-init the lock out from under us.  The lock is
+     * idempotent and the desired-bitmap global is reset explicitly by
+     * the next VmxSetException* call anyway.
+     */
+    g_VmxDesiredExceptionBitmap = 0;
+    g_VmxExcBmpGeneration       = 0;
 
     State->Initialized = FALSE;
     LOG_INFO("VMX terminated");

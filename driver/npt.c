@@ -32,8 +32,8 @@
 /* ========================================================================= */
 /*  Forward declarations for per-CPU helpers (defined later in this file)     */
 /* ========================================================================= */
-static NTSTATUS NptEnsurePerCpuPdForRegion(ULONG PdptIndex);
-static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG PdIndex);
+static NTSTATUS NptEnsurePerCpuPdForRegion(ULONG FlatPdptIndex);
+static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG FlatPdptIndex, ULONG PdIndex);
 
 /* ========================================================================= */
 /*  Constants (needed before global array declarations)                      */
@@ -41,7 +41,21 @@ static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
 
 /* Page directory and split page pools (same as EPT) */
 #define NPT_MAX_SPLIT_PAGES    128
-#define NPT_MAX_PD_PAGES       512
+
+/*
+ * Default / minimum PD-page count for the NPT identity map.
+ *
+ * See ept.c for the full rationale (mirror of EPT side).  The embedded
+ * g_NptState.Pdpt[] covers the first 512GB of PA space via 2MB large pages.
+ * For hosts with physical memory / MMIO > 512GB we allocate additional
+ * PDPT pages and hook them onto PML4[1..g_NptPml4Count-1].
+ */
+#define NPT_DEFAULT_PD_PAGES   EPT_PDPTE_COUNT                        /* 512 → 512GB */
+#define NPT_MAX_PD_PAGES_CAP   (EPT_PML4E_COUNT * EPT_PDPTE_COUNT)    /* 256TB */
+
+/* Runtime-resolved identity-map sizing; set once by NptInitialize(). */
+static ULONG g_NptPdptTotal  = NPT_DEFAULT_PD_PAGES;
+static ULONG g_NptPml4Count  = 1;
 
 /* ========================================================================= */
 /*  Globals                                                                  */
@@ -50,6 +64,16 @@ static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
 NPT_STATE       g_NptState = { 0 };
 NPT_HOOK_STATE  g_NptHookState = { 0 };
 PNPT_CPU_STATE  g_NptCpuStates = NULL;     /* per-CPU NPT root array */
+
+/*
+ * Extended PDPT pages for NPT PML4[1..N-1] when identity map > 512GB.
+ */
+typedef struct _NPT_PDPT_PAGE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Entries[EPT_PDPTE_COUNT];
+} NPT_PDPT_PAGE;
+
+static NPT_PDPT_PAGE  *g_NptExtPdptPages = NULL;
+static NPT_PDPT_PAGE **g_NptCpuExtPdpt   = NULL;
 
 /*
  * Per-CPU split page tracking (NPT side, mirrors EPT's per-CPU splits).
@@ -67,7 +91,7 @@ typedef struct _NPT_PER_CPU_PD_PAGE {
 } NPT_PER_CPU_PD_PAGE;
 
 static NPT_PER_CPU_PD_PAGE **g_NptPerCpuPdPages = NULL;
-static BOOLEAN g_NptPerCpuPdAllocated[NPT_MAX_PD_PAGES] = { 0 };
+static PBOOLEAN g_NptPerCpuPdAllocated = NULL;  /* [g_NptPdptTotal] */
 
 /*
  * Per-CPU tracking of which physical page was temporarily made permissive
@@ -75,35 +99,189 @@ static BOOLEAN g_NptPerCpuPdAllocated[NPT_MAX_PD_PAGES] = { 0 };
  * page to restore, avoiding a multi-core race condition.
  *
  * This is the AMD-side equivalent of g_MtfRelaxedPagePa in ept.c.
+ *
+ * M-4: additionally track the guest RIP at the time of the relaxation so
+ * the #DB handler can distinguish "our" single-step #DB (RIP has advanced
+ * by a few bytes from the recorded value) from the guest's own #DB (RIP
+ * is nowhere near the recorded hook-target instruction).  Misclassifying
+ * a guest #DB as ours would swallow the exception and break user
+ * debuggers; misclassifying ours as the guest's would leave the page
+ * permissive forever (silent hook bypass).
  */
-static volatile ULONG64 *g_NptDbRelaxedPagePa = NULL;  /* dynamic [g_MaxProcessors] */
+static volatile ULONG64 *g_NptDbRelaxedPagePa  = NULL;  /* dynamic [g_MaxProcessors] — tracker "armed" flag (non-zero = active) */
+static volatile ULONG64 *g_NptDbRelaxedRip     = NULL;  /* dynamic [g_MaxProcessors] */
+static volatile ULONG64 *g_NptDbRelaxedCr3     = NULL;  /* dynamic [g_MaxProcessors] — M-4: pair Rip with Cr3 to disambiguate cross-process coincidence */
 
 /*
- * NptDbTrackRelaxedPage - Record which physical page this CPU just made
- * permissive (called from NptHandlePageFault).
+ * M-4 (revised): per-CPU #DB relaxation tracker.
+ *
+ * When NptHandlePageFault makes a hooked page temporarily permissive to
+ * let a guest instruction complete, we set TF=1 so that #DB fires right
+ * after that single instruction — the #DB handler then re-tightens the
+ * hook and clears TF.  Recording {PagePa, Rip, Cr3} at the moment of
+ * relaxation lets the #DB handler verify the event really belongs to
+ * that sequence:
+ *
+ *   - PagePa  — acts as the "armed" flag (0 = no tracker, !=0 = armed).
+ *   - Rip     — must still be within a 15-byte (max-insn-length) window
+ *               from the recorded value.  Larger drift ⇒ branch /
+ *               interrupt / unrelated #DB ⇒ not ours.
+ *   - Cr3     — must match the recorded CR3.  A context switch that
+ *               happens to land on a nearby RIP in a DIFFERENT address
+ *               space must NOT be mistaken for our single-step.
+ *
+ * Memory ordering (critical for correctness on weakly-ordered paths):
+ *
+ *   TRACKER SIDE (NptDbTrackRelaxedPage):
+ *       write Rip
+ *       write Cr3
+ *       _WriteBarrier()      ; prevent store-store reorder below
+ *       write PagePa         ; arms the tracker; MUST be last
+ *
+ *   OBSERVER SIDE (NptDbSnapshotRelaxedTracker):
+ *       read PagePa          ; if 0, bail out
+ *       _ReadBarrier()       ; prevent load-load reorder below
+ *       read Cr3
+ *       read Rip
+ *
+ *   With this discipline, whenever the observer sees PagePa != 0, the
+ *   Cr3/Rip it reads are guaranteed to be the pair that was written
+ *   BEFORE that PagePa (not stale values from a previous arming).
+ *
+ *   x86 has a strong memory model so _WriteBarrier / _ReadBarrier here
+ *   are effectively compiler barriers only — but writing them makes
+ *   the intent explicit and guards against cross-platform drift.
  */
+
 VOID NptDbTrackRelaxedPage(ULONG64 PagePhysicalAddr)
 {
-    ULONG CpuIndex = KeGetCurrentProcessorNumber();
-    if (g_NptDbRelaxedPagePa && CpuIndex < g_MaxProcessors) {
-        g_NptDbRelaxedPagePa[CpuIndex] = PagePhysicalAddr;
+    ULONG    CpuIndex = KeGetCurrentProcessorNumber();
+    ULONG64  GuestRip = 0;
+    ULONG64  GuestCr3 = 0;
+
+    if (CpuIndex >= g_MaxProcessors)  return;
+    if (!g_NptDbRelaxedPagePa)        return;
+    if (!g_NptDbRelaxedRip)           return;
+    if (!g_NptDbRelaxedCr3)           return;
+
+    if (g_SvmState.CpuContexts) {
+        PVMCB Vmcb = g_SvmState.CpuContexts[CpuIndex].VmcbVa;
+        if (Vmcb) {
+            GuestRip = Vmcb->Save.Rip;
+            GuestCr3 = Vmcb->Save.Cr3;
+        }
     }
+
+    /* Write Rip and Cr3 first. */
+    g_NptDbRelaxedRip[CpuIndex] = GuestRip;
+    g_NptDbRelaxedCr3[CpuIndex] = GuestCr3;
+
+    /*
+     * Ensure Rip/Cr3 stores are visible BEFORE we arm the tracker by
+     * writing PagePa last.  _WriteBarrier is a compiler barrier which
+     * combined with x86's strong ordering is sufficient.
+     */
+    _WriteBarrier();
+
+    g_NptDbRelaxedPagePa[CpuIndex] = PagePhysicalAddr;
 }
 
 /*
- * NptDbGetAndClearRelaxedPage - Get and clear the relaxed page for this CPU.
- * Called from SvmHandleDbException in svm_exit.c.
- * Returns 0 if no page was recorded (shouldn't happen normally).
+ * Atomic snapshot: returns all three recorded values in one go (if any).
+ * Does NOT clear the tracker — use NptDbClearRelaxedTracker for that.
+ */
+typedef struct _NPT_DB_SNAPSHOT {
+    ULONG64 PagePa;
+    ULONG64 Rip;
+    ULONG64 Cr3;
+} NPT_DB_SNAPSHOT, *PNPT_DB_SNAPSHOT;
+
+static VOID NptDbSnapshotRelaxedTracker(PNPT_DB_SNAPSHOT Snapshot)
+{
+    ULONG CpuIndex = KeGetCurrentProcessorNumber();
+
+    Snapshot->PagePa = 0;
+    Snapshot->Rip    = 0;
+    Snapshot->Cr3    = 0;
+
+    if (CpuIndex >= g_MaxProcessors)  return;
+    if (!g_NptDbRelaxedPagePa)        return;
+    if (!g_NptDbRelaxedRip)           return;
+    if (!g_NptDbRelaxedCr3)           return;
+
+    Snapshot->PagePa = g_NptDbRelaxedPagePa[CpuIndex];
+    _ReadBarrier();
+    Snapshot->Cr3    = g_NptDbRelaxedCr3[CpuIndex];
+    Snapshot->Rip    = g_NptDbRelaxedRip[CpuIndex];
+}
+
+static VOID NptDbClearRelaxedTracker(VOID)
+{
+    ULONG CpuIndex = KeGetCurrentProcessorNumber();
+    if (CpuIndex >= g_MaxProcessors) return;
+    /* Clear the "armed" flag FIRST — subsequent snapshot reads will bail out. */
+    if (g_NptDbRelaxedPagePa)        g_NptDbRelaxedPagePa[CpuIndex] = 0;
+    _WriteBarrier();
+    if (g_NptDbRelaxedRip)           g_NptDbRelaxedRip[CpuIndex] = 0;
+    if (g_NptDbRelaxedCr3)           g_NptDbRelaxedCr3[CpuIndex] = 0;
+}
+
+/*
+ * NptDbGetAndClearRelaxedPage - legacy API kept for source compatibility.
+ * Returns just the PagePa (the caller has already validated via
+ * NptDbMatchesOurRelaxation that this #DB is ours).
  */
 ULONG64 NptDbGetAndClearRelaxedPage(VOID)
 {
-    ULONG CpuIndex = KeGetCurrentProcessorNumber();
-    ULONG64 Pa = 0;
-    if (g_NptDbRelaxedPagePa && CpuIndex < g_MaxProcessors) {
-        Pa = g_NptDbRelaxedPagePa[CpuIndex];
-        g_NptDbRelaxedPagePa[CpuIndex] = 0;
-    }
+    NPT_DB_SNAPSHOT Snap;
+    ULONG64 Pa;
+
+    NptDbSnapshotRelaxedTracker(&Snap);
+    Pa = Snap.PagePa;
+    NptDbClearRelaxedTracker();
     return Pa;
+}
+
+/*
+ * M-4 (revised): return TRUE iff the current #DB matches the tracker
+ * recorded at the last NptDbTrackRelaxedPage call — that is, same CR3
+ * AND current RIP is within 15 bytes ahead of the recorded RIP.  This
+ * is the authoritative "is this #DB ours?" test.  The legacy name
+ * NptDbMatchesRelaxedRip is kept because callers already exist.
+ *
+ * Does NOT clear the tracker; the caller clears only after also doing
+ * the hook-restore work.
+ */
+BOOLEAN NptDbMatchesRelaxedRip(ULONG64 CurrentRip)
+{
+    NPT_DB_SNAPSHOT Snap;
+    ULONG CpuIndex;
+
+    NptDbSnapshotRelaxedTracker(&Snap);
+    if (Snap.PagePa == 0) return FALSE;   /* not armed */
+
+    /* Compare CR3 — rejects cross-process RIP coincidence. */
+    if (g_SvmState.CpuContexts) {
+        CpuIndex = KeGetCurrentProcessorNumber();
+        if (CpuIndex < g_MaxProcessors) {
+            PVMCB Vmcb = g_SvmState.CpuContexts[CpuIndex].VmcbVa;
+            if (Vmcb) {
+                /*
+                 * Mask PCID + high bits — same logic as
+                 * ProcessFindByCr3 (M-2).
+                 */
+                ULONG64 CurCr3 = Vmcb->Save.Cr3 & 0x000FFFFFFFFFF000ULL;
+                ULONG64 OldCr3 = Snap.Cr3       & 0x000FFFFFFFFFF000ULL;
+                if (CurCr3 != OldCr3) return FALSE;
+            }
+        }
+    }
+
+    /* Compare RIP window. */
+    if (CurrentRip >= Snap.Rip && (CurrentRip - Snap.Rip) <= 15) {
+        return TRUE;
+    }
+    return FALSE;
 }
 
 typedef struct _NPT_SPLIT_PAGE {
@@ -210,6 +388,79 @@ static ULONG64 NptVaToPhysical(PVOID Va)
 }
 
 /* ========================================================================= */
+/*  Flat PDPT-index helpers (for > 512GB identity map support, mirror of EPT)*/
+/* ========================================================================= */
+
+static __forceinline ULONG NptPaToFlatPdptIdx(ULONG64 PhysicalAddress)
+{
+    ULONG64 Flat = PhysicalAddress >> 30;
+    if (Flat >= (ULONG64)g_NptPdptTotal) return (ULONG)-1;
+    return (ULONG)Flat;
+}
+
+static __forceinline VOID NptFlatIdxSplit(ULONG FlatIdx, PULONG Pml4Idx, PULONG PdptIdx)
+{
+    *Pml4Idx = FlatIdx >> 9;
+    *PdptIdx = FlatIdx & 0x1FF;
+}
+
+static __forceinline PEPT_PDPTE NptGetSharedPdptePtr(ULONG FlatIdx)
+{
+    ULONG Pml4Idx, PdptIdx;
+    NptFlatIdxSplit(FlatIdx, &Pml4Idx, &PdptIdx);
+    if (Pml4Idx == 0) {
+        return &g_NptState.Pdpt[PdptIdx];
+    }
+    if (g_NptExtPdptPages) {
+        return &g_NptExtPdptPages[Pml4Idx - 1].Entries[PdptIdx];
+    }
+    return NULL;
+}
+
+static __forceinline PEPT_PDPTE NptGetCpuPdptePtr(ULONG CpuIndex, ULONG FlatIdx)
+{
+    ULONG Pml4Idx, PdptIdx;
+    if (!g_NptCpuStates || CpuIndex >= g_MaxProcessors) return NULL;
+    NptFlatIdxSplit(FlatIdx, &Pml4Idx, &PdptIdx);
+    if (Pml4Idx == 0) {
+        return &g_NptCpuStates[CpuIndex].Pdpt[PdptIdx];
+    }
+    if (g_NptCpuExtPdpt && g_NptCpuExtPdpt[CpuIndex]) {
+        return &g_NptCpuExtPdpt[CpuIndex][Pml4Idx - 1].Entries[PdptIdx];
+    }
+    return NULL;
+}
+
+static ULONG NptComputeRequiredPdPages(VOID)
+{
+    PPHYSICAL_MEMORY_RANGE Ranges;
+    ULONG64 MaxPa = 0;
+    ULONG   i;
+    ULONG64 Required1GB;
+
+    Ranges = MmGetPhysicalMemoryRanges();
+    if (Ranges) {
+        for (i = 0; Ranges[i].BaseAddress.QuadPart != 0 || Ranges[i].NumberOfBytes.QuadPart != 0; i++) {
+            ULONG64 End = (ULONG64)Ranges[i].BaseAddress.QuadPart +
+                          (ULONG64)Ranges[i].NumberOfBytes.QuadPart;
+            if (End > MaxPa) MaxPa = End;
+        }
+        ExFreePool(Ranges);
+    }
+
+    MaxPa += (2ULL * 1024 * 1024 * 1024);  /* 2GB headroom for MMIO */
+    Required1GB = (MaxPa + ((1ULL << 30) - 1)) >> 30;
+
+    if (Required1GB < NPT_DEFAULT_PD_PAGES) Required1GB = NPT_DEFAULT_PD_PAGES;
+    if (Required1GB > NPT_MAX_PD_PAGES_CAP) Required1GB = NPT_MAX_PD_PAGES_CAP;
+
+    /* Round up to whole PDPT page */
+    Required1GB = (Required1GB + 511) & ~((ULONG64)511);
+
+    return (ULONG)Required1GB;
+}
+
+/* ========================================================================= */
 /*  NPT Identity Map Setup                                                   */
 /* ========================================================================= */
 
@@ -218,6 +469,8 @@ NTSTATUS NptInitialize(VOID)
     ULONG i, j;
     ULONG64 PhysAddr;
     ULONG64 PdptPa;
+    ULONG   RequiredPdpt;
+    ULONG   Pml4Count;
 
     if (g_NptState.Initialized) {
         return STATUS_ALREADY_REGISTERED;
@@ -226,6 +479,21 @@ NTSTATUS NptInitialize(VOID)
     RtlZeroMemory(&g_NptState, sizeof(NPT_STATE));
     RtlZeroMemory(&g_NptHookState, sizeof(NPT_HOOK_STATE));
     KeInitializeSpinLock(&g_NptHookState.Lock);
+
+    /* H-2: detect required identity-map size */
+    RequiredPdpt = NptComputeRequiredPdPages();
+    Pml4Count    = RequiredPdpt / EPT_PDPTE_COUNT;
+    if (Pml4Count == 0) Pml4Count = 1;
+    if (Pml4Count > EPT_PML4E_COUNT) {
+        LOG_ERROR("NPT: required PML4 count %u exceeds hardware max %u",
+                  Pml4Count, (ULONG)EPT_PML4E_COUNT);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    g_NptPdptTotal = RequiredPdpt;
+    g_NptPml4Count = Pml4Count;
+
+    LOG_INFO("NPT identity map sizing: %u PDPT entries (%llu GB), %u PML4 entries",
+             g_NptPdptTotal, (ULONG64)g_NptPdptTotal, g_NptPml4Count);
 
     /*
      * BUG FIX (Issue #3+5+6): Initialize hash tables for O(1) lookups.
@@ -247,48 +515,126 @@ NTSTATUS NptInitialize(VOID)
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         RtlZeroMemory((PVOID)g_NptDbRelaxedPagePa, g_MaxProcessors * sizeof(ULONG64));
+
+        /* M-4: parallel array for the guest RIP recorded at relaxation time. */
+        g_NptDbRelaxedRip = (volatile ULONG64 *)ExAllocatePoolWithTag(
+            NonPagedPool, g_MaxProcessors * sizeof(ULONG64), 'tpnR');
+        if (!g_NptDbRelaxedRip) {
+            LOG_ERROR("Failed to allocate NPT per-CPU RIP tracking array");
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM');
+            g_NptDbRelaxedPagePa = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory((PVOID)g_NptDbRelaxedRip, g_MaxProcessors * sizeof(ULONG64));
+
+        /*
+         * M-4 (revised): parallel array for the guest CR3 at relaxation.
+         * Needed so the #DB handler can distinguish "our" single-step (same
+         * process, RIP ≤ 15 bytes ahead) from a coincidental #DB in a
+         * different address space that happens to land on the same RIP
+         * value.  Without CR3 pairing, a context switch during the
+         * single-step window could make a foreign #DB look like ours and
+         * swallow it silently.
+         */
+        g_NptDbRelaxedCr3 = (volatile ULONG64 *)ExAllocatePoolWithTag(
+            NonPagedPool, g_MaxProcessors * sizeof(ULONG64), 'tpnC');
+        if (!g_NptDbRelaxedCr3) {
+            LOG_ERROR("Failed to allocate NPT per-CPU CR3 tracking array");
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedRip, 'tpnR');
+            g_NptDbRelaxedRip = NULL;
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM');
+            g_NptDbRelaxedPagePa = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory((PVOID)g_NptDbRelaxedCr3, g_MaxProcessors * sizeof(ULONG64));
     }
 
-    /* Allocate Page Directory pages */
+    /* Allocate Page Directory pages (H-2: sized by g_NptPdptTotal) */
     g_NptPdPages = (NPT_PD_PAGE *)ExAllocatePoolWithTag(
-        NonPagedPool, sizeof(NPT_PD_PAGE) * NPT_MAX_PD_PAGES, SVM_TAG);
+        NonPagedPool, sizeof(NPT_PD_PAGE) * g_NptPdptTotal, SVM_TAG);
     if (!g_NptPdPages) {
-        LOG_ERROR("Failed to allocate NPT page directory pages");
-        /*
-         * BUG FIX (Review Issue #5): Free per-CPU tracking array on failure.
-         * Previously leaked g_NptDbRelaxedPagePa.
-         */
+        LOG_ERROR("Failed to allocate NPT page directory pages (%u pages)", g_NptPdptTotal);
         if (g_NptDbRelaxedPagePa) {
             ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM');
             g_NptDbRelaxedPagePa = NULL;
         }
+        if (g_NptDbRelaxedRip) {
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedRip, 'tpnR');
+            g_NptDbRelaxedRip = NULL;
+        }
+        if (g_NptDbRelaxedCr3) {
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedCr3, 'tpnC');
+            g_NptDbRelaxedCr3 = NULL;
+        }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlZeroMemory(g_NptPdPages, sizeof(NPT_PD_PAGE) * NPT_MAX_PD_PAGES);
+    RtlZeroMemory(g_NptPdPages, sizeof(NPT_PD_PAGE) * g_NptPdptTotal);
+
+    /* H-2: allocate dynamic g_NptPerCpuPdAllocated bitmap */
+    g_NptPerCpuPdAllocated = (PBOOLEAN)ExAllocatePoolWithTag(
+        NonPagedPool, g_NptPdptTotal * sizeof(BOOLEAN), 'tpnA');
+    if (!g_NptPerCpuPdAllocated) {
+        LOG_ERROR("Failed to allocate NPT per-CPU PD tracking bitmap");
+        ExFreePoolWithTag(g_NptPdPages, SVM_TAG); g_NptPdPages = NULL;
+        if (g_NptDbRelaxedPagePa) { ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM'); g_NptDbRelaxedPagePa = NULL; }
+        if (g_NptDbRelaxedRip)    { ExFreePoolWithTag((PVOID)g_NptDbRelaxedRip,    'tpnR'); g_NptDbRelaxedRip = NULL; }
+        if (g_NptDbRelaxedCr3)    { ExFreePoolWithTag((PVOID)g_NptDbRelaxedCr3,    'tpnC'); g_NptDbRelaxedCr3 = NULL; }
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(g_NptPerCpuPdAllocated, g_NptPdptTotal * sizeof(BOOLEAN));
+
+    /* H-2: allocate extended PDPT pages for PML4[1..] if needed */
+    if (g_NptPml4Count > 1) {
+        ULONG ExtCount = g_NptPml4Count - 1;
+        g_NptExtPdptPages = (NPT_PDPT_PAGE *)ExAllocatePoolWithTag(
+            NonPagedPool, sizeof(NPT_PDPT_PAGE) * ExtCount, 'tpnX');
+        if (!g_NptExtPdptPages) {
+            LOG_ERROR("Failed to allocate %u NPT extended PDPT pages", ExtCount);
+            ExFreePoolWithTag(g_NptPerCpuPdAllocated, 'tpnA'); g_NptPerCpuPdAllocated = NULL;
+            ExFreePoolWithTag(g_NptPdPages, SVM_TAG); g_NptPdPages = NULL;
+            if (g_NptDbRelaxedPagePa) { ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM'); g_NptDbRelaxedPagePa = NULL; }
+            if (g_NptDbRelaxedRip)    { ExFreePoolWithTag((PVOID)g_NptDbRelaxedRip,    'tpnR'); g_NptDbRelaxedRip = NULL; }
+            if (g_NptDbRelaxedCr3)    { ExFreePoolWithTag((PVOID)g_NptDbRelaxedCr3,    'tpnC'); g_NptDbRelaxedCr3 = NULL; }
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(g_NptExtPdptPages, sizeof(NPT_PDPT_PAGE) * ExtCount);
+    }
 
     /* Allocate split page pool */
     g_NptSplitPages = (NPT_SPLIT_PAGE *)ExAllocatePoolWithTag(
         NonPagedPool, sizeof(NPT_SPLIT_PAGE) * NPT_MAX_SPLIT_PAGES, SVM_TAG);
     if (!g_NptSplitPages) {
         LOG_ERROR("Failed to allocate NPT split page pool");
-        ExFreePoolWithTag(g_NptPdPages, SVM_TAG);
+        if (g_NptExtPdptPages) { ExFreePoolWithTag(g_NptExtPdptPages, 'tpnX'); g_NptExtPdptPages = NULL; }
+        ExFreePoolWithTag(g_NptPerCpuPdAllocated, 'tpnA'); g_NptPerCpuPdAllocated = NULL;
+        ExFreePoolWithTag(g_NptPdPages, SVM_TAG); g_NptPdPages = NULL;
         if (g_NptDbRelaxedPagePa) {
             ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM');
             g_NptDbRelaxedPagePa = NULL;
+        }
+        if (g_NptDbRelaxedRip) {
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedRip, 'tpnR');
+            g_NptDbRelaxedRip = NULL;
+        }
+        if (g_NptDbRelaxedCr3) {
+            ExFreePoolWithTag((PVOID)g_NptDbRelaxedCr3, 'tpnC');
+            g_NptDbRelaxedCr3 = NULL;
         }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(g_NptSplitPages, sizeof(NPT_SPLIT_PAGE) * NPT_MAX_SPLIT_PAGES);
 
-    /* Build identity-mapped NPT using 2MB large pages */
-    for (i = 0; i < NPT_MAX_PD_PAGES && i < EPT_PDPTE_COUNT; i++) {
-        ULONG64 PdPa = NptVaToPhysical(&g_NptPdPages[i]);
+    /* Build identity-mapped NPT using 2MB large pages (flat index over all PML4s) */
+    for (i = 0; i < g_NptPdptTotal; i++) {
+        ULONG64    PdPa  = NptVaToPhysical(&g_NptPdPages[i]);
+        PEPT_PDPTE Pdpte = NptGetSharedPdptePtr(i);
+        if (!Pdpte) continue;
 
-        g_NptState.Pdpt[i].Value = 0;
-        g_NptState.Pdpt[i].Read = 1;
-        g_NptState.Pdpt[i].Write = 1;
-        g_NptState.Pdpt[i].Execute = 1;
-        g_NptState.Pdpt[i].PhysAddr = PdPa >> 12;
+        Pdpte->Value    = 0;
+        Pdpte->Read     = 1;
+        Pdpte->Write    = 1;
+        Pdpte->Execute  = 1;
+        Pdpte->PhysAddr = PdPa >> 12;
 
         for (j = 0; j < EPT_PDE_COUNT; j++) {
             PhysAddr = ((ULONG64)i * 512 + j) * (2 * 1024 * 1024);
@@ -302,7 +648,7 @@ NTSTATUS NptInitialize(VOID)
         }
     }
 
-    /* Setup PML4[0] to point to PDPT */
+    /* Setup PML4[0..Pml4Count-1] */
     PdptPa = NptVaToPhysical(g_NptState.Pdpt);
     g_NptState.Pml4[0].Value = 0;
     g_NptState.Pml4[0].Read = 1;
@@ -310,12 +656,22 @@ NTSTATUS NptInitialize(VOID)
     g_NptState.Pml4[0].Execute = 1;
     g_NptState.Pml4[0].PhysAddr = PdptPa >> 12;
 
+    for (i = 1; i < g_NptPml4Count; i++) {
+        ULONG64 ExtPa = NptVaToPhysical(&g_NptExtPdptPages[i - 1]);
+        g_NptState.Pml4[i].Value    = 0;
+        g_NptState.Pml4[i].Read     = 1;
+        g_NptState.Pml4[i].Write    = 1;
+        g_NptState.Pml4[i].Execute  = 1;
+        g_NptState.Pml4[i].PhysAddr = ExtPa >> 12;
+    }
+
     g_NptState.Pml4Pa = NptVaToPhysical(g_NptState.Pml4);
 
     g_NptState.Initialized = TRUE;
     g_NptHookState.Initialized = TRUE;
 
-    LOG_INFO("NPT initialized: identity map for 512GB, PML4PA=0x%llX", g_NptState.Pml4Pa);
+    LOG_INFO("NPT initialized: identity map for %llu GB across %u PML4 entries, PML4PA=0x%llX",
+             (ULONG64)g_NptPdptTotal, g_NptPml4Count, g_NptState.Pml4Pa);
     return STATUS_SUCCESS;
 }
 
@@ -343,10 +699,30 @@ VOID NptCleanup(VOID)
         g_NptPdPages = NULL;
     }
 
+    /* H-2: release extended PDPT pages and dynamic bitmap */
+    if (g_NptExtPdptPages) {
+        ExFreePoolWithTag(g_NptExtPdptPages, 'tpnX');
+        g_NptExtPdptPages = NULL;
+    }
+    if (g_NptPerCpuPdAllocated) {
+        ExFreePoolWithTag(g_NptPerCpuPdAllocated, 'tpnA');
+        g_NptPerCpuPdAllocated = NULL;
+    }
+
     /* Free per-CPU tracking array */
     if (g_NptDbRelaxedPagePa) {
         ExFreePoolWithTag((PVOID)g_NptDbRelaxedPagePa, 'tpnM');
         g_NptDbRelaxedPagePa = NULL;
+    }
+    /* M-4: free the parallel RIP tracking array. */
+    if (g_NptDbRelaxedRip) {
+        ExFreePoolWithTag((PVOID)g_NptDbRelaxedRip, 'tpnR');
+        g_NptDbRelaxedRip = NULL;
+    }
+    /* M-4 (revised): free the parallel CR3 tracking array. */
+    if (g_NptDbRelaxedCr3) {
+        ExFreePoolWithTag((PVOID)g_NptDbRelaxedCr3, 'tpnC');
+        g_NptDbRelaxedCr3 = NULL;
     }
 
     g_NptState.Initialized = FALSE;
@@ -367,22 +743,23 @@ ULONG64 NptGetRootPageTablePa(VOID)
 VOID NptSplitLargePage(ULONG64 PhysicalAddress)
 {
     ULONG64     Base2MB;
-    ULONG       PdptIndex, PdIndex;
+    ULONG       FlatPdptIdx, PdIndex;
     PEPT_PDE    TargetPde;
     PNPT_SPLIT_PAGE SplitPage = NULL;
     ULONG       i;
     ULONG       splitIdx = (ULONG)-1;
 
-    Base2MB = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
-    PdptIndex = (ULONG)((Base2MB >> 30) & 0x1FF);
-    PdIndex   = (ULONG)((Base2MB >> 21) & 0x1FF);
+    Base2MB     = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
+    FlatPdptIdx = NptPaToFlatPdptIdx(Base2MB);
+    PdIndex     = (ULONG)((Base2MB >> 21) & 0x1FF);
 
-    if (PdptIndex >= NPT_MAX_PD_PAGES) {
-        LOG_ERROR("NPT split: address 0x%llX beyond mapped range", PhysicalAddress);
+    if (FlatPdptIdx == (ULONG)-1) {
+        LOG_ERROR("NPT split: address 0x%llX beyond mapped range (max %llu GB)",
+                  PhysicalAddress, (ULONG64)g_NptPdptTotal);
         return;
     }
 
-    TargetPde = &g_NptPdPages[PdptIndex].Entries[PdIndex];
+    TargetPde = &g_NptPdPages[FlatPdptIdx].Entries[PdIndex];
 
     if (!TargetPde->LargePage) {
         return;  /* Already split */
@@ -442,20 +819,20 @@ VOID NptSplitLargePage(ULONG64 PhysicalAddress)
 PEPT_PTE NptGetPteForPhysicalAddress(ULONG64 PhysicalAddress)
 {
     ULONG64     Base2MB;
-    ULONG       PdptIndex, PdIndex, PtIndex;
+    ULONG       FlatPdptIdx, PdIndex, PtIndex;
     PEPT_PDE    Pde;
     ULONG       splitIdx;
 
-    Base2MB = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
-    PdptIndex = (ULONG)((PhysicalAddress >> 30) & 0x1FF);
-    PdIndex   = (ULONG)((PhysicalAddress >> 21) & 0x1FF);
-    PtIndex   = (ULONG)((PhysicalAddress >> 12) & 0x1FF);
+    Base2MB     = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
+    FlatPdptIdx = NptPaToFlatPdptIdx(PhysicalAddress);
+    PdIndex     = (ULONG)((PhysicalAddress >> 21) & 0x1FF);
+    PtIndex     = (ULONG)((PhysicalAddress >> 12) & 0x1FF);
 
-    if (PdptIndex >= NPT_MAX_PD_PAGES) {
+    if (FlatPdptIdx == (ULONG)-1) {
         return NULL;
     }
 
-    Pde = &g_NptPdPages[PdptIndex].Entries[PdIndex];
+    Pde = &g_NptPdPages[FlatPdptIdx].Entries[PdIndex];
 
     if (Pde->LargePage) {
         return NULL;  /* Need to split first */
@@ -517,6 +894,16 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 
     PageBase = TargetPa & ~0xFFFULL;
     PageOffset = (ULONG)(TargetPa & 0xFFF);
+
+    /*
+     * L-4 FIX: JMP patch requires 12 bytes; reject hook points too close
+     * to the page end.  See ept.c for rationale (same logic).
+     */
+    if (PageOffset + 12 > PAGE_SIZE) {
+        LOG_ERROR("NPT Hook: TargetVa 0x%llX too close to page end "
+                  "(offset=0x%X, need 12 bytes)", TargetVa, PageOffset);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     KeAcquireSpinLock(&g_NptHookState.Lock, &OldIrql);
 
@@ -755,30 +1142,35 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
      * then replicate the same PTE permissions on each CPU's private copy.
      */
     if (g_NptCpuStates && g_NptPerCpuSplitPages && g_NptPerCpuPdPages) {
-        ULONG PdptIdx = (ULONG)((PageBase >> 30) & 0x1FF);
+        /* H-2: flat PDPT index supports > 512GB */
+        ULONG PdptIdx = NptPaToFlatPdptIdx(PageBase);
         ULONG PdIdx   = (ULONG)((PageBase >> 21) & 0x1FF);
         ULONG splitIdx, cpu;
         NTSTATUS PerCpuStatus;
 
-        PerCpuStatus = NptEnsurePerCpuPdForRegion(PdptIdx);
-        if (NT_SUCCESS(PerCpuStatus)) {
-            /*
-             * BUG FIX (Issue #3+5+6): Use hash lookup for split page index.
-             */
-            splitIdx = NptSplitHashLookup(PageBase & ~((2ULL * 1024 * 1024) - 1));
-            if (splitIdx != EPT_SPLIT_HASH_EMPTY && splitIdx < NPT_MAX_SPLIT_PAGES) {
-                PerCpuStatus = NptEnsurePerCpuSplitPage(splitIdx, PdptIdx, PdIdx);
-                if (NT_SUCCESS(PerCpuStatus)) {
-                    for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
-                        PEPT_PTE CpuPte = NptGetPerCpuPte(cpu, TargetPa);
-                        if (CpuPte) {
-                            CpuPte->Read = Pte->Read;
-                            CpuPte->Write = Pte->Write;
-                            CpuPte->Execute = Pte->Execute;
-                            CpuPte->PhysAddr = Pte->PhysAddr;
+        if (PdptIdx == (ULONG)-1) {
+            LOG_ERROR("NPT hook: page base 0x%llX beyond identity map", PageBase);
+        } else {
+            PerCpuStatus = NptEnsurePerCpuPdForRegion(PdptIdx);
+            if (NT_SUCCESS(PerCpuStatus)) {
+                /*
+                 * BUG FIX (Issue #3+5+6): Use hash lookup for split page index.
+                 */
+                splitIdx = NptSplitHashLookup(PageBase & ~((2ULL * 1024 * 1024) - 1));
+                if (splitIdx != EPT_SPLIT_HASH_EMPTY && splitIdx < NPT_MAX_SPLIT_PAGES) {
+                    PerCpuStatus = NptEnsurePerCpuSplitPage(splitIdx, PdptIdx, PdIdx);
+                    if (NT_SUCCESS(PerCpuStatus)) {
+                        for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
+                            PEPT_PTE CpuPte = NptGetPerCpuPte(cpu, TargetPa);
+                            if (CpuPte) {
+                                CpuPte->Read = Pte->Read;
+                                CpuPte->Write = Pte->Write;
+                                CpuPte->Execute = Pte->Execute;
+                                CpuPte->PhysAddr = Pte->PhysAddr;
+                            }
                         }
+                        LOG_INFO("Per-CPU NPT isolation set up for hook at PA=0x%llX", PageBase);
                     }
-                    LOG_INFO("Per-CPU NPT isolation set up for hook at PA=0x%llX", PageBase);
                 }
             }
         }
@@ -791,6 +1183,14 @@ NTSTATUS NptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
     KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
 
     NptInvalidateAll();
+
+    /*
+     * C-3: NPT hooks need #DB to drive their single-step restore cycle.
+     * Make sure #DB intercept is enabled across all CPUs.  The change
+     * takes effect on each CPU's next VMRUN.  #BP intercept is managed
+     * independently by anti-anti-debug.
+     */
+    SvmSetExceptionInterceptDb(TRUE);
 
     LOG_INFO("NPT Hook installed: VA=0x%llX -> Hook=0x%p, Trampoline=0x%p%s",
              TargetVa, HookFunction, Hook->TrampolineVa,
@@ -873,8 +1273,12 @@ NTSTATUS NptUnhookFunction(ULONG64 TargetVa)
 
                 KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
 
-                /* TLB flush BEFORE freeing pages — prevents UAF from stale TLB */
-                NptInvalidateAll();
+                /*
+                 * H-5 FIX: synchronous IPI-based flush on all CPUs before
+                 * freeing pages — prevents UAF from stale TLB on
+                 * HLT-ing CPUs.
+                 */
+                NptInvalidateAllCpusSync();
 
                 /* Pass 2: Now safe to free pages */
                 if (FreeOriginalPage) ExFreePoolWithTag(FreeOriginalPage, SVM_TAG);
@@ -897,6 +1301,17 @@ NTSTATUS NptUnhookFunction(ULONG64 TargetVa)
 
                 KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
                 NptInvalidateAll();
+            }
+
+            /*
+             * C-3: if we just removed the last hook, disable #DB intercept.
+             * HookCount is read without the spin lock here — this is fine
+             * because SvmSetExceptionInterceptDb is idempotent (guards via
+             * its own lock) and the worst case on a race is a momentary
+             * redundant enable/disable.
+             */
+            if (g_NptHookState.HookCount == 0) {
+                SvmSetExceptionInterceptDb(FALSE);
             }
 
             return STATUS_SUCCESS;
@@ -961,11 +1376,12 @@ VOID NptUnhookAll(VOID)
     KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
 
     /*
-     * Flush NPT TLB on all CPUs BEFORE freeing any pages.
-     * This ensures no CPU still has stale TLB entries pointing to
-     * pages we're about to free.
+     * H-5 FIX: synchronously flush NPT TLB on ALL CPUs via IPI before
+     * freeing pages.  NptInvalidateAll() only queues a flush for the
+     * next VMRUN; if any CPU is in HLT / C-state it won't VMRUN and we
+     * can UAF on freed pages through its stale TLB.
      */
-    NptInvalidateAll();
+    NptInvalidateAllCpusSync();
 
     /* Pass 2: Free memory (safe now that TLB is flushed) */
     KeAcquireSpinLock(&g_NptHookState.Lock, &OldIrql);
@@ -999,6 +1415,9 @@ VOID NptUnhookAll(VOID)
     }
 
     KeReleaseSpinLock(&g_NptHookState.Lock, OldIrql);
+
+    /* C-3: no hooks left → disable #DB intercept (AAD's #BP untouched). */
+    SvmSetExceptionInterceptDb(FALSE);
 }
 
 /* ========================================================================= */
@@ -1073,6 +1492,16 @@ BOOLEAN NptHandlePageFault(PVOID GuestContext)
     Hook = NptFindHookByPhysicalAddress(GuestPhysAddr);
 
     if (!Hook) {
+        /*
+         * H-2: if GPA is beyond the identity map, resuming would loop forever.
+         * Signal SVM shutdown so the host returns control safely.
+         */
+        if (NptPaToFlatPdptIdx(GuestPhysAddr) == (ULONG)-1) {
+            LOG_ERROR("NPF beyond identity map: GPA=0x%llX (map covers %llu GB) - shutting down SVM",
+                      GuestPhysAddr, (ULONG64)g_NptPdptTotal);
+            return FALSE;
+        }
+
         /* NPF on non-hooked page - fix by setting R+W+X */
         LOG_WARN("NPF on non-hooked page: GPA=0x%llX, Info1=0x%llX",
                  GuestPhysAddr, ExitInfo1);
@@ -1169,8 +1598,41 @@ NTSTATUS NptInitPerCpu(VOID)
     }
     RtlZeroMemory(g_NptPerCpuPdPages, g_MaxProcessors * sizeof(NPT_PER_CPU_PD_PAGE *));
 
+    /* H-2: allocate per-CPU extended PDPT pages for PML4[1..] if needed */
+    if (g_NptPml4Count > 1) {
+        ULONG ExtCount = g_NptPml4Count - 1;
+        g_NptCpuExtPdpt = (NPT_PDPT_PAGE **)ExAllocatePoolWithTag(
+            NonPagedPool, g_MaxProcessors * sizeof(NPT_PDPT_PAGE *), 'tpNX');
+        if (!g_NptCpuExtPdpt) {
+            ExFreePoolWithTag(g_NptPerCpuPdPages, 'tpNP'); g_NptPerCpuPdPages = NULL;
+            ExFreePoolWithTag(g_NptPerCpuSplitPages, 'tpNS'); g_NptPerCpuSplitPages = NULL;
+            ExFreePoolWithTag(g_NptCpuStates, 'tpNC'); g_NptCpuStates = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(g_NptCpuExtPdpt, g_MaxProcessors * sizeof(NPT_PDPT_PAGE *));
+
+        for (i = 0; i < g_MaxProcessors; i++) {
+            g_NptCpuExtPdpt[i] = (NPT_PDPT_PAGE *)ExAllocatePoolWithTag(
+                NonPagedPool, sizeof(NPT_PDPT_PAGE) * ExtCount, 'tpNX');
+            if (!g_NptCpuExtPdpt[i]) {
+                ULONG k;
+                for (k = 0; k < i; k++) {
+                    if (g_NptCpuExtPdpt[k]) ExFreePoolWithTag(g_NptCpuExtPdpt[k], 'tpNX');
+                }
+                ExFreePoolWithTag(g_NptCpuExtPdpt, 'tpNX'); g_NptCpuExtPdpt = NULL;
+                ExFreePoolWithTag(g_NptPerCpuPdPages, 'tpNP'); g_NptPerCpuPdPages = NULL;
+                ExFreePoolWithTag(g_NptPerCpuSplitPages, 'tpNS'); g_NptPerCpuSplitPages = NULL;
+                ExFreePoolWithTag(g_NptCpuStates, 'tpNC'); g_NptCpuStates = NULL;
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            RtlCopyMemory(g_NptCpuExtPdpt[i], g_NptExtPdptPages,
+                          sizeof(NPT_PDPT_PAGE) * ExtCount);
+        }
+    }
+
     for (i = 0; i < g_MaxProcessors; i++) {
         ULONG64 PdptPa;
+        ULONG   pml4;
 
         RtlCopyMemory(g_NptCpuStates[i].Pml4, g_NptState.Pml4, sizeof(g_NptState.Pml4));
         RtlCopyMemory(g_NptCpuStates[i].Pdpt, g_NptState.Pdpt, sizeof(g_NptState.Pdpt));
@@ -1178,10 +1640,16 @@ NTSTATUS NptInitPerCpu(VOID)
         PdptPa = NptVaToPhysical(g_NptCpuStates[i].Pdpt);
         g_NptCpuStates[i].Pml4[0].PhysAddr = PdptPa >> 12;
 
+        /* H-2: update PML4[1..] to this CPU's extended PDPT pages */
+        for (pml4 = 1; pml4 < g_NptPml4Count; pml4++) {
+            ULONG64 ExtPa = NptVaToPhysical(&g_NptCpuExtPdpt[i][pml4 - 1]);
+            g_NptCpuStates[i].Pml4[pml4].PhysAddr = ExtPa >> 12;
+        }
+
         g_NptCpuStates[i].Pml4Pa = NptVaToPhysical(g_NptCpuStates[i].Pml4);
     }
 
-    RtlZeroMemory(g_NptPerCpuPdAllocated, sizeof(g_NptPerCpuPdAllocated));
+    /* H-2: g_NptPerCpuPdAllocated is dynamic; already zeroed in NptInitialize */
 
     LOG_INFO("Per-CPU NPT initialized for %u CPUs", g_MaxProcessors);
     return STATUS_SUCCESS;
@@ -1211,6 +1679,17 @@ VOID NptCleanupPerCpu(VOID)
         g_NptPerCpuPdPages = NULL;
     }
 
+    /* H-2: release per-CPU extended PDPT pages */
+    if (g_NptCpuExtPdpt) {
+        for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
+            if (g_NptCpuExtPdpt[cpu]) {
+                ExFreePoolWithTag(g_NptCpuExtPdpt[cpu], 'tpNX');
+            }
+        }
+        ExFreePoolWithTag(g_NptCpuExtPdpt, 'tpNX');
+        g_NptCpuExtPdpt = NULL;
+    }
+
     if (g_NptCpuStates) {
         ExFreePoolWithTag(g_NptCpuStates, 'tpNC');
         g_NptCpuStates = NULL;
@@ -1219,39 +1698,42 @@ VOID NptCleanupPerCpu(VOID)
     LOG_INFO("Per-CPU NPT cleaned up");
 }
 
-static NTSTATUS NptEnsurePerCpuPdForRegion(ULONG PdptIndex)
+static NTSTATUS NptEnsurePerCpuPdForRegion(ULONG FlatPdptIndex)
 {
     ULONG cpu;
 
-    if (PdptIndex >= NPT_MAX_PD_PAGES) return STATUS_INVALID_PARAMETER;
-    if (g_NptPerCpuPdAllocated[PdptIndex]) return STATUS_SUCCESS;
+    if (FlatPdptIndex >= g_NptPdptTotal) return STATUS_INVALID_PARAMETER;
+    if (g_NptPerCpuPdAllocated[FlatPdptIndex]) return STATUS_SUCCESS;
 
     for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
         if (!g_NptPerCpuPdPages[cpu]) {
             g_NptPerCpuPdPages[cpu] = (NPT_PER_CPU_PD_PAGE *)ExAllocatePoolWithTag(
-                NonPagedPool, sizeof(NPT_PER_CPU_PD_PAGE) * NPT_MAX_PD_PAGES, 'tpNP');
+                NonPagedPool, sizeof(NPT_PER_CPU_PD_PAGE) * g_NptPdptTotal, 'tpNP');
             if (!g_NptPerCpuPdPages[cpu]) {
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
             RtlCopyMemory(g_NptPerCpuPdPages[cpu], g_NptPdPages,
-                          sizeof(NPT_PER_CPU_PD_PAGE) * NPT_MAX_PD_PAGES);
+                          sizeof(NPT_PER_CPU_PD_PAGE) * g_NptPdptTotal);
         }
 
         {
-            ULONG64 CpuPdPa = NptVaToPhysical(&g_NptPerCpuPdPages[cpu][PdptIndex]);
-            g_NptCpuStates[cpu].Pdpt[PdptIndex].PhysAddr = CpuPdPa >> 12;
+            ULONG64    CpuPdPa = NptVaToPhysical(&g_NptPerCpuPdPages[cpu][FlatPdptIndex]);
+            PEPT_PDPTE CpuPdpte = NptGetCpuPdptePtr(cpu, FlatPdptIndex);
+            if (!CpuPdpte) return STATUS_UNSUCCESSFUL;
+            CpuPdpte->PhysAddr = CpuPdPa >> 12;
         }
     }
 
-    g_NptPerCpuPdAllocated[PdptIndex] = TRUE;
+    g_NptPerCpuPdAllocated[FlatPdptIndex] = TRUE;
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG PdIndex)
+static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG FlatPdptIndex, ULONG PdIndex)
 {
     ULONG cpu;
 
     if (splitIdx >= NPT_MAX_SPLIT_PAGES) return STATUS_INVALID_PARAMETER;
+    if (FlatPdptIndex >= g_NptPdptTotal) return STATUS_INVALID_PARAMETER;
 
     for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
         if (!g_NptPerCpuSplitPages[cpu]) {
@@ -1274,7 +1756,7 @@ static NTSTATUS NptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
         }
 
         if (g_NptPerCpuPdPages[cpu]) {
-            PEPT_PDE CpuPde = &g_NptPerCpuPdPages[cpu][PdptIndex].Entries[PdIndex];
+            PEPT_PDE CpuPde = &g_NptPerCpuPdPages[cpu][FlatPdptIndex].Entries[PdIndex];
             CpuPde->Value = 0;
             CpuPde->Read = 1;
             CpuPde->Write = 1;
@@ -1345,4 +1827,70 @@ VOID NptInvalidateAll(VOID)
             g_SvmState.CpuContexts[i].VmcbVa->Control.TlbCtl = TLB_CONTROL_FLUSH_ALL_ASID;
         }
     }
+}
+
+/*
+ * H-5 (revised) FIX: synchronous TLB flush across all CPUs (NPT side).
+ *
+ * SVM has no root-mode instruction that can flush the nested-TLB
+ * wholesale (INVLPGA flushes a single page only).  The only way to drop
+ * the nested TLB is to set VMCB.Control.TlbCtl = FLUSH_ALL_ASID and let
+ * the next VMRUN apply it as part of the guest-context switch.
+ *
+ * Strategy:
+ *   1. Set TlbCtl on every CPU's VMCB (NptInvalidateAll).
+ *   2. Kick every CPU with an IPI and force one VMEXIT→VMRUN cycle each
+ *      by executing CPUID (always intercepted by our VMCB setup), so the
+ *      pending TlbCtl actually takes effect before we return.
+ *
+ * Edge cases:
+ *   - !g_SvmState.Initialized: SVM is off on all CPUs already; there is
+ *     no nested TLB to flush.  Skip the IPI entirely — a host-mode CPUID
+ *     would be a harmless no-op, but we also want to avoid the
+ *     KeIpiGenericCall overhead during teardown.
+ *   - Mid-teardown (some CPUs have VMXOFF'd but not all): for still-guest
+ *     CPUs the CPUID forces a VMEXIT and the TlbCtl flush; for host-mode
+ *     CPUs CPUID is a no-op and that's fine (no guest TLB to clear).
+ *     KeIpiGenericCall still returns only after every CPU has run the
+ *     callback, so we have a hard barrier.
+ *
+ * IRQL: must be called at IRQL ≤ APC_LEVEL (KeIpiGenericCall).
+ */
+static ULONG_PTR NptInveptIpiCallback(ULONG_PTR Context)
+{
+    INT CpuInfo[4];
+    UNREFERENCED_PARAMETER(Context);
+    /*
+     * CPUID is intercepted by our VMCB (see SvmSetupVmcb —
+     * SVM_INTERCEPT_CPUID is always set).  If this CPU is in guest mode
+     * the execution will VMEXIT → VMRUN, applying the TlbCtl we queued.
+     * If this CPU is in host mode (SVM off here) CPUID just runs
+     * natively, which is fine: no guest TLB on this CPU to worry about.
+     */
+    __cpuid(CpuInfo, 0);
+    return 0;
+}
+
+VOID NptInvalidateAllCpusSync(VOID)
+{
+    /*
+     * Set TlbCtl = FLUSH_ALL_ASID on every active VMCB.  Handles NULL
+     * CpuContexts gracefully.
+     */
+    NptInvalidateAll();
+
+    /*
+     * If SVM is fully off there is no nested TLB anywhere — skip the IPI.
+     * This also avoids the KeIpiGenericCall cost on the unload hot path.
+     */
+    if (!g_SvmState.Initialized) return;
+
+    /*
+     * IPI all CPUs.  Every CPU that is still in guest mode takes a
+     * forced VMEXIT → VMRUN cycle via the intercepted CPUID, which
+     * applies the queued TlbCtl.  KeIpiGenericCall is a synchronous
+     * barrier: when it returns, every CPU has run the callback and the
+     * nested TLB is known clean.
+     */
+    KeIpiGenericCall(NptInveptIpiCallback, 0);
 }

@@ -1,5 +1,14 @@
 # 通用 EPT/NPT Hook 框架 - 技术文档
 
+> **2026-04 更新**: 经过稳定性 Review，以下相关行为已修复/优化：
+> - **Thunk slot 回收**：`GENERIC_HOOK_ENTRY` 卸载后 Thunk 现会通过 `SlotBitmap` 回收（修复 H-3）。
+> - **用户态 Hook**：`TargetVa < 0x8000_0000_0000_0000` 且 `ProcessId != 0` 时自动 `KeStackAttachProcess`（修复 L-5）。
+> - **跨页保护**：hook 点离页尾 < 12 bytes 会被拒绝（修复 L-4）。
+> - **SVM #DB 拦截**：仅在有 NPT hook 时开启，卸载全部后自动关闭（修复 C-3）。
+> - **跨 CPU TLB 刷新**：卸载 hook 后使用 `EptInvalidateAllCpusSync / NptInvalidateAllCpusSync`（IPI 广播），避免 HLT CPU 导致的 UAF（修复 H-5）。
+>
+> 详见 [docs/BAREMETAL_REVIEW_FIXES.md](docs/BAREMETAL_REVIEW_FIXES.md)。
+
 ## 概述
 
 通用 Hook 框架通过 Intel EPT / AMD NPT 页表操控，提供动态的、用户可控的函数挂钩能力。由于内核代码页从未被物理修改，Hook 对 PatchGuard 及任何 Guest 级完整性检查完全不可见。

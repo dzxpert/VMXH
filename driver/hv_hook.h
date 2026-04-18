@@ -29,6 +29,9 @@
 #define THUNK_STUB_SIZE         24
 #define THUNKS_PER_PAGE         (0x1000 / THUNK_STUB_SIZE)   /* 170 per 4KB page */
 
+/* H-3: bitmap size for slot allocation — one bit per slot, rounded up */
+#define THUNK_BITMAP_WORDS      ((THUNKS_PER_PAGE + 63) / 64)
+
 /* ========================================================================= */
 /*  Thunk Page (dynamically allocated, linked list)                          */
 /* ========================================================================= */
@@ -37,8 +40,18 @@ typedef struct _THUNK_PAGE {
     struct _THUNK_PAGE *Next;           /* Linked list */
     PVOID               CodeBase;       /* 4KB executable page */
     ULONG               Capacity;       /* THUNKS_PER_PAGE */
-    ULONG               UsedCount;      /* How many thunks are allocated */
-    ULONG               BaseId;         /* First hook ID on this page */
+    ULONG               UsedCount;      /* Slots currently in use */
+    ULONG               BaseId;         /* First hook ID ever assigned here */
+
+    /*
+     * H-3: bitmap of allocated slots (bit set = slot in use).  Together
+     * with UsedCount this lets GenericHookRemove return a slot so it can
+     * be re-used by future AllocateThunk calls.  Previously slots were
+     * allocated strictly append-only and never recycled, so long-running
+     * systems with frequent hook/unhook (e.g. SSDT monitor toggles)
+     * leaked thunk pages over time.
+     */
+    ULONG64             SlotBitmap[THUNK_BITMAP_WORDS];
 } THUNK_PAGE, *PTHUNK_PAGE;
 
 /* ========================================================================= */

@@ -170,6 +170,12 @@ typedef union _EPT_POINTER {
 
 /*
  * EPT page table structure (all levels)
+ *
+ * The first PDPT (Pdpt[]) is embedded and covers the first 512GB of the
+ * physical address space (common case on workstations).  When the host has
+ * physical memory / MMIO regions above 512GB, additional PDPT pages are
+ * allocated dynamically and hooked onto PML4[1..N-1].  See ept.c for the
+ * extended PDPT / PD arrays and the EptGetPdePtrFlat() helper used in lookup.
  */
 typedef struct _EPT_STATE {
     /* PML4 table (top level) - shared template */
@@ -197,6 +203,10 @@ typedef struct _EPT_STATE {
  * Non-hooked PDPT entries point to the shared PD pages (same as template).
  * Hooked PDPT entries point to per-CPU PD pages, which in turn point to
  * per-CPU split PT pages for the 2MB region containing hooks.
+ *
+ * When the system has physical memory > 512GB, additional PDPT pages are
+ * allocated per CPU and bound to PML4[1..N-1].  The extended per-CPU PDPT
+ * pages are managed separately in ept.c (g_EptCpuExtPdpt[]).
  */
 typedef struct _EPT_CPU_STATE {
     DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[EPT_PML4E_COUNT];
@@ -319,6 +329,7 @@ VOID        EptInvalidateAllContexts(VOID);     /* VMX root only */
 VOID        EptInvalidateSingleContext(ULONG64 Eptp); /* VMX root only */
 VOID        EptInvalidateFromGuest(VOID);        /* Safe from Guest (non-root) */
 VOID        EptCheckPendingInvept(VOID);          /* Called from VM-Exit handler */
+VOID        EptInvalidateAllCpusSync(VOID);       /* H-5: sync all CPUs via IPI */
 
 /* Find hook by physical address */
 PEPT_HOOK_ENTRY EptFindHookByPhysicalAddress(ULONG64 PhysicalAddress);
@@ -345,5 +356,21 @@ ULONG64  EptGetPerCpuEptp(ULONG CpuIndex);
 extern EPT_STATE        g_EptState;
 extern EPT_HOOK_STATE   g_EptHookState;
 extern PEPT_CPU_STATE   g_EptCpuStates;   /* per-CPU EPT root array */
+
+/*
+ * Dynamic sizing of the EPT identity map.
+ *
+ * g_EptPdptTotal : total number of flat PDPT entries in use.  This is the
+ *                  number of PD pages allocated in g_PdPages[] and equals
+ *                  512 * g_EptPml4Count.  At minimum 512 (first 512GB).
+ * g_EptPml4Count : number of PML4 entries populated (1 when physical
+ *                  memory fits in 512GB; up to 512 in the theoretical
+ *                  maximum of 256TB).
+ *
+ * Both are set during EptInitialize() based on MmGetPhysicalMemoryRanges()
+ * and never change afterwards.  See ept.c for details.
+ */
+extern ULONG            g_EptPdptTotal;
+extern ULONG            g_EptPml4Count;
 
 #endif /* _VMX_EPT_H_ */

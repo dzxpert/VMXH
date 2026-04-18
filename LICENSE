@@ -1,0 +1,661 @@
+VMXHypervisorToolbox — Personal-Use / No-Commercial-Without-Consent License
+===========================================================================
+
+Version 1.0, effective 2026-04-18
+Copyright (c) 2024-2026 VMXHypervisorToolbox Authors.  All rights reserved.
+
+                      ----- ENGLISH (authoritative) -----
+
+This License governs the use of the software and documentation contained in
+this repository (the "Software").  By obtaining, copying, downloading,
+compiling, installing, running, modifying, or distributing the Software, in
+whole or in part, you ("You") agree to all terms below.  If You do not
+agree, You must not use the Software.
+
+The English text in this file is the AUTHORITATIVE version.  The Chinese
+text below is provided for convenience only; in case of any conflict the
+English text governs.
+
+
+1.  DEFINITIONS
+
+    1.1  "Author(s)" means the original copyright holder(s) of the
+         Software as identified in the repository metadata or the
+         project's top-level README.
+
+    1.2  "Personal Use" means use by a natural person, for that
+         person's own purposes, including:
+             (a) private study, research and learning;
+             (b) non-revenue-generating hobby / experimentation;
+             (c) academic research by an individual researcher that is
+                 NOT funded by, contracted to, or performed on behalf
+                 of a for-profit entity; and
+             (d) internal security research and vulnerability analysis
+                 by an individual, on systems the individual owns or
+                 is expressly authorised to test.
+
+    1.3  "Commercial Use" means any use of the Software, in whole or in
+         part, that is primarily intended for or directed toward
+         commercial advantage, monetary compensation, or any form of
+         business, revenue, sale, rental, subscription or paid service.
+         Commercial Use INCLUDES, but is not limited to:
+             (a) incorporation of the Software (source, binary or
+                 derivative work) into any product, library, service
+                 or platform that is sold, licensed, rented, bundled,
+                 advertised, or otherwise monetised;
+             (b) use inside any for-profit company, organisation, or
+                 government contractor in the course of its business;
+             (c) use by an employee, contractor, consultant, or agent
+                 as part of paid work;
+             (d) offering the Software or its functionality as a
+                 hosted / cloud / SaaS / PaaS / IaaS / MCP / API
+                 service, whether paid or free-tier;
+             (e) use in game cheats, anti-cheat products, DRM products,
+                 malware, grey-market tooling, or any product sold for
+                 money regardless of legality;
+             (f) use in training, fine-tuning, evaluation, or
+                 benchmarking of any commercial AI / ML model, or any
+                 model whose outputs are commercially distributed.
+
+    1.4  "Distribute" means to transfer a copy of the Software (source
+         or binary), or any derivative work, to any third party by any
+         means, including but not limited to public release, sharing,
+         mirroring, bundling, or hosting for download.
+
+
+2.  GRANT OF RIGHTS (Personal Use)
+
+    Subject to Your full compliance with this License, the Authors
+    grant You a worldwide, royalty-free, non-exclusive, non-
+    transferable, revocable licence to:
+
+        (a) use, copy, compile and run the Software for Personal Use;
+        (b) modify the Software and create derivative works, for
+            Personal Use only;
+        (c) Distribute the Software and derivative works ONLY under
+            the terms of this same License (see Section 5), and ONLY
+            for Personal Use by the recipients.
+
+
+3.  COMMERCIAL USE REQUIRES WRITTEN CONSENT
+
+    3.1  Commercial Use of the Software is PROHIBITED unless You have
+         first obtained a separate, signed, written commercial
+         licence from the Authors.  No commercial licence is implied,
+         granted, or transferred by this License or by the act of
+         making the Software publicly available.
+
+    3.2  To request a commercial licence, contact the Authors through
+         the repository's issue tracker or the contact channel listed
+         in the top-level README.  The Authors may, at their sole
+         discretion, grant, refuse, or negotiate terms (including
+         fees) for commercial use.
+
+    3.3  Any attempt at Commercial Use without a prior written
+         commercial licence from the Authors automatically terminates
+         all rights granted under this License and constitutes an
+         infringement of the Authors' copyright, subject to all civil
+         and criminal remedies available under applicable law.
+
+
+4.  RESERVED RIGHTS / EXPLICITLY FORBIDDEN ACTIVITIES
+
+    Without limiting the generality of Section 3, the following are
+    expressly forbidden without a prior signed commercial licence:
+
+        (a) Selling, renting, leasing, sublicensing, or otherwise
+            monetising the Software or any derivative work;
+        (b) Using the Software as part of a paid consulting or
+            managed-service engagement;
+        (c) Including the Software in any product whose distribution
+            or use is subject to a paid licence, a subscription, or
+            any form of payment;
+        (d) Using the Software to develop or provide cheating,
+            anti-cheating, DRM-circumvention, malware, stalkerware,
+            or surveillance products;
+        (e) Removing, altering, or obscuring any copyright notice,
+            this License, or any attribution required by Section 5.
+
+
+4A. ABSOLUTE PROHIBITION OF UNLAWFUL OR MALICIOUS USE
+    (ABSOLUTE, NON-WAIVABLE — APPLIES EVEN TO PERSONAL USE)
+
+    4A.1  The rights granted in Section 2 (Personal Use) and any
+          commercial licence that may be granted under Section 3 are
+          CONDITIONAL on You not using the Software, any part of it,
+          or any derivative work for any purpose that is unlawful,
+          malicious, destructive, or that infringes the rights of
+          others.  This Section 4A overrides every other grant in
+          this License: no "Personal Use" exception, no separately
+          negotiated commercial licence, and no custom agreement with
+          the Authors can authorise conduct prohibited here.
+
+    4A.2  Without limiting the generality of the above, You MUST NOT
+          use, distribute, modify, deploy, or cause others to use the
+          Software — directly or indirectly — for any of the following
+          purposes:
+
+          (a) UNAUTHORISED ACCESS / INTRUSION — gaining, attempting to
+              gain, or facilitating unauthorised access to any
+              computer system, network, device, account, service, or
+              data that You do not own and are not expressly
+              authorised in writing to test; including but not
+              limited to penetration of corporate, governmental,
+              critical-infrastructure, financial, medical, or
+              personal systems without the operator's authorisation.
+
+          (b) MALWARE / DESTRUCTIVE CODE — creating, distributing, or
+              operating viruses, worms, trojans, ransomware, wipers,
+              logic bombs, backdoors, rootkits, bootkits, firmware
+              implants, cryptominers installed without consent, or
+              any other software intended to damage, disrupt, deny
+              service to, destroy data on, or surreptitiously take
+              control of a computer system.
+
+          (c) DATA THEFT / PRIVACY VIOLATION — unlawful collection,
+              exfiltration, interception, decryption, disclosure, or
+              sale of personal data, credentials, biometric data,
+              medical records, financial information, trade secrets,
+              or any other information whose access is legally
+              restricted.
+
+          (d) STALKING / HARASSMENT / SURVEILLANCE — covertly
+              monitoring, tracking, recording, or intercepting the
+              communications, location, keystrokes, screen, or
+              activities of any person without that person's
+              informed, freely-given, written consent; deploying
+              stalkerware, spouseware, or similar covert surveillance
+              tools against individuals.
+
+          (e) FRAUD / FINANCIAL CRIME — committing or facilitating
+              fraud, identity theft, account takeover, money
+              laundering, market manipulation, cryptocurrency theft,
+              phishing, business-email compromise, or any scheme
+              intended to unlawfully obtain money, property, or
+              services from another party.
+
+          (f) ATTACKS ON AVAILABILITY / INTEGRITY — launching or
+              facilitating denial-of-service, distributed
+              denial-of-service, traffic amplification, bot-net
+              command-and-control, or any other attack intended to
+              impair the availability or integrity of a computer
+              system, network, or service.
+
+          (g) ANTI-SECURITY-PRODUCT BYPASS FOR HARMFUL PURPOSE — using
+              the Software's hypervisor, hook, and anti-detection
+              capabilities to circumvent endpoint protection,
+              anti-virus, anti-cheat, DRM, or OS integrity mechanisms
+              on systems You do not own, or on systems whose operator
+              has not consented, for the purpose of enabling any of
+              the other activities prohibited in this Section 4A.
+
+          (h) WEAPONISATION / HUMAN HARM — developing, aiding, or
+              deploying technology whose foreseeable purpose is to
+              cause physical harm, death, mass surveillance by an
+              authoritarian actor, suppression of human rights,
+              unlawful detention, or any activity that violates
+              international human-rights law.
+
+          (i) CHILD SAFETY VIOLATIONS — any use that facilitates the
+              creation, distribution, possession, or concealment of
+              child sexual abuse material, or the grooming,
+              exploitation, or trafficking of minors.
+
+          (j) ILLEGAL GOODS / SERVICES — enabling or operating
+              platforms for the sale of illegal drugs, weapons,
+              counterfeit currency, forged documents, stolen data or
+              credentials, or any other goods or services whose
+              sale is prohibited by applicable law.
+
+          (k) ANY OTHER UNLAWFUL ACT — any other use that violates
+              any applicable criminal law, computer-misuse law,
+              anti-terrorism law, export-control law, sanctions
+              regime, or any mandatory regulation of any jurisdiction
+              with which You or the affected system has a meaningful
+              connection.
+
+    4A.3  LEGITIMATE SECURITY RESEARCH EXCEPTION.  Nothing in this
+          Section 4A prohibits bona-fide security research,
+          vulnerability analysis, reverse engineering, or red-team
+          testing, PROVIDED that all of the following are true:
+              (i)   it is performed on systems You own, or on systems
+                    whose operator has given You explicit written
+                    authorisation (e.g. a scope-defined penetration
+                    test contract, a published bug-bounty programme's
+                    terms, a signed NDA with test boundaries);
+              (ii)  it is conducted in good faith, with the aim of
+                    identifying and responsibly disclosing defects;
+              (iii) any findings are either kept confidential or
+                    disclosed through coordinated, responsible
+                    disclosure to the affected vendor / operator with
+                    a reasonable remediation window;
+              (iv)  it does not cause material harm to the system,
+                    its users, or third parties, beyond what is
+                    strictly necessary to demonstrate the defect; and
+              (v)   it complies with the laws of every jurisdiction
+                    with which the research has a meaningful
+                    connection.
+
+          The burden of proving that an activity falls within this
+          exception is on You.
+
+    4A.4  CONSEQUENCES OF VIOLATION.
+
+          (a) Any violation of this Section 4A automatically and
+              immediately terminates ALL rights granted by this
+              License (whether Personal-Use rights under Section 2,
+              redistribution rights under Section 5, or rights under
+              any separately granted commercial licence), WITHOUT
+              any notice or cure period.
+
+          (b) You agree to indemnify, defend, and hold harmless the
+              Authors, contributors, and distributors of the Software
+              against all claims, losses, damages, fines, penalties,
+              judgments, settlements, legal fees, and other costs
+              arising out of or related to Your breach of this
+              Section 4A.
+
+          (c) The Authors reserve all rights to pursue civil damages,
+              injunctive relief, statutory remedies (including those
+              available under the PRC Criminal Law, Cybersecurity
+              Law, Data Security Law, Personal Information Protection
+              Law, and equivalent foreign laws), and to cooperate
+              with law-enforcement investigations into Your conduct.
+
+          (d) The public availability of the Software does NOT imply
+              the Authors' endorsement, support, or acquiescence in
+              any unlawful use.  The Authors expressly disclaim any
+              responsibility for, and disassociate themselves from,
+              any unlawful or malicious use of the Software by any
+              person, and will actively support law-enforcement
+              action against such users to the extent legally
+              required or permitted.
+
+    4A.5  NO CONTRACTING-OUT.  The prohibitions in this Section 4A
+          cannot be waived, varied, or overridden by any subsequent
+          agreement, oral or written, between You and the Authors,
+          and shall survive any termination of this License.
+
+
+5.  REDISTRIBUTION CONDITIONS
+
+    If You Distribute the Software or any derivative work (only
+    permitted for Personal Use by the recipients, per Section 2(c)):
+
+        (a) You MUST include a verbatim copy of this License file;
+        (b) You MUST preserve all copyright and authorship notices
+            contained in the Software;
+        (c) You MUST clearly mark any files You have modified and
+            include a prominent notice stating the nature of the
+            modification and the date;
+        (d) You MUST NOT impose any additional restrictions, licensing
+            fees, or "commercialisation via the recipient" terms on
+            the recipients;
+        (e) Derivative works Distributed under this License remain
+            subject to Section 3 (no Commercial Use without the
+            original Authors' consent — Your consent as a modifier is
+            NOT sufficient).
+
+
+6.  CONTRIBUTIONS
+
+    By submitting any contribution (issue, pull request, patch, or
+    other material) to this repository, You grant the Authors a
+    perpetual, worldwide, royalty-free, irrevocable licence to use,
+    modify, sublicense and distribute Your contribution under this
+    License and under any future commercial licence the Authors may
+    issue.  You represent that You have the right to grant this
+    licence and that Your contribution does not infringe any third-
+    party rights.
+
+
+7.  NO TRADEMARK LICENCE
+
+    This License does not grant any right to use the names, logos,
+    or trademarks of the Authors or of the project.
+
+
+8.  TERMINATION
+
+    8.1  Any breach of this License automatically and immediately
+         terminates all rights granted to You hereunder, without
+         notice.  Breach of Section 4A (Prohibition of Unlawful or
+         Malicious Use) triggers termination WITHOUT any cure period
+         or waiver possibility, and is in addition to all civil and
+         criminal consequences available under applicable law.
+
+    8.2  Upon termination You must cease all use of the Software,
+         destroy all copies in Your possession or control, and
+         (if applicable) remove it from any product, service, or
+         distribution channel within thirty (30) days.
+
+    8.3  Sections 4A, 6, 7, 9, 10, 11, and 12 survive termination.
+
+
+9.  DISCLAIMER OF WARRANTY
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+    OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+    NON-INFRINGEMENT.  THE SOFTWARE CONTAINS LOW-LEVEL HYPERVISOR AND
+    KERNEL-MODE CODE THAT MAY CAUSE SYSTEM INSTABILITY, DATA LOSS,
+    HARDWARE DAMAGE, OR SECURITY EXPOSURE.  YOU BEAR THE ENTIRE RISK
+    OF USING IT.
+
+
+10. LIMITATION OF LIABILITY
+
+    IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+    INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+    (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+    OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+    WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+    NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THE
+    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+11. COMPLIANCE WITH LAW
+
+    You are solely responsible for ensuring that Your use of the
+    Software complies with all applicable laws, including (without
+    limitation) computer misuse, export-control, anti-cheat, data-
+    protection, cybersecurity, privacy, sanctions, and anti-
+    terrorism laws, and with the prohibitions in Section 4A.  The
+    Authors disclaim any responsibility for unlawful use by others
+    and may actively cooperate with law-enforcement investigations
+    into any such use.
+
+
+12. GOVERNING LAW / SEVERABILITY / ENTIRE AGREEMENT
+
+    12.1 This License is governed by the laws of the People's
+         Republic of China, without regard to conflict-of-law
+         principles.
+
+    12.2 If any provision is held unenforceable, the remaining
+         provisions remain in full force and effect, and the
+         unenforceable provision shall be reformed to the minimum
+         extent necessary to make it enforceable while preserving
+         its intent.
+
+    12.3 This License is the entire agreement between You and the
+         Authors concerning the Software, and supersedes any prior
+         agreement or understanding.
+
+
+                      ----- 简体中文（参考翻译）-----
+
+版本 1.0，生效日期：2026-04-18
+版权所有 (c) 2024-2026 VMXHypervisorToolbox 作者。保留所有权利。
+
+本许可协议约束本仓库中包含的软件和文档（"本软件"）。一旦您获取、复制、
+下载、编译、安装、运行、修改或分发本软件的全部或任一部分，即视为您
+（"您"）接受下述全部条款。若您不同意，则不得使用本软件。
+
+**注：本协议以上文英文版为正式文本；中文译文仅供便利参考，如有歧义以
+英文文本为准。**
+
+
+1. 定义
+
+   1.1 "作者"指本仓库元数据或项目顶层 README 中所注明的原始著作权人。
+
+   1.2 "个人使用"指自然人为其本人目的的使用，包括：
+        (a) 私人学习、研究和学习目的；
+        (b) 不产生任何收入的业余爱好／实验；
+        (c) 个人研究员的学术研究，且该研究 **不** 由营利性实体资助、
+            委托或代为进行；
+        (d) 个人在自有或明确获得授权可测试的系统上进行的安全研究
+            与漏洞分析。
+
+   1.3 "商业使用"指对本软件（全部或部分）的任何主要出于商业利益、
+       金钱报酬或任何形式的业务、收入、销售、租赁、订阅或付费服务
+       之目的的使用，包括但不限于：
+        (a) 将本软件（源码、二进制或衍生作品）集成到任何对外销售、
+            许可、租赁、捆绑、广告或通过其他方式获利的产品、库、
+            服务或平台中；
+        (b) 在任何营利性公司、组织或政府承包商的业务过程中使用；
+        (c) 员工、承包商、咨询顾问或代理在其有偿工作中使用；
+        (d) 将本软件或其功能作为托管／云／SaaS／PaaS／IaaS／MCP／API
+            服务对外提供，无论收费或免费层；
+        (e) 用于游戏外挂、反作弊产品、DRM 产品、恶意软件、灰色产业
+            工具，或任何以牟利为目的销售的产品，无论合法与否；
+        (f) 用于训练、微调、评估或基准测试任何商业 AI／ML 模型，
+            或任何输出被商业化分发的模型。
+
+   1.4 "分发"指以任何方式将本软件（源码或二进制）或任何衍生作品
+       的副本传递给任何第三方，包括但不限于公开发布、共享、镜像、
+       捆绑，或提供下载托管。
+
+
+2. 个人使用授权
+
+   在您完全遵守本协议的前提下，作者授予您全球性、免版税、非独占、
+   不可转让且可撤销的许可：
+    (a) 为个人使用而使用、复制、编译和运行本软件；
+    (b) 为个人使用而修改本软件并创建衍生作品；
+    (c) 仅可 **在本协议相同条款下** 向他人分发本软件及衍生作品
+        （参见第 5 节），且受让人亦 **仅限于个人使用**。
+
+
+3. 商业使用须取得书面同意
+
+   3.1 **未经作者另行签署书面商业许可，禁止对本软件进行任何商业使用。**
+       本协议或本软件被公开这一事实，均不构成对商业许可的默示授予
+       或转让。
+
+   3.2 如需商业授权，请通过本仓库的 Issue Tracker 或项目 README
+       中列出的联系渠道联络作者。作者可自行决定是否授权、拒绝或
+       协商条款（含费用）。
+
+   3.3 任何未经作者事先书面商业许可而实施的商业使用行为，将自动
+       终止本协议下授予的全部权利，并构成对作者著作权的侵犯，应
+       承担相应民事及刑事责任。
+
+
+4. 保留权利／明确禁止的行为
+
+   在不限制第 3 节一般性的前提下，未经事先书面商业许可，以下行为
+   明确禁止：
+    (a) 销售、租赁、出借、再许可或以其他方式将本软件或衍生作品
+        变现；
+    (b) 将本软件用于有偿咨询或托管服务项目；
+    (c) 将本软件纳入任何其分发或使用需付费许可、订阅或任何其他
+        形式付款的产品中；
+    (d) 将本软件用于开发或提供外挂、反外挂、DRM 规避、恶意软件、
+        跟踪软件或监控产品；
+    (e) 删除、更改或遮蔽任何版权声明、本协议文本，或第 5 节所
+        要求的归属信息。
+
+
+4A. 禁止非法及恶意破坏用途（绝对禁止，不可弃权——个人使用亦受约束）
+
+   4A.1 第 2 节（个人使用）授予的权利以及第 3 节项下可能授予的任何
+        商业许可，均 **以您不得将本软件、其任何部分或任何衍生作品
+        用于任何非法、恶意、破坏性或侵犯他人权利的目的为前提**。
+        本 4A 节效力高于本协议其他授权条款：无论个人使用例外、另行
+        协商的商业许可，抑或与作者之间的其他约定，均不得授权本节
+        所禁止的行为。
+
+   4A.2 在不限制前述一般性的前提下，您 **不得** 直接或间接地将本
+        软件用于、分发、修改、部署，或使他人用于下列任一目的：
+
+        (a) **未授权访问／入侵** —— 对您不拥有或未事先获得书面授权
+            测试的任何计算机系统、网络、设备、账户、服务或数据，
+            进行、尝试或协助未授权访问；包括但不限于在未获运营者
+            授权的情况下侵入企业、政府、关键信息基础设施、金融、
+            医疗或个人系统。
+
+        (b) **恶意软件／破坏性代码** —— 编写、传播或运行病毒、
+            蠕虫、木马、勒索软件、擦除器、逻辑炸弹、后门、
+            Rootkit、Bootkit、固件植入、未经同意安装的挖矿程序，
+            或任何旨在破坏、扰乱、拒绝服务、销毁数据或隐蔽控制
+            计算机系统的软件。
+
+        (c) **数据窃取／隐私侵犯** —— 非法收集、窃取、截获、解密、
+            披露或售卖个人数据、账号凭证、生物识别数据、医疗记录、
+            金融信息、商业秘密，或任何依法受保护的信息。
+
+        (d) **跟踪／骚扰／监控** —— 在未取得对象知情、自愿、书面
+            同意的情况下，隐蔽监视、追踪、录制或截获其通讯、位置、
+            键盘输入、屏幕或活动；向个人部署跟踪软件、伴侣监视
+            软件或同类隐蔽监控工具。
+
+        (e) **欺诈／金融犯罪** —— 实施或协助欺诈、身份盗窃、账户
+            盗用、洗钱、市场操纵、虚拟货币盗窃、钓鱼、商业邮件
+            诈骗，或任何旨在非法获取他人财物或服务的行为。
+
+        (f) **可用性／完整性攻击** —— 发起或协助拒绝服务、分布式
+            拒绝服务、流量放大、僵尸网络指挥与控制，或任何旨在
+            损害计算机系统、网络或服务可用性与完整性的攻击。
+
+        (g) **出于有害目的绕过安全产品** —— 利用本软件的 Hypervisor、
+            Hook 及反检测能力，绕过您未拥有或运营者未同意的系统
+            的端点保护、反病毒、反外挂、DRM 或操作系统完整性机制，
+            以便实施本 4A 节所禁止的其他行为。
+
+        (h) **武器化／危害人身** —— 开发、协助或部署其可预见用途
+            在于造成人身伤害、死亡，或被用于威权者大规模监控、
+            压制人权、非法拘禁，或任何违反国际人权法活动的技术。
+
+        (i) **侵害未成年人** —— 任何协助制作、传播、持有或掩盖
+            儿童性虐待内容，以及诱骗、剥削或拐卖未成年人的使用
+            行为。
+
+        (j) **非法商品／服务** —— 协助或运营销售毒品、武器、伪造
+            货币、伪造证件、被盗数据或凭证，以及任何依法禁止
+            销售的商品或服务的平台。
+
+        (k) **其他一切非法行为** —— 违反您或目标系统所在管辖区
+            任何强制性刑事、计算机滥用、反恐、出口管制、制裁或
+            法规规定的其他使用行为。
+
+   4A.3 **合法安全研究例外**。本 4A 节并不禁止善意的安全研究、
+        漏洞分析、逆向工程或红队测试，**但必须同时满足以下全部
+        条件**：
+            (i)   仅针对您所拥有的系统，或系统运营者已向您作出
+                  明确书面授权（如范围明确的渗透测试合同、已发布
+                  的漏洞赏金计划条款、划定测试边界的 NDA 等）；
+            (ii)  出于善意，旨在发现并负责任地披露缺陷；
+            (iii) 研究成果要么保密，要么按照负责任披露原则在合理
+                  修复窗口内向受影响的厂商／运营者披露；
+            (iv)  不对系统、用户或第三方造成超出演示缺陷所必需的
+                  实质性损害；
+            (v)   遵守与研究有实质关联的每一管辖区的法律。
+
+        证明某行为属于本例外范围的举证责任 **在您一方**。
+
+   4A.4 违反后果。
+
+        (a) 一旦违反本 4A 节，您依本协议被授予的全部权利（无论
+            是第 2 节下的个人使用权、第 5 节下的再分发权，抑或
+            另行授予的商业许可下的权利）**自动立即终止**，无需
+            通知，无任何宽限期或补救机会。
+
+        (b) 您同意就因您违反本 4A 节而引起的或与之相关的所有索赔、
+            损失、损害、罚款、罚金、判决、和解、律师费及其他
+            费用，向作者、贡献者及本软件的分发者作出赔偿、辩护
+            并使其免受损害。
+
+        (c) 作者保留追索民事损害赔偿、申请禁令救济、依照法律规定
+            寻求法定救济（包括中华人民共和国《刑法》《网络安全
+            法》《数据安全法》《个人信息保护法》等所提供的救济，
+            以及同等效力的境外法律）以及配合执法机关调查您行为
+            的一切权利。
+
+        (d) 本软件的公开可获取性 **不构成** 作者对任何非法使用的
+            认可、支持或默许。作者明确声明不对他人对本软件的任何
+            非法或恶意使用承担任何责任，并与之完全脱钩；在法律
+            要求或允许的范围内，作者将积极协助执法部门对此类使用
+            者采取行动。
+
+   4A.5 不得约定排除。本 4A 节所列禁止事项不得通过您与作者之间
+        任何后续口头或书面约定予以放弃、变更或排除，且在本协议
+        终止后继续有效。
+
+
+5. 再分发条件
+
+   若您依第 2(c) 条分发本软件或衍生作品（且受让人仅限个人使用）：
+    (a) **必须** 原样包含本许可证文件；
+    (b) **必须** 保留本软件中所有版权和作者署名；
+    (c) **必须** 显著标注您所修改的文件，并附简要说明修改性质
+        和日期；
+    (d) **不得** 对受让人施加任何附加限制、授权费用或"受让方商业化"
+        条款；
+    (e) 您分发的衍生作品仍受第 3 节约束（未经 **原作者** 同意
+        不得商业使用——您作为修改者的同意不足以替代原作者同意）。
+
+
+6. 贡献条款
+
+   您向本仓库提交任何贡献（Issue、Pull Request、补丁或其他材料）
+   即表示您授予作者永久、全球性、免版税、不可撤销的许可，允许作者
+   在本协议下及作者未来可能发布的任何商业许可下使用、修改、再许可
+   和分发您的贡献。您声明您有权授予此许可，且您的贡献不侵犯任何
+   第三方权利。
+
+
+7. 不授予商标许可
+
+   本协议不授予任何使用作者或本项目的名称、标识或商标的权利。
+
+
+8. 协议终止
+
+   8.1 任何违约行为将无需通知即自动并立即终止本协议授予您的所有
+       权利。**违反第 4A 节（禁止非法及恶意破坏用途）不设任何
+       宽限期或弃权可能，并在适用法律范围内同时承担民事及刑事
+       责任。**
+
+   8.2 协议终止后，您必须立即停止使用本软件，销毁您所持有或控制
+       下的所有副本，并（如适用）在三十 (30) 日内将其从任何产品、
+       服务或分发渠道中移除。
+
+   8.3 第 4A、6、7、9、10、11、12 节在协议终止后仍然有效。
+
+
+9. 免责声明
+
+   本软件按"现状"提供，不附带任何明示或暗示的保证，包括但不限于
+   适销性、特定用途适用性、所有权及不侵权的保证。本软件包含底层
+   Hypervisor 和内核态代码，可能导致系统不稳定、数据丢失、硬件
+   损坏或安全风险，使用风险由您自行承担。
+
+
+10. 责任限制
+
+    在任何情况下，作者均不对因使用本软件引起的任何直接、间接、
+    附带、特殊、惩戒性或后果性损害（包括但不限于采购替代商品或
+    服务；使用、数据或利润损失；或业务中断）承担责任，不论基于
+    何种责任理论（合同、严格责任或侵权，包括疏忽），即使作者已被
+    告知此类损害的可能性。
+
+
+11. 合法合规
+
+    您本人承担确保对本软件的使用符合所有适用法律（含但不限于
+    计算机滥用、出口管制、反外挂、数据保护、网络安全、隐私、
+    制裁和反恐法律），以及遵守第 4A 节各项禁止规定的全部责任。
+    作者对他人的非法使用不承担任何责任，并可能在法律要求或允许
+    的范围内主动配合执法部门对相关行为的调查。
+
+
+12. 法律适用／可分割性／完整协议
+
+    12.1 本协议的效力、解释和履行适用 **中华人民共和国法律**，
+         不考虑冲突法规则。
+
+    12.2 若本协议任一条款被判定不可执行，其余条款仍完全有效，且
+         不可执行的条款应在保留其本意的前提下改写到恰可执行的
+         最小程度。
+
+    12.3 本协议构成您与作者就本软件事宜的完整协议，并取代此前任
+         何协议或默契。
+
+
+=== 联系 / Contact ===
+商业授权咨询：请通过本仓库 Issues 或项目 README 列出的联系方式联系。
+Commercial licensing: please contact via repository Issues or the channel
+listed in the top-level README.

@@ -1,5 +1,9 @@
 # Per-CPU Page Table Hook 页隔离 — 实施细节文档
 
+> **注意（2026-04 更新）**: 文中 `[MAX_PD_PAGES]` / `MAX_PD_PAGES (512)` 等硬编码值已改为运行期变量 `g_EptPdptTotal / g_NptPdptTotal`。Per-CPU PD 数组按 `g_EptPdptTotal` 动态分配；PML4[1..] 的扩展 PDPT 页每 CPU 也有独立副本 (`g_EptCpuExtPdpt / g_NptCpuExtPdpt`)。详见 [BAREMETAL_REVIEW_FIXES.md](./BAREMETAL_REVIEW_FIXES.md) 的 H-2。
+>
+> 另外：UAF 风险已被同步修复 —— `EptInvalidateAllCpusSync / NptInvalidateAllCpusSync` 通过 IPI 强制所有 CPU（含 HLT/C-state）在释放页前执行 INVEPT / TLB flush（H-5）。
+
 ## 1. 设计目标
 
 在多核系统上，EPT/NPT hook 的 **违规 → 单步 → 恢复** 三阶段存在竞争条件：

@@ -1,5 +1,14 @@
 # EPT (Extended Page Tables) 深度分析
 
+> **注意（2026-04 更新）**: 本文档中多处描述的 "512GB identity map" / `MAX_PD_PAGES=512` / `for (i = 0; i < MAX_PD_PAGES; i++)` 等均已升级为**动态尺寸**。实际运行期：
+> - `g_EptPdptTotal` 是启动时由 `EptComputeRequiredPdPages()` 根据 `MmGetPhysicalMemoryRanges()` 返回值（+2GB MMIO 余量）动态计算的 PDPT 项数。
+> - `g_EptPml4Count` 可 > 1，额外 PDPT 页存在 `g_EptExtPdptPages`，通过 `EptPaToFlatPdptIdx()` + `EptGetSharedPdptePtr()` 统一扁平索引访问。
+> - `HandleEptViolation` 对超出映射范围的 GPA 直接 fatal-shutdown VMX，避免死循环。
+>
+> NPT 侧（`g_NptPdptTotal` / `g_NptPml4Count`）镜像实现同样优化。
+>
+> 详见 [BAREMETAL_REVIEW_FIXES.md](./BAREMETAL_REVIEW_FIXES.md) 的 H-2。
+
 ## 1. EPT 是什么？
 
 EPT 是 **Intel VT-x 虚拟化专有的硬件特性**，只有在 VMX non-root（Guest）模式下才会被 CPU 激活使用。AMD 对应的技术叫 **NPT (Nested Page Tables)**，原理相同。

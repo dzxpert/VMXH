@@ -141,6 +141,15 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
     /* Check if Guest requested an EPT TLB flush */
     EptCheckPendingInvept();
 
+    /*
+     * AAD-BP (post-2nd-review): lazy-sync this CPU's VMCS Exception
+     * Bitmap with the global desired value.  Cheap fast-path (branch on
+     * generation compare); VMWRITE only on actual change.  Avoids
+     * cross-CPU VMCS ownership problems by letting each CPU update its
+     * OWN VMCS in its OWN exit handler.
+     */
+    VmxSyncExceptionBitmap();
+
     /* Check for VM-Entry failure (bit 31) */
     if (ExitReason & 0x80000000) {
         VMXROOT_LOG_ERROR("VM-Entry failure! Reason: %u, Qualification: 0x%llX",
@@ -312,9 +321,37 @@ BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext)
          * the CPU wakes from HLT (interrupt arrives → VM-Exit → we set
          * activity state back to Active → VMRESUME), Guest resumes at the
          * instruction after HLT, which is the correct behavior.
+         *
+         * L-8 (revised) FIX: Intel SDM Vol.3 §26.3.1.5 specifies that
+         * Guest-Activity-State = HLT is valid at VM-Entry only if ALL of:
+         *   (a) RFLAGS.IF = 1
+         *   (b) "Blocking by STI"     (Interruptibility bit 0) is clear
+         *   (c) "Blocking by MOV SS"  (Interruptibility bit 1) is clear
+         *   (d) Blocking by NMI (bit 3) is ALLOWED to be either value
+         *   (e) VMCS_GUEST_PENDING_DBG_EXCEPTIONS is zero
+         *
+         * Violating any of (a)/(b)/(c)/(e) causes the next VM-Entry to
+         * fail with a VMfail reason, BSOD.  We defensively keep the
+         * guest in Active state when the constraints aren't met — the
+         * guest just re-executes the instruction after HLT and spins,
+         * matching native CPU behaviour for "CLI; HLT" etc.
          */
         VmxAdvanceGuestRip();
-        VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 1);  /* 1 = HLT */
+        {
+            ULONG64 GuestRflags      = VmxRead(VMCS_GUEST_RFLAGS);
+            ULONG64 Interruptibility = VmxRead(VMCS_GUEST_INTERRUPTIBILITY);
+            ULONG64 PendingDbg       = VmxRead(VMCS_GUEST_PENDING_DBG_EXCEPTIONS);
+            BOOLEAN IfOk             = (GuestRflags & (1ULL << 9)) != 0;
+            BOOLEAN StiMovSsOk       = (Interruptibility & 0x3) == 0;
+            BOOLEAN NoPendingDbg     = PendingDbg == 0;
+
+            if (IfOk && StiMovSsOk && NoPendingDbg) {
+                VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 1);  /* 1 = HLT */
+            } else {
+                VMXROOT_LOG_DEBUG("HLT skipped: IF=%u StiMovSs=0x%llX PendingDbg=0x%llX",
+                                  (ULONG)IfOk, Interruptibility, PendingDbg);
+            }
+        }
         break;
 
     case EXIT_REASON_INVPCID:
@@ -1062,29 +1099,105 @@ static BOOLEAN HandleVmcall(PGUEST_CONTEXT Ctx)
     ULONG64 Rax = Ctx->Rax;
     ULONG   SubCmd;
 
-    /* Legacy shutdown path */
-    if (Rax == VMCALL_MAGIC_SHUTDOWN) {
-        LOG_INFO("VMCALL shutdown request received");
-        VmxAdvanceGuestRip();
-        return FALSE;   /* Signal VMX shutdown */
+    /*
+     * M-6 (revised): authenticate shutdown requests with a per-boot
+     * nonce + full long-mode / CPL / kernel-RIP checks.  Centralised in
+     * HvIsAuthenticShutdownCaller() so VMX and SVM use identical policy.
+     *
+     * For non-shutdown VMCALLs we still reject CPL != 0 immediately:
+     * Windows kernel code never issues VMCALL in Ring 3, so any CPL-3
+     * VMCALL must be an attempted attack.  Not required for security
+     * (our hypervisor wouldn't do anything useful for them anyway), but
+     * good defence in depth.
+     */
+    {
+        ULONG64 GuestCsSel = VmxRead(VMCS_GUEST_CS_SEL);
+        ULONG   GuestCpl   = (ULONG)(GuestCsSel & 0x3);
+        if (GuestCpl != 0) {
+            VMXROOT_LOG_WARN("VMCALL from CPL=%u — injecting #UD", GuestCpl);
+            VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                     INTERRUPT_INFO_VALID |
+                     (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) |
+                     6 /* #UD */);
+            return TRUE;
+        }
     }
 
-    /* New VMCALL dispatch: RAX high 16 bits = VMCALL_MAGIC */
-    if ((Rax & VMCALL_MAGIC_MASK) == VMCALL_MAGIC) {
-        SubCmd = (ULONG)(Rax & 0xFFFF);
+    /*
+     * Gather the full context needed to authenticate a shutdown request.
+     * These reads are cheap (VMREAD) and are only done for VMCALLs,
+     * which are rare.
+     */
+    {
+        ULONG64 GuestRip   = VmxRead(VMCS_GUEST_RIP);
+        ULONG64 GuestEfer  = VmxRead(VMCS_GUEST_IA32_EFER);
+        ULONG64 CsAR       = VmxRead(VMCS_GUEST_CS_ACCESS_RIGHTS);
+        BOOLEAN GuestCsL   = (CsAR & (1ULL << 13)) != 0;  /* bit 13 = L */
+        ULONG64 CsSel      = VmxRead(VMCS_GUEST_CS_SEL);
+        ULONG   GuestCpl   = (ULONG)(CsSel & 0x3);
 
-        switch (SubCmd) {
-        case VMCALL_SUBCMD_SHUTDOWN:
-            LOG_INFO("VMCALL shutdown request received (new)");
+        /* Legacy shutdown path. */
+        if (Rax == VMCALL_MAGIC_SHUTDOWN) {
+            if (!HvIsAuthenticShutdownCaller(Ctx->Rcx, GuestRip,
+                                             GuestCpl, GuestEfer, GuestCsL)) {
+                VMXROOT_LOG_WARN("VMCALL shutdown rejected: auth failed "
+                                 "(RIP=0x%llX, Efer=0x%llX, CsL=%u, CPL=%u)",
+                                 GuestRip, GuestEfer, (ULONG)GuestCsL, GuestCpl);
+                VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                         INTERRUPT_INFO_VALID |
+                         (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) |
+                         6 /* #UD */);
+                return TRUE;
+            }
+            LOG_INFO("VMCALL shutdown request received (authenticated)");
             VmxAdvanceGuestRip();
-            return FALSE;
+            return FALSE;   /* Signal VMX shutdown */
+        }
 
-        case VMCALL_SUBCMD_READ_MEMORY:
-        case VMCALL_SUBCMD_WRITE_MEMORY:
-            return HvHandleMemoryVmcall(Ctx, SubCmd);
+        /* New VMCALL dispatch: RAX high 16 bits = VMCALL_MAGIC */
+        if ((Rax & VMCALL_MAGIC_MASK) == VMCALL_MAGIC) {
+            SubCmd = (ULONG)(Rax & 0xFFFF);
 
-        default:
-            break;
+            switch (SubCmd) {
+            case VMCALL_SUBCMD_SHUTDOWN:
+                if (!HvIsAuthenticShutdownCaller(Ctx->Rcx, GuestRip,
+                                                 GuestCpl, GuestEfer, GuestCsL)) {
+                    VMXROOT_LOG_WARN("VMCALL shutdown (new) rejected: auth failed");
+                    VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                             INTERRUPT_INFO_VALID |
+                             (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) |
+                             6 /* #UD */);
+                    return TRUE;
+                }
+                LOG_INFO("VMCALL shutdown request received (new, authenticated)");
+                VmxAdvanceGuestRip();
+                return FALSE;
+
+            case VMCALL_SUBCMD_READ_MEMORY:
+            case VMCALL_SUBCMD_WRITE_MEMORY:
+                /*
+                 * M-7 (revised) FIX: the hypervisor-memory VMCALL path is
+                 * PERMANENTLY disabled (see hv_mem.c header comment).
+                 * Injecting #UD surfaces the misuse immediately rather than
+                 * silently no-oping.
+                 */
+                {
+                    static volatile LONG s_DeprecatedMemVmcallCount = 0;
+                    LONG Count = InterlockedIncrement(&s_DeprecatedMemVmcallCount);
+                    if (Count <= 10) {
+                        VMXROOT_LOG_WARN("Deprecated VMCALL mem-op (sub=%u) — injecting #UD",
+                                         SubCmd);
+                    }
+                }
+                VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
+                         INTERRUPT_INFO_VALID |
+                         (INTERRUPT_TYPE_HARDWARE_EXCEPTION << INTERRUPT_INFO_TYPE_SHIFT) |
+                         6 /* #UD */);
+                return TRUE;
+
+            default:
+                break;
+            }
         }
     }
 

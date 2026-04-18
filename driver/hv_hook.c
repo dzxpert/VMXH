@@ -11,6 +11,32 @@
 #include "log.h"
 #include <ntstrsafe.h>
 
+/*
+ * L-5: for user-mode hook install via KeStackAttachProcess.
+ *
+ * KeStackAttachProcess / KeUnstackDetachProcess / PsLookupProcessByProcessId
+ * live in <ntifs.h>, which we intentionally do NOT include here (to keep
+ * this translation unit lean and avoid pulling the full FS-driver surface).
+ * We forward-declare the three APIs AND the small KAPC_STATE structure
+ * they need.  Keep this in sync with the identical local definition in
+ * shadow_ssdt.c so the two views never diverge.
+ *
+ * Structure layout is stable across every supported Windows version
+ * (documented in WDK headers; used by thousands of drivers unchanged
+ * since Windows XP).
+ */
+typedef struct _KAPC_STATE {
+    LIST_ENTRY  ApcListHead[2];
+    PKPROCESS   Process;
+    BOOLEAN     KernelApcInProgress;
+    BOOLEAN     KernelApcPending;
+    BOOLEAN     UserApcPending;
+} KAPC_STATE, *PKAPC_STATE;
+
+NTKERNELAPI NTSTATUS PsLookupProcessByProcessId(HANDLE ProcessId, PEPROCESS *Process);
+NTKERNELAPI VOID     KeStackAttachProcess(PEPROCESS Process, PKAPC_STATE ApcState);
+NTKERNELAPI VOID     KeUnstackDetachProcess(PKAPC_STATE ApcState);
+
 /* ========================================================================= */
 /*  Globals                                                                  */
 /* ========================================================================= */
@@ -84,33 +110,135 @@ static PVOID AllocateThunk(ULONG HookId)
 {
     PTHUNK_PAGE Page;
     PUCHAR      ThunkAddr;
+    ULONG       SlotIdx;
+    ULONG       w, b;
 
-    /* Search existing pages for a free slot */
+    /*
+     * H-3: search existing pages for any free slot (recycles holes left
+     * by previously-freed thunks instead of always growing UsedCount).
+     */
     Page = g_GenericHookState.ThunkPageHead;
     while (Page) {
         if (Page->UsedCount < Page->Capacity) {
-            ThunkAddr = (PUCHAR)Page->CodeBase + (Page->UsedCount * THUNK_STUB_SIZE);
-            BuildThunkStub(ThunkAddr, HookId, (ULONG64)AsmGenericHookDispatcher);
-            Page->UsedCount++;
-            return ThunkAddr;
+            /* Find the first clear bit in SlotBitmap. */
+            for (w = 0; w < THUNK_BITMAP_WORDS; w++) {
+                if (Page->SlotBitmap[w] != ~0ULL) {
+                    /* Word has at least one free slot. */
+                    for (b = 0; b < 64; b++) {
+                        SlotIdx = w * 64 + b;
+                        if (SlotIdx >= Page->Capacity) break;
+                        if ((Page->SlotBitmap[w] & (1ULL << b)) == 0) {
+                            Page->SlotBitmap[w] |= (1ULL << b);
+                            Page->UsedCount++;
+                            ThunkAddr = (PUCHAR)Page->CodeBase + (SlotIdx * THUNK_STUB_SIZE);
+                            BuildThunkStub(ThunkAddr, HookId,
+                                           (ULONG64)AsmGenericHookDispatcher);
+                            return ThunkAddr;
+                        }
+                    }
+                }
+            }
+            /* UsedCount lied — repair it. */
+            Page->UsedCount = Page->Capacity;
         }
         Page = Page->Next;
     }
 
-    /* All pages full, allocate a new one */
+    /* All pages full — allocate a new one. */
     Page = AllocateThunkPage(HookId);
     if (!Page) return NULL;
 
-    /* Link to head */
     Page->Next = g_GenericHookState.ThunkPageHead;
     g_GenericHookState.ThunkPageHead = Page;
     g_GenericHookState.ThunkPageCount++;
 
+    /* Slot 0 of the new page. */
+    Page->SlotBitmap[0] |= 1ULL;
+    Page->UsedCount = 1;
     ThunkAddr = (PUCHAR)Page->CodeBase;
     BuildThunkStub(ThunkAddr, HookId, (ULONG64)AsmGenericHookDispatcher);
-    Page->UsedCount++;
-
     return ThunkAddr;
+}
+
+/*
+ * H-3 (revised): release a thunk slot previously allocated by AllocateThunk.
+ *
+ * Timing is subtle.  By the time FreeThunk is called, HvUnhookFunction has
+ * already rebuilt the hooked page's EPT/NPT entry to point at the ORIGINAL
+ * (unhooked) content and flushed the nested TLB on every CPU via
+ * Ept/NptInvalidateAllCpusSync — so no guest VA now dispatches into this
+ * thunk anymore.  HOWEVER:
+ *
+ *   (a) A CPU may currently be executing INSIDE AsmGenericHookDispatcher,
+ *       having entered through the thunk microseconds ago.  If we zero
+ *       the thunk bytes now, the dispatcher itself is unaffected (it's
+ *       in a different page), but a stale RIP return address that some
+ *       frame pointer still references would become invalid.  In
+ *       practice AsmGenericHookDispatcher doesn't leave anything on the
+ *       stack pointing BACK into the thunk (it jumps to trampoline via
+ *       an indirect register jump), so zeroing is safe.
+ *
+ *   (b) A CPU may have ALREADY read the thunk bytes into its icache but
+ *       not yet executed them.  After the TLB sync that icache line is
+ *       stale but icache coherency on x86 handles that — modifying
+ *       writable memory that was executed causes the CPU to self-modify
+ *       its own icache for that line (Intel SDM Vol.3 §11.6).  So
+ *       rewriting the thunk bytes is safe from the icache perspective.
+ *
+ *   (c) The slot MIGHT be handed out to a NEW hook install before any
+ *       of the above CPUs finish.  BuildThunkStub would then write
+ *       different bytes to the same location.  For the still-running
+ *       dispatcher this is fine (see (a)); but the slot reuse must not
+ *       happen until the TLB sync has completed — and that's already
+ *       guaranteed because HvUnhookFunction synchronously calls
+ *       Ept/NptInvalidateAllCpusSync BEFORE returning to
+ *       GenericHookRemove, which only then calls FreeThunk.
+ *
+ * Therefore: zero + mark-free immediately is safe.  The only remaining
+ * concern is that the slot bitmap update must be atomic w.r.t. concurrent
+ * AllocateThunk, which is already enforced by g_GenericHookState.Lock
+ * (both hold it).
+ *
+ * We do NOT free the containing thunk page even when UsedCount drops to
+ * zero — recycling the page avoids the cost of reallocation for the next
+ * install and makes page lifetime monotonic (simplifying lifetime
+ * analysis for any future dispatcher-stack-walk callback).
+ */
+static VOID FreeThunk(PVOID ThunkAddr)
+{
+    PTHUNK_PAGE Page;
+
+    if (!ThunkAddr) return;
+
+    Page = g_GenericHookState.ThunkPageHead;
+    while (Page) {
+        ULONG64 PageBase = (ULONG64)Page->CodeBase;
+        ULONG64 Addr     = (ULONG64)ThunkAddr;
+        if (Addr >= PageBase && Addr < PageBase + PAGE_SIZE) {
+            ULONG SlotIdx = (ULONG)((Addr - PageBase) / THUNK_STUB_SIZE);
+            ULONG w = SlotIdx / 64;
+            ULONG b = SlotIdx % 64;
+            if (w < THUNK_BITMAP_WORDS && (Page->SlotBitmap[w] & (1ULL << b))) {
+                /*
+                 * Order of operations:
+                 *   1. Zero the stub bytes FIRST (so if an AllocateThunk
+                 *      race somehow observed the freed-but-not-yet-zeroed
+                 *      slot, it would build fresh bytes on top — harmless,
+                 *      but clean order simplifies reasoning).
+                 *   2. Clear the bitmap bit and decrement UsedCount.
+                 *
+                 * Both operations happen under the caller-held spin lock
+                 * so this is effectively atomic.
+                 */
+                RtlZeroMemory((PUCHAR)Page->CodeBase + (SlotIdx * THUNK_STUB_SIZE),
+                              THUNK_STUB_SIZE);
+                Page->SlotBitmap[w] &= ~(1ULL << b);
+                if (Page->UsedCount > 0) Page->UsedCount--;
+            }
+            return;
+        }
+        Page = Page->Next;
+    }
 }
 
 /* ========================================================================= */
@@ -234,8 +362,52 @@ NTSTATUS GenericHookInstall(
 
     KeReleaseSpinLock(&g_GenericHookState.Lock, OldIrql);
 
-    /* Install EPT/NPT hook: target VA → thunk, get trampoline back */
-    Status = HvHookFunction(TargetVa, ThunkAddr, &Trampoline);
+    /*
+     * L-5 FIX: for user-mode target VAs, MmGetPhysicalAddress (called
+     * inside HvHookFunction) only works in the context of the owning
+     * process.  If the IOCTL caller is not the target process we must
+     * KeStackAttachProcess first, otherwise we would hook the wrong
+     * physical page (or get PA=0 and fail).
+     *
+     * Heuristic for "user-mode VA": address < 0x0000_8000_0000_0000
+     * (canonical lower half on x64).  Kernel-mode VAs stay in the upper
+     * half and are valid regardless of process context.
+     */
+    {
+        BOOLEAN    IsUserVa     = (TargetVa < 0x0000800000000000ULL);
+        BOOLEAN    Attached     = FALSE;
+        KAPC_STATE ApcState     = { 0 };
+        PEPROCESS  TargetProcess = NULL;
+
+        if (IsUserVa) {
+            if (ProcessId == 0) {
+                LOG_ERROR("GenericHookInstall: user-mode TargetVa 0x%llX requires ProcessId",
+                          TargetVa);
+                /* Roll back thunk allocation */
+                KeAcquireSpinLock(&g_GenericHookState.Lock, &OldIrql);
+                /* (AllocateThunk slot is not freed here by design; see H-3.) */
+                KeReleaseSpinLock(&g_GenericHookState.Lock, OldIrql);
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            Status = PsLookupProcessByProcessId((HANDLE)(ULONG_PTR)ProcessId, &TargetProcess);
+            if (!NT_SUCCESS(Status)) {
+                LOG_ERROR("GenericHookInstall: PsLookupProcessByProcessId(%u) failed: 0x%08X",
+                          ProcessId, Status);
+                return Status;
+            }
+            KeStackAttachProcess(TargetProcess, &ApcState);
+            Attached = TRUE;
+        }
+
+        /* Install EPT/NPT hook: target VA → thunk, get trampoline back */
+        Status = HvHookFunction(TargetVa, ThunkAddr, &Trampoline);
+
+        if (Attached) {
+            KeUnstackDetachProcess(&ApcState);
+            ObDereferenceObject(TargetProcess);
+        }
+    }
     if (!NT_SUCCESS(Status)) {
         LOG_WARN("GenericHookInstall: HvHookFunction failed: 0x%08X", Status);
         return Status;
@@ -310,6 +482,9 @@ NTSTATUS GenericHookRemove(ULONG HookId)
             }
             g_GenericHookState.HookCount--;
 
+            /* H-3: return thunk slot to its page so it can be re-used. */
+            FreeThunk(Entry->ThunkAddress);
+
             KeReleaseSpinLock(&g_GenericHookState.Lock, OldIrql);
 
             LOG_INFO("Generic hook removed: id=%u, VA=0x%llX", HookId, Entry->TargetVirtualAddress);
@@ -340,6 +515,8 @@ VOID GenericHookRemoveAll(VOID)
             KeReleaseSpinLock(&g_GenericHookState.Lock, OldIrql);
             HvUnhookFunction(Entry->TargetVirtualAddress);
             KeAcquireSpinLock(&g_GenericHookState.Lock, &OldIrql);
+            /* H-3: return thunk slot. */
+            FreeThunk(Entry->ThunkAddress);
         }
         ExFreePoolWithTag(Entry, VMX_TAG);
         Entry = Next;

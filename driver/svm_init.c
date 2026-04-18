@@ -12,6 +12,7 @@
 #include "vmx.h"        /* For AsmGet* segment/register accessor declarations */
 #include "log.h"
 #include "ept.h"
+#include "process.h"   /* AAD-BP: ProcessRegisterExceptionHideToggle */
 
 /* ========================================================================= */
 /*  Globals                                                                  */
@@ -82,6 +83,99 @@ static PVOID SvmAllocateContiguous(SIZE_T Size, ULONG64 *PhysicalAddress)
 BOOLEAN SvmIsSupported(VOID)
 {
     return HvCheckSvmSupport();
+}
+
+/*
+ * C-3 (revised): per-feature exception intercept tracking.
+ *
+ * The effective VMCB.Control.InterceptExceptions bit-mask is the OR of
+ * all per-feature flags:
+ *
+ *    SvmSetExceptionInterceptDb(TRUE)  - set while any NPT hook exists
+ *    SvmSetExceptionInterceptBp(TRUE)  - set while any target process
+ *                                       has AAD_HIDE_EXCEPTIONS
+ *
+ * These two feature-flags are combined into a single 32-bit mask (bits
+ * 1 and 3 corresponding to #DB and #BP respectively) which is written
+ * to every active CPU's VMCB.  The change takes effect on each CPU's
+ * next VMRUN.
+ *
+ * Synchronisation:
+ *   - The feature-flag variables are protected by g_SvmInterceptLock.
+ *     The lock is initialised once by SvmInitialize() — no lazy-init
+ *     race.
+ *   - We write VMCB.Control.InterceptExceptions (an ULONG — a single
+ *     aligned 32-bit store is atomic on x86-64 per Intel SDM Vol.3
+ *     §8.1.1) and then clear ONLY the INTERCEPTS clean bit (bit 0 of
+ *     CleanBits).  Any racing VMRUN on another CPU will either see the
+ *     old mask (no harm, just a redundant VMEXIT on the next
+ *     corresponding exception) or the new mask (correct behaviour).
+ *     Clearing only bit 0 rather than the whole CleanBits word avoids
+ *     forcing a full VMCB re-load on the next VMRUN.
+ */
+static BOOLEAN  g_SvmInterceptDbRequested = FALSE;
+static BOOLEAN  g_SvmInterceptBpRequested = FALSE;
+static KSPIN_LOCK g_SvmInterceptLock;
+
+/* Called exactly once from SvmInitialize(); the old lazy-init pattern is gone. */
+VOID SvmInterceptLockInitialize(VOID)
+{
+    KeInitializeSpinLock(&g_SvmInterceptLock);
+    g_SvmInterceptDbRequested = FALSE;
+    g_SvmInterceptBpRequested = FALSE;
+}
+
+static VOID SvmApplyExceptionIntercepts(VOID)
+{
+    ULONG i;
+    ULONG NewMask;
+
+    NewMask = (g_SvmInterceptDbRequested ? (1u << 1) : 0) |
+              (g_SvmInterceptBpRequested ? (1u << 3) : 0);
+
+    for (i = 0; i < g_SvmState.CpuCount; i++) {
+        PVMCB Vmcb = g_SvmState.CpuContexts[i].VmcbVa;
+        if (Vmcb) {
+            /*
+             * Atomic 32-bit aligned write — VMRUN on another CPU will
+             * see either old or new, never a torn value.
+             */
+            Vmcb->Control.InterceptExceptions = NewMask;
+            /*
+             * Clear ONLY the INTERCEPTS clean bit (bit 0) so the next
+             * VMRUN re-reads the intercept mask but preserves clean-bit
+             * optimisations for unchanged sections (paging, segments,
+             * CR/DR/IOMSR, ASID, TPR, etc.).  InterlockedAnd keeps this
+             * read-modify-write atomic in the face of other concurrent
+             * clean-bit updates on the same CPU's handler path.
+             */
+            InterlockedAnd((LONG *)&Vmcb->Control.CleanBits, ~(LONG)(1UL << 0));
+        }
+    }
+}
+
+VOID SvmSetExceptionInterceptDb(BOOLEAN Enable)
+{
+    KIRQL OldIrql;
+    if (!g_SvmState.Initialized || !g_SvmState.CpuContexts) return;
+    KeAcquireSpinLock(&g_SvmInterceptLock, &OldIrql);
+    if (g_SvmInterceptDbRequested != Enable) {
+        g_SvmInterceptDbRequested = Enable;
+        SvmApplyExceptionIntercepts();
+    }
+    KeReleaseSpinLock(&g_SvmInterceptLock, OldIrql);
+}
+
+VOID SvmSetExceptionInterceptBp(BOOLEAN Enable)
+{
+    KIRQL OldIrql;
+    if (!g_SvmState.Initialized || !g_SvmState.CpuContexts) return;
+    KeAcquireSpinLock(&g_SvmInterceptLock, &OldIrql);
+    if (g_SvmInterceptBpRequested != Enable) {
+        g_SvmInterceptBpRequested = Enable;
+        SvmApplyExceptionIntercepts();
+    }
+    KeReleaseSpinLock(&g_SvmInterceptLock, OldIrql);
 }
 
 /* ========================================================================= */
@@ -162,10 +256,28 @@ static NTSTATUS SvmAllocateCpuContext(PSVM_CPU_CONTEXT CpuCtx)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* Host Save Area (4KB, page-aligned) */
+    /* Host Save Area (4KB, page-aligned) — used by the hardware-managed
+     * HSAVE mechanism (pointed to by MSR_VM_HSAVE_PA).  See comment in
+     * svm.h near SVM_CPU_CONTEXT::HostSaveAreaVa for what's in here. */
     CpuCtx->HostSaveAreaVa = SvmAllocateContiguous(PAGE_SIZE, &CpuCtx->HostSaveAreaPa);
     if (!CpuCtx->HostSaveAreaVa) {
         LOG_ERROR("Failed to allocate host save area for CPU %u",
+                  CpuCtx->Common.ProcessorNumber);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /*
+     * CRITICAL FIX (post-2nd-review): software-managed Host VMCB for
+     * VMSAVE/VMLOAD of host-extra state (FS/GS/TR/LDTR base, LSTAR, etc.).
+     * Must be a separate 4KB page from HostSaveAreaVa because:
+     *   - HostSaveAreaVa is written implicitly by the CPU on VMRUN.
+     *   - HostVmcbVa is written explicitly by us via VMSAVE.
+     * Sharing the same page would cause the CPU's automatic save (on the
+     * next VMRUN after the first) to clobber bits VMSAVE had put there.
+     */
+    CpuCtx->HostVmcbVa = (PVMCB)SvmAllocateContiguous(PAGE_SIZE, &CpuCtx->HostVmcbPa);
+    if (!CpuCtx->HostVmcbVa) {
+        LOG_ERROR("Failed to allocate host VMCB for CPU %u",
                   CpuCtx->Common.ProcessorNumber);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -207,6 +319,10 @@ static VOID SvmFreeCpuContext(PSVM_CPU_CONTEXT CpuCtx)
     if (CpuCtx->HostSaveAreaVa) {
         MmFreeContiguousMemory(CpuCtx->HostSaveAreaVa);
         CpuCtx->HostSaveAreaVa = NULL;
+    }
+    if (CpuCtx->HostVmcbVa) {
+        MmFreeContiguousMemory(CpuCtx->HostVmcbVa);
+        CpuCtx->HostVmcbVa = NULL;
     }
     if (CpuCtx->MsrpmVa) {
         MmFreeContiguousMemory(CpuCtx->MsrpmVa);
@@ -355,11 +471,22 @@ static VOID SvmInitVmcb(PSVM_CPU_CONTEXT CpuCtx)
 
     /*
      * CR intercepts:
-     * For anti-anti-debug, we intercept CR3 writes (process switch detection).
-     * With NPT enabled, we don't need CR3 read/write intercepts for address translation.
+     *
+     * C-1 FIX: We must intercept CR3 writes to keep process-switch detection
+     * (used by AadUpdateHwTscOffset for per-process TSC compensation) and
+     * the shadow-SSDT "enter target process" logic working on AMD.
+     *
+     * With NPT enabled, CR3 read/write intercepts are NOT required for
+     * address translation (that's what nested paging is for), but we still
+     * want CR3 writes as a process-switch signal.  The overhead is minor
+     * because CR3 writes only happen at context switch time.
+     *
+     * CR0 / CR4 writes are intercepted for OS-level invariants (SMEP, WP,
+     * CR4.VMXE shadowing, etc. — handled in SvmHandleCrAccess).
      */
     Vmcb->Control.InterceptCr =
         (1 << SVM_INTERCEPT_CR0_WRITE) |
+        (1 << SVM_INTERCEPT_CR3_WRITE) |   /* C-1: process-switch detection */
         (1 << SVM_INTERCEPT_CR4_WRITE);
 
     /*
@@ -376,11 +503,18 @@ static VOID SvmInitVmcb(PSVM_CPU_CONTEXT CpuCtx)
 
     /*
      * Exception intercepts:
-     * #DB (1) and #BP (3) for anti-anti-debug exception handling
+     *
+     * C-3 FIX: Default to NO exception intercepts.  They are dynamically
+     * enabled / disabled by SvmSyncExceptionIntercepts() whenever an NPT
+     * hook is installed / uninstalled (NPT hooks need #DB to do their
+     * single-step dance), and by the anti-anti-debug subsystem when the
+     * user enables AAD_HIDE_EXCEPTIONS.
+     *
+     * Previously both #DB and #BP were always intercepted, so every
+     * unrelated WinDbg user-mode debug session on the guest caused a
+     * VMEXIT storm.
      */
-    Vmcb->Control.InterceptExceptions =
-        (1 << 1) |     /* #DB */
-        (1 << 3);      /* #BP */
+    Vmcb->Control.InterceptExceptions = 0;
 
     /*
      * Instruction intercepts (64-bit):
@@ -390,11 +524,25 @@ static VOID SvmInitVmcb(PSVM_CPU_CONTEXT CpuCtx)
      * TSC Offset mechanism (VMCB.Control.TscOffset) to compensate TSC values.
      * The offset is dynamically updated on CR3 switches via AadUpdateHwTscOffset().
      */
+    /*
+     * C-2 FIX: Do NOT intercept HLT.
+     *
+     * Previously we intercepted HLT and simply advanced the guest RIP in
+     * SvmHandleHlt — which made HLT a no-op from the guest's perspective
+     * and caused 100% CPU usage on idle cores (the idle thread loops
+     * calling HLT thousands of times/sec expecting the CPU to park).
+     *
+     * Not intercepting HLT lets the CPU enter the native C1/C2 idle
+     * state on the guest's HLT instruction.  Interrupts / NMIs will
+     * wake it normally.  If a specific anti-cheat or root-kit feature
+     * needs HLT intercept later, it must set SVM_INTERCEPT_HLT and
+     * implement the AMD APM Vol.2 §15.9 wait-for-interrupt protocol
+     * (setting VMCB.Control.IntState and re-VMRUNing).
+     */
     Vmcb->Control.Intercept =
         (1ULL << SVM_INTERCEPT_CPUID) |
         (1ULL << SVM_INTERCEPT_MSR_PROT) |
         (1ULL << SVM_INTERCEPT_VMMCALL) |
-        (1ULL << SVM_INTERCEPT_HLT) |
         (1ULL << SVM_INTERCEPT_INVD) |
         (1ULL << SVM_INTERCEPT_WBINVD) |
         (1ULL << SVM_INTERCEPT_XSETBV) |
@@ -641,10 +789,14 @@ static VOID SvmInitDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
 
     /*
      * Launch into guest mode.
-     * AsmSvmLaunch(VmcbPa, VmcbVa) sets VMCB.Save.Rsp/Rip,
-     * then executes CLGI + VMLOAD + VMRUN.
+     * AsmSvmLaunch(VmcbPa, VmcbVa, HostVmcbPa):
+     *   - First iteration: VMSAVE HostVmcbPa (capture real host state)
+     *   - Set VMCB.Save.Rsp/Rip to our landing pad, VMRUN.
+     *   - Guest lands at _SvmLaunchGuest → returns to the DPC.
+     *   - Subsequent VMEXITs: VMLOAD HostVmcbPa (restore host), call
+     *     SvmExitHandler, VMLOAD VmcbPa (reload guest-extra), VMRUN.
      */
-    LaunchResult = AsmSvmLaunch(CpuCtx->VmcbPa, CpuCtx->VmcbVa);
+    LaunchResult = AsmSvmLaunch(CpuCtx->VmcbPa, CpuCtx->VmcbVa, CpuCtx->HostVmcbPa);
     if (LaunchResult != 0) {
         LOG_ERROR("SVM VMRUN failed on CPU %u", CpuNum);
         SvmDisableOnCpu(CpuCtx);
@@ -682,7 +834,13 @@ static VOID SvmTerminateDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID A
          *
          * On AMD, VMMCALL is the equivalent of Intel's VMCALL.
          */
-        AsmSvmVmmcall(VMCALL_MAGIC_SHUTDOWN);
+        /*
+         * M-6: pass the per-boot nonce in RCX so SvmHandleVmmcall can
+         * authenticate us.  Any other Ring-0 code that tries
+         * VMMCALL(VMCALL_MAGIC_SHUTDOWN) without the nonce will be
+         * rejected and #UD-injected.
+         */
+        AsmSvmVmmcall2(VMCALL_MAGIC_SHUTDOWN, g_VmcallShutdownNonce);
     }
 
     SvmDisableOnCpu(CpuCtx);
@@ -710,6 +868,12 @@ NTSTATUS SvmInitialize(VOID)
 
     /* Set the global processor count (used for bounds checks everywhere) */
     g_MaxProcessors = CpuCount;
+
+    /*
+     * C-3 (revised): one-shot init for the exception-intercept lock.
+     * Must happen before any hook install / AAD toggle can occur.
+     */
+    SvmInterceptLockInitialize();
 
     LOG_INFO("Initializing SVM on %u processors", CpuCount);
 
@@ -823,7 +987,54 @@ NTSTATUS SvmInitialize(VOID)
             goto SvmInitFailed;
         }
 
-        KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode, FALSE, NULL);
+        /*
+         * H-6 (revised) FIX: SVM init DPC must have a bounded wait, same
+         * as the VMX side.  Dpc and DpcCtx live on THIS stack frame; if
+         * the DPC somehow hangs forever (CPU offline, pathological
+         * scheduler state, etc.) we MUST NOT unwind this frame with the
+         * DPC still queued or in-flight — its routine would dereference
+         * freed stack memory and BSOD.
+         *
+         * Strategy: wait up to 60 s in 1 s slices so we can log progress.
+         * On timeout we try KeRemoveQueueDpc to pull it out of the queue
+         * cleanly.  If that fails (DPC already started executing) we
+         * degrade to an INDEFINITE wait — better to hang one init attempt
+         * forever than silently corrupt the stack.  The only way that
+         * hang ever ends is the OS watchdog, and that's the caller's
+         * problem to investigate.
+         */
+        {
+            LARGE_INTEGER   OneSecond;
+            ULONG           WaitCount = 0;
+            NTSTATUS        WaitStatus;
+
+            OneSecond.QuadPart = -10LL * 1000LL * 1000LL; /* -1 s (relative) */
+
+            for (;;) {
+                WaitStatus = KeWaitForSingleObject(
+                    &DpcCtx.Event, Executive, KernelMode, FALSE, &OneSecond);
+                if (WaitStatus == STATUS_SUCCESS) break;
+
+                WaitCount++;
+                if ((WaitCount % 10) == 0) {
+                    LOG_WARN("CPU %u SVM init DPC still pending after %u s", i, WaitCount);
+                }
+                if (WaitCount >= 60) {
+                    LOG_ERROR("CPU %u SVM init DPC timed out after 60 s", i);
+                    if (KeRemoveQueueDpc(&Dpc)) {
+                        LOG_WARN("CPU %u SVM DPC removed from queue cleanly", i);
+                    } else {
+                        LOG_ERROR("CPU %u SVM DPC already started — waiting indefinitely "
+                                  "to avoid stack corruption", i);
+                        KeWaitForSingleObject(&DpcCtx.Event, Executive, KernelMode,
+                                              FALSE, NULL);
+                        LOG_ERROR("CPU %u SVM DPC finally completed after timeout", i);
+                    }
+                    Status = STATUS_TIMEOUT;
+                    goto SvmInitFailed;
+                }
+            }
+        }
 
         if (!NT_SUCCESS(DpcCtx.Status)) {
             LOG_ERROR("SVM init failed on CPU %u: 0x%08X", i, DpcCtx.Status);
@@ -835,6 +1046,16 @@ NTSTATUS SvmInitialize(VOID)
     }
 
     g_SvmState.Initialized = TRUE;
+
+    /*
+     * AAD-BP (post-2nd-review): register exception-intercept toggle
+     * callback with the process-tracking subsystem so adding/removing
+     * targets with AAD_HIDE_EXCEPTIONS automatically enables/disables
+     * #BP intercept across all CPUs.  Register AFTER Initialized=TRUE
+     * so the callback's own g_SvmState.Initialized guard is satisfied.
+     */
+    ProcessRegisterExceptionHideToggle(SvmSetExceptionInterceptBp);
+
     LOG_INFO("SVM initialization complete: %u CPUs virtualized", CpuCount);
 
     return STATUS_SUCCESS;

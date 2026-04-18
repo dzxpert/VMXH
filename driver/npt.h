@@ -109,10 +109,12 @@ VOID        NptSplitLargePage(ULONG64 PhysicalAddress);
 
 /* TLB invalidation (via ASID flush) */
 VOID        NptInvalidateAll(VOID);
+VOID        NptInvalidateAllCpusSync(VOID);   /* H-5: sync all CPUs via IPI */
 
 /* Per-CPU #DB tracking (for multi-core NPT hook race fix) */
 VOID    NptDbTrackRelaxedPage(ULONG64 PagePhysicalAddr);
 ULONG64 NptDbGetAndClearRelaxedPage(VOID);
+BOOLEAN NptDbMatchesRelaxedRip(ULONG64 CurrentRip);   /* M-4: RIP sanity check */
 
 /* Per-CPU NPT management (for hook page isolation) */
 NTSTATUS NptInitPerCpu(VOID);

@@ -10,8 +10,8 @@
 /* ========================================================================= */
 /*  Forward declarations for per-CPU helpers (defined later in this file)     */
 /* ========================================================================= */
-static NTSTATUS EptEnsurePerCpuPdForRegion(ULONG PdptIndex);
-static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG PdIndex);
+static NTSTATUS EptEnsurePerCpuPdForRegion(ULONG FlatPdptIndex);
+static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG FlatPdptIndex, ULONG PdIndex);
 
 /* ========================================================================= */
 /*  Constants (needed before global array declarations)                      */
@@ -20,10 +20,29 @@ static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
 /* Pool of split page tables (for 2MB -> 4KB splitting) */
 #define MAX_SPLIT_PAGES     128
 
-/* Page directory pages - we need one PD per PDPT entry (512 entries) */
-/* For simplicity, we pre-allocate for the first 512GB of physical memory */
-/* Each PD covers 1GB and has 512 entries of 2MB each */
-#define MAX_PD_PAGES    512
+/*
+ * Default / minimum PD-page count.
+ *
+ * The embedded g_EptState.Pdpt[] has exactly EPT_PDPTE_COUNT (512) entries,
+ * which covers the first 512GB of physical address space via 2MB large pages.
+ * This is the common case on workstations and most servers.
+ *
+ * When the host has physical memory or firmware-reserved MMIO regions above
+ * 512GB (e.g. high-end Xeon/EPYC servers, or PCIe BARs at > 512GB on some
+ * platforms), EptInitialize() dynamically extends the identity map by
+ * populating additional PML4 entries and allocating extra PDPT + PD pages.
+ * The actual in-use value is stored in g_EptPdptTotal (= 512 * g_EptPml4Count).
+ *
+ * Hard cap: EPT_PML4E_COUNT (512) PML4 entries × 512 PDPTE/page =
+ * 262144 PDPT entries × 1GB = 256TB.  This matches the full x86-64 physical
+ * address limit on modern CPUs.
+ */
+#define DEFAULT_PD_PAGES    EPT_PDPTE_COUNT     /* 512 → covers 512GB */
+#define MAX_PD_PAGES_CAP    (EPT_PML4E_COUNT * EPT_PDPTE_COUNT)  /* 262144 */
+
+/* Runtime-resolved identity-map sizing; set once by EptInitialize(). */
+ULONG g_EptPdptTotal  = DEFAULT_PD_PAGES;
+ULONG g_EptPml4Count  = 1;
 
 /* ========================================================================= */
 /*  Globals                                                                  */
@@ -32,6 +51,28 @@ static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
 EPT_STATE       g_EptState = { 0 };
 EPT_HOOK_STATE  g_EptHookState = { 0 };
 PEPT_CPU_STATE  g_EptCpuStates = NULL;     /* per-CPU EPT root array */
+
+/*
+ * Extended PDPT pages for PML4[1..g_EptPml4Count-1] when the identity map
+ * needs to cover more than 512GB.  Each page holds 512 PDPTE entries.
+ * Allocated on demand in EptInitialize().  Size: (g_EptPml4Count-1) pages.
+ *
+ * g_EptExtPdptPages[i] is the PDPT page for PML4[i+1].
+ */
+typedef struct _EPT_PDPT_PAGE {
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Entries[EPT_PDPTE_COUNT];
+} EPT_PDPT_PAGE;
+
+static EPT_PDPT_PAGE *g_EptExtPdptPages = NULL;
+
+/*
+ * Per-CPU extended PDPT pages: [cpu][extIdx] where extIdx in [0, g_EptPml4Count-1).
+ * Allocated in EptInitPerCpu() alongside g_EptCpuStates.
+ *
+ * g_EptCpuExtPdpt[cpu] points to a contiguous array of (g_EptPml4Count-1) PDPT
+ * pages that back PML4[1..] for that CPU.
+ */
+static EPT_PDPT_PAGE **g_EptCpuExtPdpt = NULL;
 
 /*
  * Per-CPU split page tracking.
@@ -61,7 +102,7 @@ typedef struct _EPT_PER_CPU_PD_PAGE {
 } EPT_PER_CPU_PD_PAGE;
 
 static EPT_PER_CPU_PD_PAGE **g_PerCpuPdPages = NULL;  /* [g_MaxProcessors] -> allocated PD */
-static BOOLEAN g_PerCpuPdAllocated[MAX_PD_PAGES] = { 0 };  /* which PDPT entries are per-CPU */
+static PBOOLEAN g_PerCpuPdAllocated = NULL;  /* [g_EptPdptTotal] which PDPT entries are per-CPU */
 
 /*
  * Global flag: Guest code sets this after modifying EPT PTEs.
@@ -242,6 +283,117 @@ typedef struct _EPT_PD_PAGE {
 } EPT_PD_PAGE;
 
 static EPT_PD_PAGE  *g_PdPages = NULL;
+
+/* ========================================================================= */
+/*  Flat PDPT-index helpers (for > 512GB identity map support)               */
+/* ========================================================================= */
+
+/*
+ * Convert a 2MB-aligned guest physical address into the flat PDPT index
+ * (0 .. g_EptPdptTotal-1).  Returns (ULONG)-1 if the PA is outside the
+ * mapped identity-map range.
+ *
+ * The flat index is computed as:
+ *   flat = (PA >> 30) | (PML4_index << 9)
+ *        = PA >> 30  for PML4_index 0..g_EptPml4Count-1
+ * i.e. it is simply PA / 1GB (bits [51:30] of PA).  This works because
+ * our identity map is dense: we always allocate PDPT pages for
+ * PML4[0 .. g_EptPml4Count-1] with every PDPT entry covering a contiguous
+ * 1GB of physical address space.
+ */
+static __forceinline ULONG EptPaToFlatPdptIdx(ULONG64 PhysicalAddress)
+{
+    ULONG64 Flat = PhysicalAddress >> 30;    /* 1GB granularity */
+    if (Flat >= (ULONG64)g_EptPdptTotal) return (ULONG)-1;
+    return (ULONG)Flat;
+}
+
+/*
+ * Split a flat PDPT index into (PML4 index, PDPT index within that PML4).
+ */
+static __forceinline VOID EptFlatIdxSplit(ULONG FlatIdx, PULONG Pml4Idx, PULONG PdptIdx)
+{
+    *Pml4Idx = FlatIdx >> 9;          /* / 512 */
+    *PdptIdx = FlatIdx & 0x1FF;       /* % 512 */
+}
+
+/*
+ * Get a pointer to the shared PDPT entry addressed by a flat index.
+ * The first 512 entries live in g_EptState.Pdpt[]; entries 512.. live
+ * in g_EptExtPdptPages[Pml4Idx-1].Entries[PdptIdx].
+ */
+static __forceinline PEPT_PDPTE EptGetSharedPdptePtr(ULONG FlatIdx)
+{
+    ULONG Pml4Idx, PdptIdx;
+    EptFlatIdxSplit(FlatIdx, &Pml4Idx, &PdptIdx);
+    if (Pml4Idx == 0) {
+        return &g_EptState.Pdpt[PdptIdx];
+    }
+    if (g_EptExtPdptPages) {
+        return &g_EptExtPdptPages[Pml4Idx - 1].Entries[PdptIdx];
+    }
+    return NULL;
+}
+
+/*
+ * Get a pointer to the per-CPU PDPT entry (same flat index) for CpuIndex.
+ * Returns NULL if per-CPU EPT is not initialised.
+ */
+static __forceinline PEPT_PDPTE EptGetCpuPdptePtr(ULONG CpuIndex, ULONG FlatIdx)
+{
+    ULONG Pml4Idx, PdptIdx;
+    if (!g_EptCpuStates || CpuIndex >= g_MaxProcessors) return NULL;
+    EptFlatIdxSplit(FlatIdx, &Pml4Idx, &PdptIdx);
+    if (Pml4Idx == 0) {
+        return &g_EptCpuStates[CpuIndex].Pdpt[PdptIdx];
+    }
+    if (g_EptCpuExtPdpt && g_EptCpuExtPdpt[CpuIndex]) {
+        return &g_EptCpuExtPdpt[CpuIndex][Pml4Idx - 1].Entries[PdptIdx];
+    }
+    return NULL;
+}
+
+/*
+ * Determine how much of the physical address space the identity map must
+ * cover.  Queries MmGetPhysicalMemoryRanges() (DriverEntry / PASSIVE_LEVEL
+ * context — always safe during EptInitialize()).  Adds a 2GB head-room
+ * above the reported maximum so that MMIO / hot-plug DIMMs sitting just
+ * past the top of RAM do not trigger unmapped-region EPT violations.
+ *
+ * Returns the required number of flat 1GB PDPT entries, clamped to the
+ * range [DEFAULT_PD_PAGES, MAX_PD_PAGES_CAP].
+ */
+static ULONG EptComputeRequiredPdPages(VOID)
+{
+    PPHYSICAL_MEMORY_RANGE Ranges;
+    ULONG64 MaxPa = 0;
+    ULONG   i;
+    ULONG64 Required1GB;
+
+    Ranges = MmGetPhysicalMemoryRanges();
+    if (Ranges) {
+        for (i = 0; Ranges[i].BaseAddress.QuadPart != 0 || Ranges[i].NumberOfBytes.QuadPart != 0; i++) {
+            ULONG64 End = (ULONG64)Ranges[i].BaseAddress.QuadPart +
+                          (ULONG64)Ranges[i].NumberOfBytes.QuadPart;
+            if (End > MaxPa) MaxPa = End;
+        }
+        ExFreePool(Ranges);   /* caller-owned per MSDN */
+    }
+
+    /* Add 2GB headroom for hot-plug / MMIO above top-of-RAM */
+    MaxPa += (2ULL * 1024 * 1024 * 1024);
+
+    /* Round up to 1GB boundary and convert to PDPT-entry count */
+    Required1GB = (MaxPa + ((1ULL << 30) - 1)) >> 30;
+
+    if (Required1GB < DEFAULT_PD_PAGES) Required1GB = DEFAULT_PD_PAGES;
+    if (Required1GB > MAX_PD_PAGES_CAP) Required1GB = MAX_PD_PAGES_CAP;
+
+    /* Round up to a whole PDPT page (512 entries) so PML4 count works out cleanly */
+    Required1GB = (Required1GB + 511) & ~((ULONG64)511);
+
+    return (ULONG)Required1GB;
+}
 
 /* ========================================================================= */
 /*  Internal Helpers                                                         */
@@ -877,6 +1029,8 @@ NTSTATUS EptInitialize(VOID)
     ULONG i, j;
     ULONG64 PhysAddr;
     ULONG64 PdptPa;
+    ULONG   RequiredPdpt;
+    ULONG   Pml4Count;
 
     if (g_EptState.Initialized) {
         return STATUS_ALREADY_REGISTERED;
@@ -885,6 +1039,28 @@ NTSTATUS EptInitialize(VOID)
     RtlZeroMemory(&g_EptState, sizeof(EPT_STATE));
     RtlZeroMemory(&g_EptHookState, sizeof(EPT_HOOK_STATE));
     KeInitializeSpinLock(&g_EptHookState.Lock);
+
+    /*
+     * H-2 FIX: Detect physical memory / MMIO upper bound and extend the
+     * identity map beyond the default 512GB when needed.  Rounded up to
+     * whole PDPT pages (512 entries each) so that PML4 count is straight-
+     * forward to compute.
+     */
+    RequiredPdpt = EptComputeRequiredPdPages();
+    Pml4Count    = RequiredPdpt / EPT_PDPTE_COUNT;   /* each PDPT page = 512 entries = 512GB */
+    if (Pml4Count == 0) Pml4Count = 1;
+    if (Pml4Count > EPT_PML4E_COUNT) {
+        LOG_ERROR("EPT: required PML4 count %u exceeds hardware max %u",
+                  Pml4Count, (ULONG)EPT_PML4E_COUNT);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    g_EptPdptTotal = RequiredPdpt;
+    g_EptPml4Count = Pml4Count;
+
+    LOG_INFO("EPT identity map sizing: %u PDPT entries (%llu GB), %u PML4 entries",
+             g_EptPdptTotal,
+             (ULONG64)g_EptPdptTotal,       /* each entry = 1GB */
+             g_EptPml4Count);
 
     /*
      * BUG FIX (Issue #3+5+6): Initialize hash tables for O(1) lookups.
@@ -933,15 +1109,20 @@ NTSTATUS EptInitialize(VOID)
 
     /*
      * Allocate Page Directory pages.
-     * We map the first 512GB using 2MB large pages (512 PDs * 512 entries * 2MB = 512GB).
+     *
+     * g_EptPdptTotal PD pages are needed: one per PDPT entry.  Each PD covers
+     * 1GB via 512 * 2MB large pages.  This is a flat array indexed by the
+     * flat PDPT index (0 .. g_EptPdptTotal-1).
      */
     g_PdPages = (EPT_PD_PAGE *)ExAllocatePoolWithTag(
         NonPagedPool,
-        sizeof(EPT_PD_PAGE) * MAX_PD_PAGES,
+        sizeof(EPT_PD_PAGE) * g_EptPdptTotal,
         VMX_TAG
     );
     if (!g_PdPages) {
-        LOG_ERROR("Failed to allocate EPT page directory pages");
+        LOG_ERROR("Failed to allocate EPT page directory pages (%u pages = %llu KB)",
+                  g_EptPdptTotal,
+                  ((ULONG64)g_EptPdptTotal * sizeof(EPT_PD_PAGE)) >> 10);
         /*
          * BUG FIX (Review Issue #4): Free per-CPU tracking arrays on failure.
          * Previously leaked g_EptInveptCpuGen and g_MtfRelaxedPagePa.
@@ -950,7 +1131,43 @@ NTSTATUS EptInitialize(VOID)
         if (g_MtfRelaxedPagePa) { ExFreePoolWithTag((PVOID)g_MtfRelaxedPagePa, 'tpeM'); g_MtfRelaxedPagePa = NULL; }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlZeroMemory(g_PdPages, sizeof(EPT_PD_PAGE) * MAX_PD_PAGES);
+    RtlZeroMemory(g_PdPages, sizeof(EPT_PD_PAGE) * g_EptPdptTotal);
+
+    /* Allocate g_PerCpuPdAllocated bitmap (sized by g_EptPdptTotal) */
+    g_PerCpuPdAllocated = (PBOOLEAN)ExAllocatePoolWithTag(
+        NonPagedPool,
+        g_EptPdptTotal * sizeof(BOOLEAN),
+        'tpeA');
+    if (!g_PerCpuPdAllocated) {
+        LOG_ERROR("Failed to allocate EPT per-CPU PD tracking bitmap");
+        ExFreePoolWithTag(g_PdPages, VMX_TAG); g_PdPages = NULL;
+        if (g_EptInveptCpuGen) { ExFreePoolWithTag(g_EptInveptCpuGen, 'tpeC'); g_EptInveptCpuGen = NULL; }
+        if (g_MtfRelaxedPagePa) { ExFreePoolWithTag((PVOID)g_MtfRelaxedPagePa, 'tpeM'); g_MtfRelaxedPagePa = NULL; }
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(g_PerCpuPdAllocated, g_EptPdptTotal * sizeof(BOOLEAN));
+
+    /*
+     * Allocate extended PDPT pages (for PML4[1..g_EptPml4Count-1]) when the
+     * identity map needs more than 512GB.  The first PDPT page lives in
+     * g_EptState.Pdpt[] (embedded); additional pages are allocated here.
+     */
+    if (g_EptPml4Count > 1) {
+        ULONG ExtCount = g_EptPml4Count - 1;
+        g_EptExtPdptPages = (EPT_PDPT_PAGE *)ExAllocatePoolWithTag(
+            NonPagedPool,
+            sizeof(EPT_PDPT_PAGE) * ExtCount,
+            'tpeX');
+        if (!g_EptExtPdptPages) {
+            LOG_ERROR("Failed to allocate %u extended PDPT pages", ExtCount);
+            ExFreePoolWithTag(g_PerCpuPdAllocated, 'tpeA'); g_PerCpuPdAllocated = NULL;
+            ExFreePoolWithTag(g_PdPages, VMX_TAG); g_PdPages = NULL;
+            if (g_EptInveptCpuGen) { ExFreePoolWithTag(g_EptInveptCpuGen, 'tpeC'); g_EptInveptCpuGen = NULL; }
+            if (g_MtfRelaxedPagePa) { ExFreePoolWithTag((PVOID)g_MtfRelaxedPagePa, 'tpeM'); g_MtfRelaxedPagePa = NULL; }
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(g_EptExtPdptPages, sizeof(EPT_PDPT_PAGE) * ExtCount);
+    }
 
     /* Allocate split page pool */
     g_SplitPages = (EPT_SPLIT_PAGE *)ExAllocatePoolWithTag(
@@ -960,7 +1177,9 @@ NTSTATUS EptInitialize(VOID)
     );
     if (!g_SplitPages) {
         LOG_ERROR("Failed to allocate EPT split page pool");
-        ExFreePoolWithTag(g_PdPages, VMX_TAG);
+        if (g_EptExtPdptPages) { ExFreePoolWithTag(g_EptExtPdptPages, 'tpeX'); g_EptExtPdptPages = NULL; }
+        ExFreePoolWithTag(g_PerCpuPdAllocated, 'tpeA'); g_PerCpuPdAllocated = NULL;
+        ExFreePoolWithTag(g_PdPages, VMX_TAG); g_PdPages = NULL;
         if (g_EptInveptCpuGen) { ExFreePoolWithTag(g_EptInveptCpuGen, 'tpeC'); g_EptInveptCpuGen = NULL; }
         if (g_MtfRelaxedPagePa) { ExFreePoolWithTag((PVOID)g_MtfRelaxedPagePa, 'tpeM'); g_MtfRelaxedPagePa = NULL; }
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -970,41 +1189,54 @@ NTSTATUS EptInitialize(VOID)
     /*
      * Build identity-mapped EPT using 2MB large pages.
      *
-     * PML4 -> PDPT -> PD (2MB entries)
+     *   PML4[0..Pml4Count-1] -> PDPT page -> PD page (2MB entries)
      *
-     * We map the first 512GB of physical address space.
+     * Each PDPT entry covers 1GB, each PD entry covers 2MB.  The flat PDPT
+     * index iterates linearly over the full range; PML4 / PDPT splitting is
+     * done via EptGetSharedPdptePtr().
      */
 
-    /* Setup PDPT entries - each points to a PD page */
-    for (i = 0; i < MAX_PD_PAGES && i < EPT_PDPTE_COUNT; i++) {
-        ULONG64 PdPa = VaToPhysical(&g_PdPages[i]);
+    /* Setup PDPT entries (shared template) - each points to a PD page */
+    for (i = 0; i < g_EptPdptTotal; i++) {
+        ULONG64   PdPa  = VaToPhysical(&g_PdPages[i]);
+        PEPT_PDPTE Pdpte = EptGetSharedPdptePtr(i);
+        if (!Pdpte) continue;     /* should not happen */
 
-        g_EptState.Pdpt[i].Value = 0;
-        g_EptState.Pdpt[i].Read = 1;
-        g_EptState.Pdpt[i].Write = 1;
-        g_EptState.Pdpt[i].Execute = 1;
-        g_EptState.Pdpt[i].PhysAddr = PdPa >> 12;
+        Pdpte->Value    = 0;
+        Pdpte->Read     = 1;
+        Pdpte->Write    = 1;
+        Pdpte->Execute  = 1;
+        Pdpte->PhysAddr = PdPa >> 12;
 
         /* Setup PD entries - each is a 2MB large page */
         for (j = 0; j < EPT_PDE_COUNT; j++) {
             PhysAddr = ((ULONG64)i * 512 + j) * (2 * 1024 * 1024); /* 2MB per entry */
 
-            g_PdPages[i].Entries[j].Value = 0;
-            g_PdPages[i].Entries[j].Read = 1;
-            g_PdPages[i].Entries[j].Write = 1;
-            g_PdPages[i].Entries[j].Execute = 1;
+            g_PdPages[i].Entries[j].Value     = 0;
+            g_PdPages[i].Entries[j].Read      = 1;
+            g_PdPages[i].Entries[j].Write     = 1;
+            g_PdPages[i].Entries[j].Execute   = 1;
             g_PdPages[i].Entries[j].LargePage = 1;  /* 2MB page */
-            g_PdPages[i].Entries[j].PhysAddr = PhysAddr >> 12;
+            g_PdPages[i].Entries[j].PhysAddr  = PhysAddr >> 12;
         }
     }
 
-    /* Setup PML4[0] to point to our PDPT */
+    /* Setup PML4[0..Pml4Count-1] to point at the (embedded or extended) PDPT pages */
     PdptPa = VaToPhysical(g_EptState.Pdpt);
-    g_EptState.Pml4[0].Value = 0;
-    g_EptState.Pml4[0].Read = 1;
-    g_EptState.Pml4[0].Write = 1;
-    g_EptState.Pml4[0].Execute = 1;
+    g_EptState.Pml4[0].Value    = 0;
+    g_EptState.Pml4[0].Read     = 1;
+    g_EptState.Pml4[0].Write    = 1;
+    g_EptState.Pml4[0].Execute  = 1;
     g_EptState.Pml4[0].PhysAddr = PdptPa >> 12;
+
+    for (i = 1; i < g_EptPml4Count; i++) {
+        ULONG64 ExtPa = VaToPhysical(&g_EptExtPdptPages[i - 1]);
+        g_EptState.Pml4[i].Value    = 0;
+        g_EptState.Pml4[i].Read     = 1;
+        g_EptState.Pml4[i].Write    = 1;
+        g_EptState.Pml4[i].Execute  = 1;
+        g_EptState.Pml4[i].PhysAddr = ExtPa >> 12;
+    }
 
     /* Store PML4 physical address */
     g_EptState.Pml4Pa = VaToPhysical(g_EptState.Pml4);
@@ -1019,7 +1251,8 @@ NTSTATUS EptInitialize(VOID)
     g_EptState.Initialized = TRUE;
     g_EptHookState.Initialized = TRUE;
 
-    LOG_INFO("EPT initialized: identity map for 512GB, EPTP=0x%llX", g_EptState.Eptp.Value);
+    LOG_INFO("EPT initialized: identity map for %llu GB across %u PML4 entries, EPTP=0x%llX",
+             (ULONG64)g_EptPdptTotal, g_EptPml4Count, g_EptState.Eptp.Value);
     return STATUS_SUCCESS;
 }
 
@@ -1046,6 +1279,16 @@ VOID EptCleanup(VOID)
     if (g_PdPages) {
         ExFreePoolWithTag(g_PdPages, VMX_TAG);
         g_PdPages = NULL;
+    }
+
+    /* H-2: free extended PDPT pages and per-CPU-allocation bitmap */
+    if (g_EptExtPdptPages) {
+        ExFreePoolWithTag(g_EptExtPdptPages, 'tpeX');
+        g_EptExtPdptPages = NULL;
+    }
+    if (g_PerCpuPdAllocated) {
+        ExFreePoolWithTag(g_PerCpuPdAllocated, 'tpeA');
+        g_PerCpuPdAllocated = NULL;
     }
 
     /* Free per-CPU tracking arrays */
@@ -1100,7 +1343,7 @@ NTSTATUS EptSetupIdentityMap(struct _VMX_CPU_CONTEXT *CpuCtx, struct _VMX_STATE 
 VOID EptSplitLargePage(ULONG64 PhysicalAddress)
 {
     ULONG64     Base2MB;
-    ULONG       PdptIndex, PdIndex;
+    ULONG       FlatPdptIdx, PdIndex;
     PEPT_PDE    TargetPde;
     PEPT_SPLIT_PAGE SplitPage = NULL;
     ULONG       i;
@@ -1109,16 +1352,20 @@ VOID EptSplitLargePage(ULONG64 PhysicalAddress)
     /* Align to 2MB boundary */
     Base2MB = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
 
-    /* Calculate indices */
-    PdptIndex = (ULONG)((Base2MB >> 30) & 0x1FF);   /* 1GB per PDPT entry */
-    PdIndex   = (ULONG)((Base2MB >> 21) & 0x1FF);   /* 2MB per PD entry */
+    /*
+     * H-2: use flat PDPT index (supports > 512GB identity maps).
+     * Base2MB >> 30 = 1GB index; low 9 bits within PD are Base2MB>>21 & 0x1FF.
+     */
+    FlatPdptIdx = EptPaToFlatPdptIdx(Base2MB);
+    PdIndex     = (ULONG)((Base2MB >> 21) & 0x1FF);   /* 2MB per PD entry */
 
-    if (PdptIndex >= MAX_PD_PAGES) {
-        LOG_ERROR("EPT split: address 0x%llX is beyond mapped range", PhysicalAddress);
+    if (FlatPdptIdx == (ULONG)-1) {
+        LOG_ERROR("EPT split: address 0x%llX is beyond mapped range (max %llu GB)",
+                  PhysicalAddress, (ULONG64)g_EptPdptTotal);
         return;
     }
 
-    TargetPde = &g_PdPages[PdptIndex].Entries[PdIndex];
+    TargetPde = &g_PdPages[FlatPdptIdx].Entries[PdIndex];
 
     /* Check if already split */
     if (!TargetPde->LargePage) {
@@ -1181,20 +1428,20 @@ VOID EptSplitLargePage(ULONG64 PhysicalAddress)
 PEPT_PTE EptGetPteForPhysicalAddress(ULONG64 PhysicalAddress)
 {
     ULONG64     Base2MB;
-    ULONG       PdptIndex, PdIndex, PtIndex;
+    ULONG       FlatPdptIdx, PdIndex, PtIndex;
     PEPT_PDE    Pde;
     ULONG       splitIdx;
 
-    Base2MB = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
-    PdptIndex = (ULONG)((PhysicalAddress >> 30) & 0x1FF);
-    PdIndex   = (ULONG)((PhysicalAddress >> 21) & 0x1FF);
-    PtIndex   = (ULONG)((PhysicalAddress >> 12) & 0x1FF);
+    Base2MB     = PhysicalAddress & ~((2ULL * 1024 * 1024) - 1);
+    FlatPdptIdx = EptPaToFlatPdptIdx(PhysicalAddress);
+    PdIndex     = (ULONG)((PhysicalAddress >> 21) & 0x1FF);
+    PtIndex     = (ULONG)((PhysicalAddress >> 12) & 0x1FF);
 
-    if (PdptIndex >= MAX_PD_PAGES) {
+    if (FlatPdptIdx == (ULONG)-1) {
         return NULL;
     }
 
-    Pde = &g_PdPages[PdptIndex].Entries[PdIndex];
+    Pde = &g_PdPages[FlatPdptIdx].Entries[PdIndex];
 
     /* If it's still a 2MB page, we need to split first */
     if (Pde->LargePage) {
@@ -1260,6 +1507,23 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
 
     PageBase = TargetPa & PAGE_MASK_4KB;
     PageOffset = (ULONG)(TargetPa & 0xFFF);
+
+    /*
+     * L-4 FIX: JMP patch requires 12 bytes (MOV RAX, imm64; JMP RAX).  If
+     * the hook point is within 12 bytes of the page end, the patch would
+     * spill into the next physical page — but we only clone/patch the
+     * single page containing TargetPa, so the spill would corrupt unrelated
+     * memory in the next NonPagedPool chunk.  Reject early.
+     *
+     * Windows x64 kernel function prologues are 16-byte aligned by PE, so
+     * in practice this never happens; but user-supplied TargetAddress
+     * (IOCTL path) can be arbitrary.
+     */
+    if (PageOffset + 12 > PAGE_SIZE) {
+        LOG_ERROR("EPT Hook: TargetVa 0x%llX too close to page end "
+                  "(offset=0x%X, need 12 bytes)", TargetVa, PageOffset);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     KeAcquireSpinLock(&g_EptHookState.Lock, &OldIrql);
 
@@ -1557,14 +1821,18 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
      * then replicate the same PTE permissions on each CPU's private copy.
      */
     if (g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages) {
-        ULONG PdptIdx = (ULONG)((PageBase >> 30) & 0x1FF);
+        /* H-2: flat PDPT index supports > 512GB identity maps */
+        ULONG PdptIdx = EptPaToFlatPdptIdx(PageBase);
         ULONG PdIdx   = (ULONG)((PageBase >> 21) & 0x1FF);
         ULONG splitIdx, cpu;
         NTSTATUS PerCpuStatus;
 
-        /* Ensure per-CPU PD page for this region */
-        PerCpuStatus = EptEnsurePerCpuPdForRegion(PdptIdx);
-        if (NT_SUCCESS(PerCpuStatus)) {
+        if (PdptIdx == (ULONG)-1) {
+            LOG_ERROR("EPT hook: page base 0x%llX beyond identity map", PageBase);
+        } else {
+            /* Ensure per-CPU PD page for this region */
+            PerCpuStatus = EptEnsurePerCpuPdForRegion(PdptIdx);
+            if (NT_SUCCESS(PerCpuStatus)) {
             /*
              * BUG FIX (Issue #3+5+6): Use hash lookup for split page index
              * instead of O(n) linear scan.
@@ -1586,8 +1854,9 @@ NTSTATUS EptHookFunction(ULONG64 TargetVa, PVOID HookFunction, PVOID *OriginalFu
                     LOG_INFO("Per-CPU PT isolation set up for hook at PA=0x%llX", PageBase);
                 }
             }
-        }
-    }
+            } /* NT_SUCCESS(PerCpuPdForRegion) */
+        } /* else (PdptIdx valid) */
+    } /* g_EptCpuStates && ... */
 
     /* Return trampoline as the "original function" */
     if (OriginalFunction) {
@@ -1684,8 +1953,12 @@ NTSTATUS EptUnhookFunction(ULONG64 TargetVa)
 
                 KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
 
-                /* TLB flush BEFORE freeing pages — prevents UAF from stale TLB */
-                EptInvalidateFromGuest();
+                /*
+                 * H-5 FIX: synchronous IPI-based flush on all CPUs before
+                 * freeing pages — prevents UAF from stale TLB on HLT-ing
+                 * CPUs.
+                 */
+                EptInvalidateAllCpusSync();
 
                 /* Pass 2: Now safe to free pages */
                 if (FreeOriginalPage) ExFreePoolWithTag(FreeOriginalPage, VMX_TAG);
@@ -1784,11 +2057,13 @@ VOID EptUnhookAll(VOID)
     KeReleaseSpinLock(&g_EptHookState.Lock, OldIrql);
 
     /*
-     * Flush EPT TLB on all CPUs BEFORE freeing any pages.
-     * This ensures no CPU still has stale TLB entries pointing to
-     * pages we're about to free.
+     * H-5 FIX: synchronously flush EPT TLB on ALL CPUs via IPI before
+     * freeing any pages.  EptInvalidateFromGuest() alone only bumps a
+     * generation counter — a CPU in HLT / deep C-state may not VM-Exit
+     * for an unbounded time, resulting in UAF if we free HookPage while
+     * that CPU still has a stale TLB entry pointing at it.
      */
-    EptInvalidateFromGuest();
+    EptInvalidateAllCpusSync();
 
     /* Pass 2: Free memory (safe now that TLB is flushed) */
     KeAcquireSpinLock(&g_EptHookState.Lock, &OldIrql);
@@ -1908,8 +2183,37 @@ BOOLEAN HandleEptViolation(PVOID GuestContext)
     if (!Hook) {
         /*
          * EPT violation on a non-hooked page.
-         * This shouldn't happen with our identity map.
-         * Log and try to fix by setting RWX.
+         *
+         * H-2: If the GPA is beyond the identity-mapped range (e.g. > the
+         * max physical memory we sized for, or in a previously-unmapped
+         * firmware/MMIO region above g_EptPdptTotal GB), there is nothing
+         * we can do: resuming the guest will loop forever on the same
+         * violation.  Signal VMX shutdown so the host returns control to
+         * the OS safely rather than live-locking.
+         */
+        if (EptPaToFlatPdptIdx(GuestPhysAddr) == (ULONG)-1) {
+            VMXROOT_LOG_ERROR("EPT violation beyond identity map: GPA=0x%llX (map covers %llu GB) - shutting down VMX",
+                              GuestPhysAddr, (ULONG64)g_EptPdptTotal);
+            return FALSE;   /* VmxExitHandler will treat this as fatal */
+        }
+
+        /*
+         * Within mapped range but PTE somehow restrictive.
+         *
+         * M-8 (revised): we're modifying a SHARED PTE (not per-CPU).
+         * Two-step flush is required for correctness:
+         *   1. Immediate INVEPT on THIS CPU via EptInvalidateAllContexts()
+         *      — without this, VMRESUME to the faulting RIP replays the
+         *      same violation (stale TLB entry), infinite loop.
+         *   2. EptInvalidateFromGuest() bumps the generation counter so
+         *      every OTHER CPU flushes on its next VM-Exit (the
+         *      generation-compare happens in EptCheckPendingInvept at
+         *      the top of VmxExitHandler).
+         *
+         * This is the hot-fixup path; we also log loudly because reaching
+         * here is itself suspicious — an identity-mapped PTE shouldn't
+         * spontaneously drop RWX under normal operation.  If someone is
+         * tampering with the EPT it's worth surfacing.
          */
         VMXROOT_LOG_WARN("EPT violation on non-hooked page: GPA=0x%llX, Qual=0x%llX",
                  GuestPhysAddr, ExitQualification);
@@ -1920,7 +2224,8 @@ BOOLEAN HandleEptViolation(PVOID GuestContext)
             Pte->Read = 1;
             Pte->Write = 1;
             Pte->Execute = 1;
-            EptInvalidateAllContexts();
+            EptInvalidateAllContexts();      /* flush THIS CPU now */
+            EptInvalidateFromGuest();        /* notify the rest */
         }
 
         return TRUE;
@@ -2115,19 +2420,70 @@ NTSTATUS EptInitPerCpu(VOID)
     }
     RtlZeroMemory(g_PerCpuPdPages, g_MaxProcessors * sizeof(EPT_PER_CPU_PD_PAGE *));
 
+    /*
+     * H-2: allocate per-CPU extended PDPT pages if the identity map needs
+     * more than 512GB (g_EptPml4Count > 1).  Each CPU gets its own copy of
+     * the (g_EptPml4Count - 1) extra PDPT pages so PML4[1..] entries can
+     * be toggled independently if needed in future per-CPU isolation
+     * scenarios.  Currently we only clone from the shared extended PDPT.
+     */
+    if (g_EptPml4Count > 1) {
+        ULONG ExtCount = g_EptPml4Count - 1;
+        g_EptCpuExtPdpt = (EPT_PDPT_PAGE **)ExAllocatePoolWithTag(
+            NonPagedPool,
+            g_MaxProcessors * sizeof(EPT_PDPT_PAGE *),
+            'tpEX');
+        if (!g_EptCpuExtPdpt) {
+            ExFreePoolWithTag(g_PerCpuPdPages, 'tpEP'); g_PerCpuPdPages = NULL;
+            ExFreePoolWithTag(g_PerCpuSplitPages, 'tpES'); g_PerCpuSplitPages = NULL;
+            ExFreePoolWithTag(g_EptCpuStates, 'tpEC'); g_EptCpuStates = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(g_EptCpuExtPdpt, g_MaxProcessors * sizeof(EPT_PDPT_PAGE *));
+
+        for (i = 0; i < g_MaxProcessors; i++) {
+            g_EptCpuExtPdpt[i] = (EPT_PDPT_PAGE *)ExAllocatePoolWithTag(
+                NonPagedPool,
+                sizeof(EPT_PDPT_PAGE) * ExtCount,
+                'tpEX');
+            if (!g_EptCpuExtPdpt[i]) {
+                /* Roll back all previously allocated CPU ext PDPT pages */
+                ULONG k;
+                for (k = 0; k < i; k++) {
+                    if (g_EptCpuExtPdpt[k]) ExFreePoolWithTag(g_EptCpuExtPdpt[k], 'tpEX');
+                }
+                ExFreePoolWithTag(g_EptCpuExtPdpt, 'tpEX'); g_EptCpuExtPdpt = NULL;
+                ExFreePoolWithTag(g_PerCpuPdPages, 'tpEP'); g_PerCpuPdPages = NULL;
+                ExFreePoolWithTag(g_PerCpuSplitPages, 'tpES'); g_PerCpuSplitPages = NULL;
+                ExFreePoolWithTag(g_EptCpuStates, 'tpEC'); g_EptCpuStates = NULL;
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            /* Clone from shared extended PDPT */
+            RtlCopyMemory(g_EptCpuExtPdpt[i], g_EptExtPdptPages,
+                          sizeof(EPT_PDPT_PAGE) * ExtCount);
+        }
+    }
+
     /* Initialize each CPU's EPT root (clone from shared template) */
     for (i = 0; i < g_MaxProcessors; i++) {
         ULONG64 PdptPa;
+        ULONG   pml4;
 
         /* Clone PML4 from template */
         RtlCopyMemory(g_EptCpuStates[i].Pml4, g_EptState.Pml4, sizeof(g_EptState.Pml4));
 
-        /* Clone PDPT from template */
+        /* Clone embedded PDPT (covers first 512GB) from template */
         RtlCopyMemory(g_EptCpuStates[i].Pdpt, g_EptState.Pdpt, sizeof(g_EptState.Pdpt));
 
-        /* Update PML4[0] to point to this CPU's PDPT */
+        /* Update PML4[0] to point to this CPU's embedded PDPT */
         PdptPa = VaToPhysical(g_EptCpuStates[i].Pdpt);
         g_EptCpuStates[i].Pml4[0].PhysAddr = PdptPa >> 12;
+
+        /* H-2: update PML4[1..] to point at this CPU's extended PDPT pages */
+        for (pml4 = 1; pml4 < g_EptPml4Count; pml4++) {
+            ULONG64 ExtPa = VaToPhysical(&g_EptCpuExtPdpt[i][pml4 - 1]);
+            g_EptCpuStates[i].Pml4[pml4].PhysAddr = ExtPa >> 12;
+        }
 
         /* Set up per-CPU EPTP */
         g_EptCpuStates[i].Pml4Pa = VaToPhysical(g_EptCpuStates[i].Pml4);
@@ -2137,7 +2493,7 @@ NTSTATUS EptInitPerCpu(VOID)
         g_EptCpuStates[i].Eptp.Pml4PhysAddr = g_EptCpuStates[i].Pml4Pa >> 12;
     }
 
-    RtlZeroMemory(g_PerCpuPdAllocated, sizeof(g_PerCpuPdAllocated));
+    /* H-2: g_PerCpuPdAllocated bitmap is dynamic; already zeroed in EptInitialize */
 
     LOG_INFO("Per-CPU EPT initialized for %u CPUs", g_MaxProcessors);
     return STATUS_SUCCESS;
@@ -2148,7 +2504,7 @@ NTSTATUS EptInitPerCpu(VOID)
  */
 VOID EptCleanupPerCpu(VOID)
 {
-    ULONG cpu, idx;
+    ULONG cpu;
 
     if (g_PerCpuSplitPages) {
         for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
@@ -2170,6 +2526,17 @@ VOID EptCleanupPerCpu(VOID)
         g_PerCpuPdPages = NULL;
     }
 
+    /* H-2: release per-CPU extended PDPT pages */
+    if (g_EptCpuExtPdpt) {
+        for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
+            if (g_EptCpuExtPdpt[cpu]) {
+                ExFreePoolWithTag(g_EptCpuExtPdpt[cpu], 'tpEX');
+            }
+        }
+        ExFreePoolWithTag(g_EptCpuExtPdpt, 'tpEX');
+        g_EptCpuExtPdpt = NULL;
+    }
+
     if (g_EptCpuStates) {
         ExFreePoolWithTag(g_EptCpuStates, 'tpEC');
         g_EptCpuStates = NULL;
@@ -2187,42 +2554,52 @@ VOID EptCleanupPerCpu(VOID)
  *
  * Must be called with g_EptHookState.Lock held.
  */
-static NTSTATUS EptEnsurePerCpuPdForRegion(ULONG PdptIndex)
+static NTSTATUS EptEnsurePerCpuPdForRegion(ULONG FlatPdptIndex)
 {
     ULONG cpu;
 
-    if (PdptIndex >= MAX_PD_PAGES) return STATUS_INVALID_PARAMETER;
-    if (g_PerCpuPdAllocated[PdptIndex]) return STATUS_SUCCESS;  /* already done */
+    if (FlatPdptIndex >= g_EptPdptTotal) return STATUS_INVALID_PARAMETER;
+    if (g_PerCpuPdAllocated[FlatPdptIndex]) return STATUS_SUCCESS;  /* already done */
 
     for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
         if (!g_PerCpuPdPages[cpu]) {
-            /* First time for this CPU - allocate the full PD pages array.
-             * We allocate MAX_PD_PAGES pointers but only fill ones that
-             * actually need per-CPU isolation. Actually, simpler: allocate
-             * a single contiguous PD page for this PDPT index per CPU. */
+            /*
+             * First time for this CPU - allocate the full PD pages array.
+             * H-2: sized by g_EptPdptTotal (may exceed 512 on > 512GB systems).
+             */
             g_PerCpuPdPages[cpu] = (EPT_PER_CPU_PD_PAGE *)ExAllocatePoolWithTag(
                 NonPagedPool,
-                sizeof(EPT_PER_CPU_PD_PAGE) * MAX_PD_PAGES,
+                sizeof(EPT_PER_CPU_PD_PAGE) * g_EptPdptTotal,
                 'tpEP');
             if (!g_PerCpuPdPages[cpu]) {
-                LOG_ERROR("Failed to allocate per-CPU PD pages for CPU %u", cpu);
+                LOG_ERROR("Failed to allocate per-CPU PD pages for CPU %u (%u pages)",
+                          cpu, g_EptPdptTotal);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
             /* Initialize from shared PD pages */
             RtlCopyMemory(g_PerCpuPdPages[cpu], g_PdPages,
-                          sizeof(EPT_PER_CPU_PD_PAGE) * MAX_PD_PAGES);
+                          sizeof(EPT_PER_CPU_PD_PAGE) * g_EptPdptTotal);
         }
 
-        /* Point this CPU's PDPT entry to its own PD page */
+        /*
+         * Point this CPU's PDPT entry to its own PD page.
+         * H-2: PDPT entry lives in either the embedded Pdpt[] (PML4[0]) or
+         * the per-CPU extended PDPT pages (PML4[1..]).  EptGetCpuPdptePtr
+         * handles both cases.
+         */
         {
-            ULONG64 CpuPdPa = VaToPhysical(&g_PerCpuPdPages[cpu][PdptIndex]);
-
-            g_EptCpuStates[cpu].Pdpt[PdptIndex].PhysAddr = CpuPdPa >> 12;
+            ULONG64    CpuPdPa = VaToPhysical(&g_PerCpuPdPages[cpu][FlatPdptIndex]);
+            PEPT_PDPTE CpuPdpte = EptGetCpuPdptePtr(cpu, FlatPdptIndex);
+            if (!CpuPdpte) {
+                LOG_ERROR("Per-CPU PDPTE ptr NULL for CPU %u idx %u", cpu, FlatPdptIndex);
+                return STATUS_UNSUCCESSFUL;
+            }
+            CpuPdpte->PhysAddr = CpuPdPa >> 12;
         }
     }
 
-    g_PerCpuPdAllocated[PdptIndex] = TRUE;
-    LOG_INFO("Per-CPU PD allocated for PDPT index %u", PdptIndex);
+    g_PerCpuPdAllocated[FlatPdptIndex] = TRUE;
+    LOG_INFO("Per-CPU PD allocated for flat PDPT index %u", FlatPdptIndex);
     return STATUS_SUCCESS;
 }
 
@@ -2236,11 +2613,12 @@ static NTSTATUS EptEnsurePerCpuPdForRegion(ULONG PdptIndex)
  * Must be called with g_EptHookState.Lock held.
  * splitIdx: index into g_SplitPages[].
  */
-static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG PdIndex)
+static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG FlatPdptIndex, ULONG PdIndex)
 {
     ULONG cpu;
 
     if (splitIdx >= MAX_SPLIT_PAGES) return STATUS_INVALID_PARAMETER;
+    if (FlatPdptIndex >= g_EptPdptTotal) return STATUS_INVALID_PARAMETER;
 
     for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
         if (!g_PerCpuSplitPages[cpu]) {
@@ -2267,9 +2645,12 @@ static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
             g_PerCpuSplitPages[cpu][splitIdx].Allocated = TRUE;
         }
 
-        /* Update this CPU's PD entry to point to its own PT page */
+        /*
+         * Update this CPU's PD entry to point to its own PT page.
+         * H-2: PD entry lives at g_PerCpuPdPages[cpu][FlatPdptIndex].Entries[PdIndex].
+         */
         if (g_PerCpuPdPages[cpu]) {
-            PEPT_PDE CpuPde = &g_PerCpuPdPages[cpu][PdptIndex].Entries[PdIndex];
+            PEPT_PDE CpuPde = &g_PerCpuPdPages[cpu][FlatPdptIndex].Entries[PdIndex];
             CpuPde->Value = 0;
             CpuPde->Read = 1;
             CpuPde->Write = 1;
@@ -2279,7 +2660,7 @@ static NTSTATUS EptEnsurePerCpuSplitPage(ULONG splitIdx, ULONG PdptIndex, ULONG 
         }
     }
 
-    LOG_INFO("Per-CPU split page %u cloned (PD[%u][%u])", splitIdx, PdptIndex, PdIndex);
+    LOG_INFO("Per-CPU split page %u cloned (PD[flat %u][%u])", splitIdx, FlatPdptIndex, PdIndex);
     return STATUS_SUCCESS;
 }
 
@@ -2374,4 +2755,89 @@ VOID EptCheckPendingInvept(VOID)
         g_EptInveptCpuGen[CpuIndex] = CurrentGen;
         EptInvalidateAllContexts();
     }
+}
+
+/*
+ * H-5 (revised) FIX: EptInvalidateAllCpusSync — synchronously force every
+ * CPU to execute INVEPT before this function returns.
+ *
+ * Why the generation-counter mechanism alone is not enough:
+ *   EptInvalidateFromGuest() only bumps a counter.  Each CPU compares the
+ *   counter at its NEXT VM-Exit (EptCheckPendingInvept) and flushes then.
+ *   A CPU sitting in HLT or a deep C-state may go a very long time with
+ *   no VM-Exit, and if we free the hook pages in the meantime its stale
+ *   TLB entries still point at freed memory — UAF → BSOD.
+ *
+ * Why "trigger CPUID from the IPI callback" is not enough either:
+ *   1. During driver unload we may already be outside guest mode (e.g.
+ *      after VmxTerminate has VMCLEAR'd this CPU) — CPUID then wouldn't
+ *      cause a VM-Exit, and the generation check never runs.
+ *   2. The delay between "CPU returns from IPI handler" and "CPU resumes
+ *      guest, hits the CPUID intercept, enters root, runs
+ *      EptCheckPendingInvept, runs INVEPT" is not bounded either; a
+ *      context switch, spin lock, or interrupt can delay it.
+ *
+ * Correct solution: do the INVEPT *right inside the IPI callback*.
+ * Observations:
+ *   - When an IPI arrives while a CPU is in guest mode, hardware takes
+ *     an External-Interrupt VM-Exit automatically (our VMCS sets the
+ *     "external-interrupt exiting" pin-based control).  Hence the IPI
+ *     handler runs in host/root mode.
+ *   - INVEPT is legal in VMX root mode.  Executing it here flushes the
+ *     current CPU's EPT TLB immediately, no round-trip through the
+ *     normal VM-Exit handler needed.
+ *   - If VMX is NOT currently enabled on this CPU (teardown path,
+ *     another CPU still issuing syncs while this one has VMXOFF'd),
+ *     INVEPT would #UD.  Guard with the global init flag.
+ *
+ * We still bump the generation counter so that any CPU that (by wild
+ * race) didn't take the IPI vector and instead took a different VM-Exit
+ * first will also flush on entry.  Defensive belt-and-braces.
+ *
+ * IRQL requirement: KeIpiGenericCall must be called at IRQL ≤ APC_LEVEL.
+ */
+static ULONG_PTR EptInveptIpiCallback(ULONG_PTR Context)
+{
+    ULONG CpuIndex;
+    UNREFERENCED_PARAMETER(Context);
+
+    /*
+     * Check that VMX is actually on for this CPU.  If we're past
+     * VmxTerminate's per-CPU VMXOFF, executing INVEPT would raise #UD
+     * and panic the box.  The VmxState.Initialized flag is cleared as
+     * the last step of VmxTerminate, AFTER all per-CPU VMXOFFs are
+     * done — so if it's still TRUE here we know VMX is up everywhere
+     * (including on us).
+     */
+    if (!g_VmxState.Initialized) {
+        return 0;
+    }
+
+    CpuIndex = KeGetCurrentProcessorNumber();
+
+    /* Update this CPU's generation so EptCheckPendingInvept won't duplicate */
+    if (g_EptInveptCpuGen && CpuIndex < g_MaxProcessors) {
+        g_EptInveptCpuGen[CpuIndex] = g_EptInveptGeneration;
+    }
+
+    EptInvalidateAllContexts();
+    return 0;
+}
+
+VOID EptInvalidateAllCpusSync(VOID)
+{
+    /*
+     * Bump generation FIRST so any CPU taking a normal (non-IPI) VM-Exit
+     * between our bump and its IPI-callback execution also flushes.
+     */
+    InterlockedIncrement(&g_EptInveptGeneration);
+
+    /*
+     * Wake every CPU (including HLT'd ones) with an IPI and have each of
+     * them execute INVEPT directly in root mode.  KeIpiGenericCall waits
+     * until all CPUs have run the callback before returning, giving us a
+     * hard synchronous barrier — after it returns, every CPU's EPT TLB
+     * is known to be clean, and it is safe to free hook pages.
+     */
+    KeIpiGenericCall(EptInveptIpiCallback, 0);
 }

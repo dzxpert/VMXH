@@ -493,4 +493,21 @@ AsmVmxVmcall PROC
     ret
 AsmVmxVmcall ENDP
 
+; =========================================================================
+;  VMCALL Wrapper (2-argument form — used for nonce-authenticated calls)
+;  void AsmVmxVmcall2(ULONG64 HypercallValue /*RCX*/, ULONG64 Arg1 /*RDX*/)
+;
+;  Sets:
+;    RAX <- HypercallValue (from RCX)
+;    RCX <- Arg1           (from RDX, preserved across VMCALL as guest RCX)
+;  Used for VMCALL_MAGIC_SHUTDOWN where Arg1 carries the per-boot nonce.
+; =========================================================================
+
+AsmVmxVmcall2 PROC
+    mov     rax, rcx
+    mov     rcx, rdx
+    vmcall
+    ret
+AsmVmxVmcall2 ENDP
+
 END

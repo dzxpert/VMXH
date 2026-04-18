@@ -6,6 +6,23 @@
 
 ---
 
+## 许可协议（License）
+
+> ⚠️ **重要：本项目采用自定义许可协议，非 MIT/BSD/GPL 等开源标准协议。**
+>
+> - ✅ **允许** 个人学习、研究、私人实验、安全研究、学术用途（非营利）。
+> - ❌ **禁止** 任何形式的商业使用（含公司内部使用、付费产品集成、SaaS 服务、外挂／反外挂产品、AI 训练数据等），**除非事先获得作者书面同意**。
+> - 🚫 **绝对禁止** 用于任何非法或恶意破坏目的，包括但不限于：未授权入侵、恶意软件／勒索软件／Rootkit、数据窃取、隐私侵犯、跟踪监控、欺诈与金融犯罪、DDoS／僵尸网络、侵害未成年人、非法商品服务平台，以及其他一切违反法律的行为。此项禁止 **对个人使用同样适用**，不可协商、不可豁免。违者自动失去一切使用权，并将依《刑法》《网络安全法》《数据安全法》《个人信息保护法》及同等境外法律承担民刑事责任；作者保留配合执法机关调查的权利。
+> - 🛡️ **合法安全研究例外**：仅针对自有系统或获得书面授权的系统，以善意、负责任披露、最小必要损害为前提开展研究——具体条件详见 [`LICENSE`](LICENSE) 第 4A.3 节。
+> - 📜 完整条款见根目录 [`LICENSE`](LICENSE) 文件（中英双语，英文为正式文本）。
+> - 📬 商业授权洽谈：请通过本仓库 Issues 或 README 末尾列出的联系渠道联络作者。
+>
+> 使用、下载、编译、修改或分发本软件即视为您接受 [`LICENSE`](LICENSE) 全部条款。违反协议将自动终止您的使用权，并可能承担侵权法律责任。
+
+> **2026-04 稳定性 Review（两轮）**: 完成了针对裸机运行的全面代码 Review + 一次更严格的二次 Review，合计修复 **36 项**跨级别问题（首轮 17 + 二次补救 19，含 SVM VMSAVE/VMLOAD host-state 缺失致 BSOD、AAD VMX 侧从未工作、nonce 认证不完备等致命 bug），详见 [docs/BAREMETAL_REVIEW_FIXES.md](docs/BAREMETAL_REVIEW_FIXES.md)。重要 API 变化：<br>• `AsmSvmLaunch` 签名为 `(VmcbPa, VmcbVa, HostVmcbPa)`，Host VMCB 用于 VMSAVE/VMLOAD 保护 host extra-state。<br>• Shutdown VMCALL/VMMCALL 现需要 `g_VmcallShutdownNonce` + long-mode + CS.L + kernel-RIP 完整认证。<br>• `VmxSetExceptionInterceptBp/Db` 新 API — VMX 侧 AAD_HIDE_EXCEPTIONS 现在真正工作。<br>• `ProcessRegisterExceptionHideToggle` 解耦 process 模块与 SVM/VMX 后端。<br>• VMCALL 内存操作路径已**注入 #UD 失败**；用户态必须使用 IOCTL。<br>• EPT/NPT 身份映射现动态扩展支持 > 512GB 物理内存（`g_EptPdptTotal / g_NptPdptTotal`）。
+
+---
+
 ## 目录
 
 - [项目概述](#项目概述)

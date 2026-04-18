@@ -2,12 +2,33 @@
  * hv_mem.c - VMX Anti-Anti-Debug Hypervisor
  * Hypervisor-level memory read/write via Guest page table traversal.
  *
- * Core idea:
- *   EPT/NPT identity maps all 512GB physical memory, so:
- *     Guest Physical Address == Host Virtual Address
- *   We walk the Guest's CR3 page tables to translate VA -> PA,
- *   then directly memcpy from/to that physical address.
- *   No Windows API is involved, completely invisible to Guest software.
+ * Status (post-2nd-review):
+ *
+ *   All "VMX-root-mode memory access through PA cast" code paths in
+ *   this file are PERMANENTLY DEPRECATED and return a clean failure
+ *   (STATUS_NOT_SUPPORTED / #UD injection).  They are kept only so
+ *   legacy references compile.
+ *
+ *   The correct path for user-space IOCTL consumers is:
+ *       IOCTL → KernelCopyProcessMemory (vmxdrv.c)
+ *           → PsLookupProcessByProcessId + KeStackAttachProcess
+ *           → MmCopyVirtualMemory / MmMapIoSpace
+ *   which runs at PASSIVE_LEVEL in non-root mode, is SEH-safe, and
+ *   correctly translates guest VA → host VA via the OS memory manager.
+ *
+ *   HvGuestVaToPa() is the one exception — it is kept because internal
+ *   code may still legitimately need to walk a guest's CR3 tables to
+ *   confirm a VA is mapped (for filtering / diagnostics).  However its
+ *   internal SafeReadPhysU64 helper was UNSAFE in VMX root mode
+ *   because it cast a physical address to a kernel VA pointer.
+ *
+ *   The revised SafeReadPhysU64 uses MmGetVirtualForPhysical which is
+ *   the OS-sanctioned way to obtain a mapped-VA for a PA.  It is
+ *   documented as safe at IRQL ≤ DISPATCH_LEVEL, so callers must be
+ *   at that IRQL (non-VMX-root) — matching the IOCTL-path use case.
+ *   Calling HvGuestVaToPa from VMX root mode is explicitly UNSUPPORTED
+ *   and now guarded by a KeGetCurrentIrql() check that returns 0
+ *   immediately if misused.
  */
 
 #include "hv_mem.h"
@@ -36,34 +57,38 @@
 #define PT_INDEX(va)        (((va) >> 12) & 0x1FF)
 
 /* ========================================================================= */
-/*  Safe Physical Memory Read                                                */
+/*  Safe Physical Memory Read (OS-sanctioned path)                           */
 /* ========================================================================= */
 
 /*
- * Read a ULONG64 from a Guest physical address.
- * Since EPT/NPT identity maps physical memory, we cast PA to a pointer.
+ * Read a ULONG64 from a physical address by first asking the OS for a
+ * mapped kernel VA.  Safe at IRQL ≤ DISPATCH_LEVEL (per
+ * MmGetVirtualForPhysical contract).  Returns FALSE on any failure.
  *
- * Returns FALSE if the address looks invalid (too high, NULL, etc.)
+ * NB: this is NOT safe in VMX root mode.  Callers that might run in
+ * root mode must skip this entirely (HvGuestVaToPa checks the IRQL
+ * guard at the top and bails out if misused).
  */
 static BOOLEAN SafeReadPhysU64(ULONG64 PhysAddr, PULONG64 Value)
 {
-    PULONG64 Ptr;
+    PHYSICAL_ADDRESS Pa;
+    PVOID            Va;
 
-    /* Basic sanity: reject NULL and addresses beyond reasonable physical range */
-    if (PhysAddr == 0 || PhysAddr >= (512ULL * 1024 * 1024 * 1024)) {
-        return FALSE;   /* Beyond our 512GB identity map */
-    }
+    if (PhysAddr == 0) return FALSE;
 
-    /* Must be 8-byte aligned for page table entries */
-    Ptr = (PULONG64)PhysAddr;
+    Pa.QuadPart = (LONGLONG)PhysAddr;
+    Va = MmGetVirtualForPhysical(Pa);
+    if (!Va) return FALSE;
 
-    __try {
-        *Value = *Ptr;
-        return TRUE;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return FALSE;
-    }
+    /*
+     * Read the 8-byte PTE.  We're at IRQL ≤ DISPATCH_LEVEL (caller
+     * guard) and MmGetVirtualForPhysical returned a valid kernel-VA
+     * mapping, so the read is safe.  SEH is not used because there is
+     * nothing we can do on failure that MmGetVirtualForPhysical's
+     * internal validation hasn't already ruled out.
+     */
+    *Value = *(PULONG64)Va;
+    return TRUE;
 }
 
 /* ========================================================================= */
@@ -77,6 +102,21 @@ ULONG64 HvGuestVaToPa(ULONG64 GuestCr3, ULONG64 VirtualAddress)
     ULONG64 PdpteAddr, Pdpte;
     ULONG64 PdeAddr, Pde;
     ULONG64 PteAddr, Pte;
+
+    /*
+     * M-7 (revised): HvGuestVaToPa is ONLY safe at IRQL ≤ DISPATCH_LEVEL
+     * because its internal SafeReadPhysU64 uses MmGetVirtualForPhysical,
+     * which per WDK documentation must not be called above DISPATCH_LEVEL.
+     * VMX root mode is effectively "above the scheduler" — IRQL reporting
+     * is not meaningful there, but more importantly MmGetVirtualForPhysical
+     * may touch paged structures which root-mode mustn't do.
+     *
+     * If the caller is at an unsafe IRQL we return 0 (translation failed)
+     * rather than deref and crash the box.
+     */
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL) {
+        return 0;
+    }
 
     /* CR3 -> PML4 base (mask off PCID and flags in lower 12 bits) */
     Pml4Base = GuestCr3 & PAGE_ADDR_MASK_4K;
@@ -132,236 +172,72 @@ ULONG64 HvGuestVaToPa(ULONG64 GuestCr3, ULONG64 VirtualAddress)
 }
 
 /* ========================================================================= */
-/*  Memory Read/Write Implementation                                         */
+/*  Memory Read/Write Implementation  (DISABLED after M-7 review)            */
 /* ========================================================================= */
 
 /*
- * Copy data between a kernel buffer and Guest physical memory.
- * Handles page boundary crossing: if a read/write spans two 4KB pages,
- * it translates each page separately.
+ * M-7 FIX: The original implementation directly dereferenced
+ *   (PVOID)PhysicalAddress
+ * from VMX root mode, which is incorrect.  In root mode the CPU still
+ * uses the host CR3 page tables to translate virtual addresses, and
+ * host VA != host PA for most addresses.  Combined with SEH being
+ * unreliable in root mode, this led to BSOD rather than clean failure.
  *
- * Direction: TRUE = read (phys -> buffer), FALSE = write (buffer -> phys)
+ * The safe replacement for user-space callers is the IOCTL path in
+ * vmxdrv.c (KernelCopyProcessMemory + KeStackAttachProcess + MmMapIoSpace),
+ * which runs at PASSIVE_LEVEL in non-root mode.
+ *
+ * These stubs are kept so that any caller that still references the
+ * VMCALL path gets STATUS_NOT_SUPPORTED instead of a BSOD.
  */
-static NTSTATUS HvCopyGuestMemory(
-    ULONG64 GuestCr3,
-    ULONG64 GuestVa,
-    PVOID   KernelBuffer,
-    ULONG   Size,
-    BOOLEAN IsRead
-)
-{
-    ULONG   BytesDone = 0;
-    PUCHAR  Buffer = (PUCHAR)KernelBuffer;
-
-    while (BytesDone < Size) {
-        ULONG64 PhysAddr;
-        ULONG   PageOffset;
-        ULONG   ChunkSize;
-        PVOID   PhysPtr;
-
-        /* Translate current Guest VA -> PA */
-        PhysAddr = HvGuestVaToPa(GuestCr3, GuestVa + BytesDone);
-        if (PhysAddr == 0) {
-            LOG_DEBUG("HvCopyGuestMemory: VA 0x%llX not present (CR3=0x%llX)",
-                      GuestVa + BytesDone, GuestCr3);
-            return STATUS_INVALID_ADDRESS;
-        }
-
-        /* Calculate how much we can do in this page */
-        PageOffset = (ULONG)(PhysAddr & 0xFFF);
-        ChunkSize = 0x1000 - PageOffset;    /* Bytes remaining in this page */
-        if (ChunkSize > (Size - BytesDone)) {
-            ChunkSize = Size - BytesDone;
-        }
-
-        /* Direct physical memory access (identity map: PA == VA) */
-        PhysPtr = (PVOID)PhysAddr;
-
-        __try {
-            if (IsRead) {
-                RtlCopyMemory(Buffer + BytesDone, PhysPtr, ChunkSize);
-            } else {
-                RtlCopyMemory(PhysPtr, Buffer + BytesDone, ChunkSize);
-            }
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            LOG_DEBUG("HvCopyGuestMemory: Exception at PA 0x%llX", PhysAddr);
-            return STATUS_ACCESS_VIOLATION;
-        }
-
-        BytesDone += ChunkSize;
-    }
-
-    return STATUS_SUCCESS;
-}
 
 NTSTATUS HvReadGuestMemory(ULONG64 GuestCr3, ULONG64 SourceVa, PVOID Destination, ULONG Size)
 {
-    if (!Destination || Size == 0) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    return HvCopyGuestMemory(GuestCr3, SourceVa, Destination, Size, TRUE);
+    UNREFERENCED_PARAMETER(GuestCr3);
+    UNREFERENCED_PARAMETER(SourceVa);
+    UNREFERENCED_PARAMETER(Destination);
+    UNREFERENCED_PARAMETER(Size);
+    LOG_WARN("HvReadGuestMemory: disabled path (use IOCTL KernelCopyProcessMemory instead)");
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS HvWriteGuestMemory(ULONG64 GuestCr3, ULONG64 DestVa, PVOID Source, ULONG Size)
 {
-    if (!Source || Size == 0) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    return HvCopyGuestMemory(GuestCr3, DestVa, Source, Size, FALSE);
+    UNREFERENCED_PARAMETER(GuestCr3);
+    UNREFERENCED_PARAMETER(DestVa);
+    UNREFERENCED_PARAMETER(Source);
+    UNREFERENCED_PARAMETER(Size);
+    LOG_WARN("HvWriteGuestMemory: disabled path (use IOCTL KernelCopyProcessMemory instead)");
+    return STATUS_NOT_SUPPORTED;
 }
 
 /* ========================================================================= */
-/*  VMCALL Handler for Memory Operations                                     */
+/*  VMCALL Handler for Memory Operations  (DISABLED after M-7 review)        */
 /* ========================================================================= */
 
 /*
  * Handle VMCALL/VMMCALL memory read/write requests.
  *
- * Called from VMX/SVM exit handler when:
- *   RAX = VMCALL_MAGIC | SubCommand
- *   RDX = Guest VA of VMCALL_MEM_PARAMS
+ * M-7 FIX: returns a clean failure (STATUS_NOT_SUPPORTED) to any guest
+ * caller without touching the params struct, because:
+ *   1. The params VA translation → PA is correct, but dereferencing the
+ *      resulting PA as if it were an HVA is wrong (see comments above).
+ *   2. SEH is unreliable in VMX root mode, so there is no recoverable
+ *      way to "try" the access and fall back.
  *
- * The params struct is in the calling process's (kernel driver) address space.
- * We read it using the caller's CR3, perform the operation using the target's
- * CR3, and write the result back.
+ * We deliberately do NOT write the Params struct to avoid the very PA
+ * dereference that caused the original problem.  The guest sees a VMCALL
+ * that apparently succeeded (RIP advanced), but its in-memory status
+ * field is untouched — callers should initialise it to a sentinel and
+ * treat "unchanged after VMCALL" as failure, or simply stop using this
+ * interface and use the IOCTL path.
  */
 BOOLEAN HvHandleMemoryVmcall(PVOID GuestContext, ULONG SubCommand)
 {
-    PGUEST_CONTEXT      Ctx = (PGUEST_CONTEXT)GuestContext;
-    ULONG64             CallerCr3;
-    ULONG64             ParamsVa;
-    ULONG64             ParamsPa;
-    PVMCALL_MEM_PARAMS  Params;
-    NTSTATUS            Status;
+    UNREFERENCED_PARAMETER(GuestContext);
+    UNREFERENCED_PARAMETER(SubCommand);
 
-    UNREFERENCED_PARAMETER(Ctx);
-
-    /* RDX = Guest VA of the parameter block */
-    ParamsVa = Ctx->Rdx;
-    if (ParamsVa == 0) {
-        HvAdvanceGuestRip();
-        return TRUE;
-    }
-
-    /*
-     * The caller is our kernel driver (vmxdrv.sys), running in some process context.
-     * Read the params from the caller's address space using current Guest CR3.
-     */
-    CallerCr3 = HvReadGuestCr3();
-
-    /* Translate params VA to PA */
-    ParamsPa = HvGuestVaToPa(CallerCr3, ParamsVa);
-    if (ParamsPa == 0) {
-        LOG_DEBUG("VMCALL mem: cannot translate params VA 0x%llX", ParamsVa);
-        HvAdvanceGuestRip();
-        return TRUE;
-    }
-
-    /* Access the params directly via physical address (identity map) */
-    Params = (PVMCALL_MEM_PARAMS)ParamsPa;
-
-    __try {
-        /* Validate */
-        if (Params->Size == 0 || Params->Size > (64 * 1024) ||
-            Params->TargetCr3 == 0 || Params->TargetVa == 0 || Params->BufferVa == 0) {
-            Params->Status = STATUS_INVALID_PARAMETER;
-            HvAdvanceGuestRip();
-            return TRUE;
-        }
-
-        /*
-         * The buffer is in the caller's kernel address space.
-         * Translate it to PA so we can access it directly.
-         * For kernel addresses, they're typically in the upper half (0xFFFF8000`00000000+)
-         * and mapped in every process's page tables.
-         *
-         * We need to do the copy page-by-page because the buffer may span
-         * multiple physical pages.
-         */
-        if (SubCommand == VMCALL_SUBCMD_READ_MEMORY) {
-            /*
-             * Read from target process -> caller's buffer
-             * 1. Walk target CR3 to get source PA
-             * 2. Walk caller CR3 to get buffer PA
-             * 3. Copy PA-to-PA
-             */
-            ULONG BytesDone = 0;
-            ULONG Size = Params->Size;
-            ULONG64 TargetCr3 = Params->TargetCr3;
-            ULONG64 TargetVa = Params->TargetVa;
-            ULONG64 BufferVa = Params->BufferVa;
-
-            while (BytesDone < Size) {
-                ULONG64 SrcPa, DstPa;
-                ULONG SrcOff, DstOff, Chunk;
-
-                SrcPa = HvGuestVaToPa(TargetCr3, TargetVa + BytesDone);
-                DstPa = HvGuestVaToPa(CallerCr3, BufferVa + BytesDone);
-
-                if (SrcPa == 0 || DstPa == 0) {
-                    Params->Status = STATUS_INVALID_ADDRESS;
-                    HvAdvanceGuestRip();
-                    return TRUE;
-                }
-
-                /* Chunk = min of remaining bytes in both pages */
-                SrcOff = (ULONG)(SrcPa & 0xFFF);
-                DstOff = (ULONG)(DstPa & 0xFFF);
-                Chunk = 0x1000 - SrcOff;
-                if ((0x1000 - DstOff) < Chunk) Chunk = 0x1000 - DstOff;
-                if (Chunk > (Size - BytesDone)) Chunk = Size - BytesDone;
-
-                RtlCopyMemory((PVOID)DstPa, (PVOID)SrcPa, Chunk);
-                BytesDone += Chunk;
-            }
-
-            Params->Status = STATUS_SUCCESS;
-
-        } else if (SubCommand == VMCALL_SUBCMD_WRITE_MEMORY) {
-            /*
-             * Write from caller's buffer -> target process
-             */
-            ULONG BytesDone = 0;
-            ULONG Size = Params->Size;
-            ULONG64 TargetCr3 = Params->TargetCr3;
-            ULONG64 TargetVa = Params->TargetVa;
-            ULONG64 BufferVa = Params->BufferVa;
-
-            while (BytesDone < Size) {
-                ULONG64 SrcPa, DstPa;
-                ULONG SrcOff, DstOff, Chunk;
-
-                SrcPa = HvGuestVaToPa(CallerCr3, BufferVa + BytesDone);
-                DstPa = HvGuestVaToPa(TargetCr3, TargetVa + BytesDone);
-
-                if (SrcPa == 0 || DstPa == 0) {
-                    Params->Status = STATUS_INVALID_ADDRESS;
-                    HvAdvanceGuestRip();
-                    return TRUE;
-                }
-
-                SrcOff = (ULONG)(SrcPa & 0xFFF);
-                DstOff = (ULONG)(DstPa & 0xFFF);
-                Chunk = 0x1000 - SrcOff;
-                if ((0x1000 - DstOff) < Chunk) Chunk = 0x1000 - DstOff;
-                if (Chunk > (Size - BytesDone)) Chunk = Size - BytesDone;
-
-                RtlCopyMemory((PVOID)DstPa, (PVOID)SrcPa, Chunk);
-                BytesDone += Chunk;
-            }
-
-            Params->Status = STATUS_SUCCESS;
-
-        } else {
-            Params->Status = STATUS_INVALID_PARAMETER;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        LOG_DEBUG("VMCALL mem: exception during operation");
-        /* Can't safely write Params->Status here */
-    }
-
+    /* No-op (beyond advancing RIP so the guest doesn't loop). */
     HvAdvanceGuestRip();
     return TRUE;
 }

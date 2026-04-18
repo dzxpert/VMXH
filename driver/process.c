@@ -7,6 +7,27 @@
 #include "log.h"
 #include "../common/shared.h"
 
+/*
+ * AAD-BP (post-2nd-review): decouple the exception-intercept sync from
+ * a specific backend.  The SVM and VMX init code each register a
+ * callback here; when the target-process list changes, we invoke the
+ * installed callback (if any) so the backend can update its VMCB/VMCS
+ * intercept bitmap.  This avoids process.c forcibly depending on svm.h
+ * and lets VMX add its own Exception Bitmap management symmetrically.
+ */
+typedef VOID (*PFN_EXCEPTION_HIDE_TOGGLE)(BOOLEAN Enable);
+static PFN_EXCEPTION_HIDE_TOGGLE g_ExceptionHideToggleCb = NULL;
+
+VOID ProcessRegisterExceptionHideToggle(PFN_EXCEPTION_HIDE_TOGGLE Callback)
+{
+    /*
+     * Called once during hypervisor init (after VMX/SVM is up).  No race
+     * with ProcessAddTarget/etc. because target tracking is not active
+     * during init.
+     */
+    g_ExceptionHideToggleCb = Callback;
+}
+
 NTKERNELAPI NTSTATUS PsLookupProcessByProcessId(HANDLE ProcessId, PEPROCESS *Process);
 
 /* ========================================================================= */
@@ -15,6 +36,12 @@ NTKERNELAPI NTSTATUS PsLookupProcessByProcessId(HANDLE ProcessId, PEPROCESS *Pro
 
 PROCESS_TRACKING g_ProcessTracking = { 0 };
 EPROCESS_OFFSETS g_EprocessOffsets = { 0 };
+
+/*
+ * C-3 forward decl (implemented below) — called after any target config
+ * change to keep the SVM #BP intercept state in sync.
+ */
+static VOID ProcessSyncSvmInterceptsAfterConfigChange(VOID);
 
 /* ========================================================================= */
 /*  Dynamic EPROCESS Offset Discovery                                        */
@@ -106,30 +133,65 @@ NTSTATUS ProcessResolveOffsets(VOID)
 
     /*
      * Method 1: Scan EPROCESS for matching CR3 value.
-     * Search QWORD-aligned offsets in the first EPROCESS_SCAN_SIZE bytes.
+     *
+     * L-1 FIX: on Windows with KVA Shadow (KPTI) enabled, EPROCESS contains
+     * BOTH DirectoryTableBase (kernel CR3) AND UserDirectoryTableBase
+     * (user-mode CR3 shadow).  They are adjacent and the second is often
+     * nearly identical to the first, so a naïve "first-match wins" scan
+     * may pick the wrong field.
+     *
+     * Because we're running in SYSTEM process context and __readcr3()
+     * returns the CURRENT (kernel) CR3, the kernel DirectoryTableBase is
+     * what we want.  Strategy:
+     *
+     *   1. Scan the entire range and collect EVERY offset that matches.
+     *   2. If exactly one candidate → use it.
+     *   3. If multiple → pick the SMALLEST offset.  Historically
+     *      DirectoryTableBase sits at low EPROCESS offsets (0x18 / 0x28)
+     *      while UserDirectoryTableBase is added later in the struct, at
+     *      higher offsets on KPTI-capable kernels.
+     *   4. Always run ValidateDtbOffset() as a final sanity check.
      */
-    for (Offset = 0; Offset < EPROCESS_SCAN_SIZE; Offset += sizeof(ULONG64)) {
-        ULONG64 Value;
+    {
+        ULONG Candidates[8];
+        ULONG CandidateCount = 0;
 
-        __try {
-            Value = *(PULONG64)((PUCHAR)CurrentProcess + Offset);
+        for (Offset = 0; Offset < EPROCESS_SCAN_SIZE; Offset += sizeof(ULONG64)) {
+            ULONG64 Value;
+
+            __try {
+                Value = *(PULONG64)((PUCHAR)CurrentProcess + Offset);
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                continue;
+            }
+
+            if (Value != 0 &&
+                (Value & ~0xFFFULL) == (CurrentCr3 & ~0xFFFULL) &&
+                (Value & ~0xFFFULL) < (1ULL << 48)) {
+                if (CandidateCount < RTL_NUMBER_OF(Candidates)) {
+                    Candidates[CandidateCount++] = Offset;
+                }
+            }
         }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            continue;
+
+        if (CandidateCount > 1) {
+            LOG_WARN("EPROCESS CR3 scan: %u candidates found — using smallest",
+                     CandidateCount);
+            for (i = 0; i < CandidateCount; i++) {
+                LOG_WARN("  candidate[%u] offset = 0x%03X", i, Candidates[i]);
+            }
         }
 
-        /* Compare with current CR3 (mask PCID bits) */
-        if (Value != 0 &&
-            (Value & ~0xFFFULL) == (CurrentCr3 & ~0xFFFULL) &&
-            (Value & ~0xFFFULL) < (1ULL << 48)) {
-
-            /* Found a candidate - validate it */
+        if (CandidateCount > 0) {
+            Offset = Candidates[0];   /* smallest = earliest hit in scan order */
             if (ValidateDtbOffset(Offset)) {
                 g_EprocessOffsets.DirectoryTableBase = Offset;
                 g_EprocessOffsets.Resolved = TRUE;
 
-                LOG_INFO("  DirectoryTableBase offset: 0x%03X (discovered by CR3 scan)",
-                         Offset);
+                LOG_INFO("  DirectoryTableBase offset: 0x%03X (discovered by CR3 scan%s)",
+                         Offset,
+                         CandidateCount > 1 ? ", multiple candidates" : "");
                 return STATUS_SUCCESS;
             }
         }
@@ -258,6 +320,7 @@ NTSTATUS ProcessAddTarget(ULONG Pid, ULONG Flags)
             g_ProcessTracking.Targets[i].Cr3 = Cr3; /* Refresh CR3 */
             KeReleaseSpinLock(&g_ProcessTracking.Lock, OldIrql);
             LOG_INFO("Updated target PID=%u, CR3=0x%llX, Flags=0x%08X", Pid, Cr3, Flags);
+            ProcessSyncSvmInterceptsAfterConfigChange();
             return STATUS_SUCCESS;
         }
     }
@@ -273,6 +336,7 @@ NTSTATUS ProcessAddTarget(ULONG Pid, ULONG Flags)
 
             KeReleaseSpinLock(&g_ProcessTracking.Lock, OldIrql);
             LOG_INFO("Added target PID=%u, CR3=0x%llX, Flags=0x%08X", Pid, Cr3, Flags);
+            ProcessSyncSvmInterceptsAfterConfigChange();
             return STATUS_SUCCESS;
         }
     }
@@ -305,6 +369,7 @@ NTSTATUS ProcessRemoveTarget(ULONG Pid)
 
             KeReleaseSpinLock(&g_ProcessTracking.Lock, OldIrql);
             LOG_INFO("Removed target PID=%u", Pid);
+            ProcessSyncSvmInterceptsAfterConfigChange();
             return STATUS_SUCCESS;
         }
     }
@@ -333,6 +398,7 @@ NTSTATUS ProcessUpdateConfig(ULONG Pid, ULONG NewFlags)
 
             KeReleaseSpinLock(&g_ProcessTracking.Lock, OldIrql);
             LOG_INFO("Updated config for PID=%u, NewFlags=0x%08X", Pid, NewFlags);
+            ProcessSyncSvmInterceptsAfterConfigChange();
             return STATUS_SUCCESS;
         }
     }
@@ -347,6 +413,50 @@ ULONG ProcessGetActiveCount(VOID)
 }
 
 /*
+ * C-3 helper: recompute whether any active target has AAD_HIDE_EXCEPTIONS
+ * enabled.  Called after every Add/Remove/Update to let the SVM backend
+ * toggle #BP intercept accordingly.  Intel/VMX side uses its own Exception
+ * Bitmap logic (handled by the AAD subsystem) and doesn't need this.
+ *
+ * Returns non-zero if #BP intercept should be enabled globally.
+ */
+BOOLEAN ProcessAnyTargetHasExceptionHiding(VOID)
+{
+    KIRQL   OldIrql;
+    ULONG   i;
+    BOOLEAN Result = FALSE;
+
+    if (!g_ProcessTracking.Initialized) return FALSE;
+
+    KeAcquireSpinLock(&g_ProcessTracking.Lock, &OldIrql);
+    for (i = 0; i < MAX_TARGET_PROCESSES; i++) {
+        if (g_ProcessTracking.Targets[i].Active &&
+            (g_ProcessTracking.Targets[i].Flags & AAD_HIDE_EXCEPTIONS)) {
+            Result = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&g_ProcessTracking.Lock, OldIrql);
+    return Result;
+}
+
+static VOID ProcessSyncSvmInterceptsAfterConfigChange(VOID)
+{
+    /*
+     * AAD-BP (revised): invoke the registered backend callback (if any).
+     * Both VMX and SVM can register; the chosen vendor's callback will
+     * actually do work — the other is never registered.
+     *
+     * The callback runs at IRQL ≤ APC_LEVEL (our caller is at
+     * PASSIVE_LEVEL coming from an IOCTL dispatch), so it is safe for
+     * the backend to use KeIpiGenericCall / acquire spin locks / etc.
+     */
+    if (g_ExceptionHideToggleCb) {
+        g_ExceptionHideToggleCb(ProcessAnyTargetHasExceptionHiding());
+    }
+}
+
+/*
  * Fast CR3 lookup - called from VM-Exit handler at high IRQL
  * Lock-free read since we only need approximate consistency
  * and the target array is small enough for a linear scan.
@@ -355,12 +465,29 @@ PTARGET_PROCESS ProcessFindByCr3(ULONG64 Cr3)
 {
     ULONG i;
 
-    /* Mask off PCID bits - CR3 low 12 bits may contain PCID */
-    ULONG64 Cr3Masked = Cr3 & ~0xFFFULL;
+    /*
+     * M-2 FIX: mask to the pure CR3 physical base.
+     *
+     * CR3 layout on x86-64 (Intel SDM Vol.3 §4.5):
+     *   bits [11:0]   = PCID (when CR4.PCIDE=1) or flags
+     *   bits [51:12]  = physical base address of PML4
+     *   bit 63        = "preserve TLB" flag on MOV-to-CR3 (Intel) — only
+     *                   meaningful during the write; the effective CR3
+     *                   *value* never has bit 63 set.  Some paths still
+     *                   pass the raw CR3 written by the guest, so strip
+     *                   it for safety.
+     *   bits [62:52]  = reserved (must be 0)
+     *
+     * Previous code only masked the low 12 bits, so a guest writing CR3
+     * with bit 63 set (TLB preserve) would evade our per-process match
+     * until the CPU happened to store a cleared version.  Mask all
+     * non-base bits.
+     */
+    ULONG64 Cr3Masked = Cr3 & 0x000FFFFFFFFFF000ULL;
 
     for (i = 0; i < MAX_TARGET_PROCESSES; i++) {
         if (g_ProcessTracking.Targets[i].Active) {
-            ULONG64 TargetCr3 = g_ProcessTracking.Targets[i].Cr3 & ~0xFFFULL;
+            ULONG64 TargetCr3 = g_ProcessTracking.Targets[i].Cr3 & 0x000FFFFFFFFFF000ULL;
             if (TargetCr3 == Cr3Masked) {
                 return &g_ProcessTracking.Targets[i];
             }

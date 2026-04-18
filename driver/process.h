@@ -90,4 +90,28 @@ FORCEINLINE BOOLEAN IsFeatureEnabled(ULONG64 Cr3, ULONG FeatureFlag)
 /* Global process tracking state */
 extern PROCESS_TRACKING g_ProcessTracking;
 
+/*
+ * AAD-BP (post-2nd-review): helpers exposed to the hypervisor backends.
+ *
+ * ProcessAnyTargetHasExceptionHiding():
+ *   Returns TRUE if at least one active target has AAD_HIDE_EXCEPTIONS
+ *   set.  Used by a backend on startup to initialise its exception
+ *   intercept state correctly if targets were pre-added (edge case,
+ *   but possible via IOCTL sequence).
+ *
+ * ProcessRegisterExceptionHideToggle(Callback):
+ *   Installs a callback invoked on every Add/Remove/UpdateConfig of a
+ *   target whose flag set affects AAD_HIDE_EXCEPTIONS.  The callback
+ *   receives TRUE if any target still has the flag, FALSE otherwise,
+ *   and is expected to toggle the backend's #BP intercept accordingly.
+ *
+ *   Registration is one-shot (per boot).  Each backend (SVM or VMX)
+ *   registers its own hook during initialisation; the OTHER backend's
+ *   init never runs so there is no collision.
+ */
+BOOLEAN ProcessAnyTargetHasExceptionHiding(VOID);
+
+typedef VOID (*PFN_EXCEPTION_HIDE_TOGGLE)(BOOLEAN Enable);
+VOID    ProcessRegisterExceptionHideToggle(PFN_EXCEPTION_HIDE_TOGGLE Callback);
+
 #endif /* _VMX_PROCESS_H_ */

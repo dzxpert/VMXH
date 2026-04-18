@@ -105,6 +105,13 @@ BOOLEAN SvmExitHandler(PGUEST_CONTEXT GuestContext)
         break;
 
     case SVM_EXIT_HLT:
+        /*
+         * C-2 FIX: HLT is no longer intercepted in SvmSetupVmcb, so we
+         * shouldn't see this exit in normal operation.  It is kept as a
+         * defensive handler in case a future config re-enables HLT
+         * intercept (advance RIP — guest sees HLT as no-op).  Proper
+         * wait-for-interrupt emulation would need VMCB.Control.IntState.
+         */
         HvAdvanceGuestRip();
         break;
 
@@ -500,6 +507,76 @@ static BOOLEAN SvmHandleDbException(PGUEST_CONTEXT Ctx)
     Vmcb = CpuCtx->VmcbVa;
 
     /*
+     * M-4: decide whether this #DB is ours (driven by TF we set in the
+     * NPT hook single-step dance) or the guest's own debug event.
+     *
+     * If the current RIP isn't within a single-instruction window of the
+     * RIP we recorded when we relaxed the hook page, this #DB must be
+     * unrelated — re-inject it to the guest and leave the hook permissive
+     * state alone.  Previously we would clear TF + restore permissions on
+     * ANY #DB, which could swallow real guest debug events.
+     */
+    if (!NptDbMatchesRelaxedRip(Vmcb->Save.Rip)) {
+        /*
+         * Not our single-step.  Clean up our tracker and re-inject.
+         *
+         * Why we SHOULD clear our tracker: if we still have an armed
+         * tracker here then either
+         *   a) a previous single-step completed via interrupt/branch
+         *      (so TF got propagated somewhere else), or
+         *   b) we're looking at a completely unrelated #DB that
+         *      happened to land on our CPU.
+         * Either way the tracker is stale and leaving it armed would
+         * confuse the next real single-step restore.
+         *
+         * Why we must PROPERLY inject #DB: simply setting EventInj with
+         * vector 1 is NOT enough — the guest's debug handler reads DR6
+         * to decide what caused the exception.  Without DR6.BS set for
+         * a single-step (or the right B0..B3 for a HW breakpoint), the
+         * handler may report "spurious debug exception" / dismiss it /
+         * misidentify it as a hardware breakpoint.  AMD's VMRUN does
+         * NOT update DR6 on injected #DB (only hardware exceptions do),
+         * so we populate DR6 ourselves to reflect the most likely cause
+         * (single-step — bit 14) plus the always-set reserved bits.
+         *
+         * Reference: AMD APM Vol.2 §13.1.1.3, Intel SDM Vol.3 §17.2.4.
+         *
+         * DR6 layout:
+         *   [3:0]  B0..B3 (hw breakpoint hit)
+         *   [12:4] must-be-one (reserved)
+         *   [13]   BD
+         *   [14]   BS (single-step)
+         *   [15]   BT (task-switch)
+         *   [31:16] must-be-one (reserved)
+         *
+         * Initial DR6 value per AMD is 0xFFFF0FF0 (all reserved = 1,
+         * no cause bits set).  We OR in BS (bit 14).
+         */
+        (VOID)NptDbGetAndClearRelaxedPage();
+
+        {
+            ULONG64 GuestCr3 = Vmcb->Save.Cr3;
+            if (IsTargetProcess(GuestCr3)) {
+                return AadHandleException(Ctx);
+            }
+        }
+
+        /* Populate DR6 so the guest can attribute the exception correctly. */
+        Vmcb->Save.Dr6 = 0xFFFF0FF0ULL | (1ULL << 14);   /* reserved-1 + BS */
+
+        /*
+         * Re-inject #DB as a fault (SVM_EVTINJ_TYPE_EXEPT already packs
+         * type<<8).  Clear the DR6 update also advances TF handling per
+         * APM §15.7: injected exceptions do not re-update DR6, which is
+         * why we set it manually above.  DO NOT advance RIP — #DB fault
+         * semantics: returning to the same RIP is correct.
+         */
+        Vmcb->Control.EventInj    = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | 1;
+        Vmcb->Control.EventInjErr = 0;
+        return TRUE;
+    }
+
+    /*
      * Get which page THIS CPU relaxed (stored by NptHandlePageFault).
      * Only restore hooks on that specific page.
      */
@@ -570,8 +647,15 @@ static BOOLEAN SvmHandleDbException(PGUEST_CONTEXT Ctx)
             return AadHandleException(Ctx);
         }
 
-        /* Not a target process and not from our hook - re-inject #DB normally */
-        Vmcb->Control.EventInj = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | 1;
+        /*
+         * Not a target process and not from our hook — re-inject #DB
+         * with a proper DR6 so the guest handler can attribute the
+         * exception.  See the first #DB re-injection site above for the
+         * full rationale on DR6.BS + reserved-1 bits.
+         */
+        Vmcb->Save.Dr6            = 0xFFFF0FF0ULL | (1ULL << 14);   /* reserved-1 + BS */
+        Vmcb->Control.EventInj    = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | 1;
+        Vmcb->Control.EventInjErr = 0;
     }
 
     return TRUE;
@@ -587,30 +671,100 @@ static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
 {
     ULONG64 Rax = Ctx->Rax;
     ULONG   SubCmd;
+    PSVM_CPU_CONTEXT CpuCtx;
+    PVMCB            Vmcb;
 
-    /* Legacy shutdown path */
-    if (Rax == VMCALL_MAGIC_SHUTDOWN) {
-        LOG_INFO("VMMCALL shutdown request received");
-        HvAdvanceGuestRip();
+    CpuCtx = &g_SvmState.CpuContexts[KeGetCurrentProcessorNumber()];
+    Vmcb   = CpuCtx->VmcbVa;
+    if (!Vmcb) {
+        /* Should never happen — defensive. */
         return FALSE;
     }
 
-    /* New VMCALL dispatch: RAX high 16 bits = VMCALL_MAGIC */
-    if ((Rax & VMCALL_MAGIC_MASK) == VMCALL_MAGIC) {
-        SubCmd = (ULONG)(Rax & 0xFFFF);
+    /*
+     * M-6 (revised): full-strength authentication via
+     * HvIsAuthenticShutdownCaller (see vmxdrv.c).  Bails for CPL != 0
+     * first as defence in depth.
+     */
+    {
+        ULONG GuestCpl = (ULONG)(Vmcb->Save.Cpl & 0x3);
+        if (GuestCpl != 0) {
+            VMXROOT_LOG_WARN("VMMCALL from CPL=%u — injecting #UD", GuestCpl);
+            HvInjectException(6, INTERRUPT_TYPE_HARDWARE_EXCEPTION, FALSE, 0);
+            return TRUE;
+        }
+    }
 
-        switch (SubCmd) {
-        case VMCALL_SUBCMD_SHUTDOWN:
-            LOG_INFO("VMMCALL shutdown request received (new)");
+    {
+        ULONG   GuestCpl  = (ULONG)(Vmcb->Save.Cpl & 0x3);
+        ULONG64 GuestRip  = Vmcb->Save.Rip;
+        ULONG64 GuestEfer = Vmcb->Save.Efer;
+        /*
+         * AMD VMCB segment attribute word packs a 16-bit VMCB-style
+         * attribute: Cs.Attrib bit 9 corresponds to the L flag
+         * (SVM packs the high attribute byte into bits [15:8] of
+         * Attrib, so L lives at bit (12-8)+8 = 12? — actually see
+         * APM Vol.2 Appendix B: VMCB Attrib format has L at bit 9.
+         */
+        BOOLEAN GuestCsL  = (Vmcb->Save.Cs.Attrib & (1u << 9)) != 0;
+
+        /* Legacy shutdown path (authenticated). */
+        if (Rax == VMCALL_MAGIC_SHUTDOWN) {
+            if (!HvIsAuthenticShutdownCaller(Ctx->Rcx, GuestRip, GuestCpl,
+                                             GuestEfer, GuestCsL)) {
+                VMXROOT_LOG_WARN("VMMCALL shutdown rejected: auth failed "
+                                 "(RIP=0x%llX, Efer=0x%llX, CsL=%u, CPL=%u)",
+                                 GuestRip, GuestEfer, (ULONG)GuestCsL, GuestCpl);
+                HvInjectException(6, INTERRUPT_TYPE_HARDWARE_EXCEPTION, FALSE, 0);
+                return TRUE;
+            }
+            LOG_INFO("VMMCALL shutdown request received (authenticated)");
             HvAdvanceGuestRip();
             return FALSE;
+        }
 
-        case VMCALL_SUBCMD_READ_MEMORY:
-        case VMCALL_SUBCMD_WRITE_MEMORY:
-            return HvHandleMemoryVmcall(Ctx, SubCmd);
+        /* New VMCALL dispatch: RAX high 16 bits = VMCALL_MAGIC */
+        if ((Rax & VMCALL_MAGIC_MASK) == VMCALL_MAGIC) {
+            SubCmd = (ULONG)(Rax & 0xFFFF);
 
-        default:
-            break;
+            switch (SubCmd) {
+            case VMCALL_SUBCMD_SHUTDOWN:
+                if (!HvIsAuthenticShutdownCaller(Ctx->Rcx, GuestRip, GuestCpl,
+                                                 GuestEfer, GuestCsL)) {
+                    VMXROOT_LOG_WARN("VMMCALL shutdown (new) rejected: auth failed");
+                    HvInjectException(6, INTERRUPT_TYPE_HARDWARE_EXCEPTION, FALSE, 0);
+                    return TRUE;
+                }
+                LOG_INFO("VMMCALL shutdown request received (new, authenticated)");
+                HvAdvanceGuestRip();
+                return FALSE;
+
+            case VMCALL_SUBCMD_READ_MEMORY:
+            case VMCALL_SUBCMD_WRITE_MEMORY:
+                /*
+                 * M-7 (revised) FIX: the hypervisor-memory VMCALL path is
+                 * PERMANENTLY disabled because it dereferenced guest PAs as
+                 * if they were host VAs in VMX root mode — a BSOD waiting to
+                 * happen.  We do NOT want to silently succeed or silently
+                 * no-op: callers of this VMCALL are old internal code paths
+                 * that MUST be migrated to the IOCTL KernelCopyProcessMemory
+                 * route.  Injecting #UD makes the failure immediately visible
+                 * in debuggers and prevents silent data corruption.
+                 */
+                {
+                    static volatile LONG s_DeprecatedMemVmcallCount = 0;
+                    LONG Count = InterlockedIncrement(&s_DeprecatedMemVmcallCount);
+                    if (Count <= 10) {
+                        VMXROOT_LOG_WARN("Deprecated VMMCALL mem-op (sub=%u) — injecting #UD",
+                                         SubCmd);
+                    }
+                }
+                HvInjectException(6, INTERRUPT_TYPE_HARDWARE_EXCEPTION, FALSE, 0);
+                return TRUE;
+
+            default:
+                break;
+            }
         }
     }
 
@@ -623,8 +777,16 @@ static BOOLEAN SvmHandleVmmcall(PGUEST_CONTEXT Ctx)
                              Ctx->Rax, Ctx->Rcx);
         }
     }
+    /*
+     * #UD is a FAULT — the re-entered guest RIP must still point at the
+     * VMMCALL opcode so the guest's IDT handler sees the faulting
+     * address correctly.  DO NOT call HvAdvanceGuestRip().  The
+     * hypervisor would otherwise inject a #UD whose saved RIP points
+     * past the VMMCALL, then the guest's #UD handler would execute
+     * against the *wrong* instruction (whatever came after), causing
+     * unpredictable behavior.
+     */
     HvInjectException(6, INTERRUPT_TYPE_HARDWARE_EXCEPTION, FALSE, 0);
-    HvAdvanceGuestRip();
     return TRUE;
 }
 

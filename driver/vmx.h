@@ -473,6 +473,44 @@
 
 #define VMCALL_MAGIC_SHUTDOWN               0xDEADCAFEULL
 
+/*
+ * M-6: per-boot random nonce that the Shutdown VMCALL must carry in RCX.
+ *
+ * Any Ring-0 code in the guest can execute `mov rax, VMCALL_MAGIC_SHUTDOWN;
+ * vmcall` — but only our own driver knows the nonce.  Handlers reject
+ * the shutdown request if RCX != g_VmcallShutdownNonce, so an in-guest
+ * rootkit/malicious driver cannot unload our hypervisor via VMCALL.
+ *
+ * The nonce is generated once in DriverEntry and never exposed outside
+ * the kernel module (no IOCTL, no log).  It is regenerated on every
+ * driver load, so dumping it from one boot does not help on the next.
+ */
+extern ULONG64 g_VmcallShutdownNonce;
+
+/*
+ * M-6 (revised): shared predicate used by BOTH VMX and SVM shutdown-VMCALL
+ * handlers to validate that the caller is (a) our own driver, (b) running
+ * in 64-bit long mode, (c) running at CPL 0, (d) executing from a kernel
+ * address.  Returns TRUE only if ALL conditions hold.
+ *
+ * Arguments describe the guest context as observed at VMEXIT:
+ *   GuestRcx  — value in RCX (should equal the nonce)
+ *   GuestRip  — value in RIP (should be in kernel half of VA space)
+ *   GuestCpl  — CPL (should be 0)
+ *   GuestEfer — value of EFER (should have LMA set)
+ *   GuestCsL  — CS.L bit (should be 1 → 64-bit mode)
+ *
+ * Centralising the logic avoids divergence between the two platforms
+ * as new checks get added.
+ */
+BOOLEAN HvIsAuthenticShutdownCaller(
+    ULONG64 GuestRcx,
+    ULONG64 GuestRip,
+    ULONG   GuestCpl,
+    ULONG64 GuestEfer,
+    BOOLEAN GuestCsL
+);
+
 /* ========================================================================= */
 /*  CPUID Backdoor for Hypervisor Detection                                  */
 /* ========================================================================= */
@@ -723,6 +761,29 @@ extern VOID     AsmSaveHostState(PGUEST_CONTEXT Context);
 extern VOID     AsmRestoreGuestState(PGUEST_CONTEXT Context);
 extern VOID     AsmXsetbv(ULONG Index, ULONG64 Value);
 extern VOID     AsmVmxVmcall(ULONG64 HypercallValue);
+extern VOID     AsmVmxVmcall2(ULONG64 HypercallValue, ULONG64 Arg1);
+
+/*
+ * AAD-BP (post-2nd-review): symmetric VMX exception-intercept API.
+ *
+ * Implemented via a global "desired mask" (g_VmxDesiredExceptionBitmap)
+ * and a per-CPU "applied generation" counter.  VmxSetExceptionInterceptBp
+ * just updates the global — the actual VMWRITE happens lazily in the
+ * VM-Exit handler the next time each CPU sees its generation is behind.
+ * This avoids cross-CPU IPIs and VMCS-ownership juggling (a VMCS is
+ * loaded on ONE CPU at a time; writing it from elsewhere requires
+ * VMCLEAR + VMPTRLD dance, which is expensive and error-prone).
+ */
+VOID    VmxSetExceptionInterceptDb(BOOLEAN Enable);
+VOID    VmxSetExceptionInterceptBp(BOOLEAN Enable);
+
+/*
+ * Called at the very top of the VMX exit handler to bring this CPU's
+ * VMCS Exception Bitmap up-to-date with the desired global value.
+ * Cheap: branch on a generation counter compare; no VMWRITE if already
+ * in sync.
+ */
+VOID    VmxSyncExceptionBitmap(VOID);
 
 #include "hv_detect.h"
 

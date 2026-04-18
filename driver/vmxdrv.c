@@ -23,6 +23,67 @@
 VMX_STATE   g_VmxState = { 0 };
 PDEVICE_OBJECT  g_DeviceObject = NULL;
 
+/*
+ * M-6: VMCALL shutdown nonce (see vmx.h for rationale).
+ *
+ * Initialised once in DriverEntry from a RNG mixer combining
+ * KeQueryPerformanceCounter, __rdtsc and KeQueryInterruptTime — this is
+ * good enough because the value never leaves the kernel module and only
+ * needs to be unguessable to an in-guest attacker.
+ */
+ULONG64 g_VmcallShutdownNonce = 0;
+
+/*
+ * M-6 (revised): full-strength authentication for the shutdown VMCALL.
+ *
+ * Checks performed (all must pass — any failure → reject):
+ *   1. RCX == g_VmcallShutdownNonce (per-boot secret).
+ *   2. EFER.LMA set (guest is in long mode, not legacy/compat).
+ *   3. CS.L set (64-bit code segment, not 32-bit compatibility mode).
+ *      A 32-bit compatibility-mode attacker could CPL=0 and in long
+ *      mode technically, but CS.L=0 → the CPU is in compat mode, which
+ *      Windows' kernel never uses for VMCALL.
+ *   4. CPL == 0 (kernel-mode ring).
+ *   5. RIP is in the upper half of canonical address space
+ *      (>= 0xFFFF_8000_0000_0000) — Windows kernel-mode addresses.
+ *      A Ring-0 user-mode gadget or arbitrary code running with kernel
+ *      pages mapped in user half is rejected.
+ *
+ * Rationale for each check:
+ *   - Without #2/#3 a 32-bit OS attacker could potentially exploit this
+ *     path; Windows x64 is our only supported environment.
+ *   - Without #5, a kernel-mode ROP gadget that tricked Windows into
+ *     executing a user-allocated page with RPL=0 would pass CPL check.
+ *     Kernel-half RIP is a strong additional gate.
+ */
+BOOLEAN HvIsAuthenticShutdownCaller(
+    ULONG64 GuestRcx,
+    ULONG64 GuestRip,
+    ULONG   GuestCpl,
+    ULONG64 GuestEfer,
+    BOOLEAN GuestCsL
+)
+{
+    /* #1 — nonce */
+    if (GuestRcx != g_VmcallShutdownNonce)              return FALSE;
+
+    /* #2 — long mode active */
+    if (!(GuestEfer & EFER_LMA))                        return FALSE;
+
+    /* #3 — 64-bit code segment */
+    if (!GuestCsL)                                      return FALSE;
+
+    /* #4 — CPL 0 */
+    if (GuestCpl != 0)                                  return FALSE;
+
+    /* #5 — RIP in kernel half.  Canonical upper-half starts at bit 47
+     *      set (for 48-bit VA) on x86-64.  Windows uses the full upper
+     *      half starting at 0xFFFF_8000_0000_0000. */
+    if ((ULONG64)GuestRip < 0xFFFF800000000000ULL)      return FALSE;
+
+    return TRUE;
+}
+
 /* Dynamic processor count (replaces MAX_PROCESSORS constant) */
 ULONG       g_MaxProcessors = 0;
 
@@ -104,6 +165,29 @@ NTSTATUS DriverEntry(
     /* Detect active processor count early (used for all per-CPU allocations) */
     g_MaxProcessors = KeQueryActiveProcessorCount(NULL);
     LOG_INFO("Detected %u active processors", g_MaxProcessors);
+
+    /*
+     * M-6: generate a per-boot random nonce for the VMCALL shutdown
+     * sequence so that malicious in-guest Ring 0 code cannot unload
+     * our hypervisor with a known magic.
+     */
+    {
+        LARGE_INTEGER Perf;
+        ULONG64       Tsc, Intr;
+        Perf = KeQueryPerformanceCounter(NULL);
+        Tsc  = __rdtsc();
+        Intr = KeQueryInterruptTime();
+        /* Mix with a Murmur-like finaliser; avoids zero / small values. */
+        g_VmcallShutdownNonce = (ULONG64)Perf.QuadPart ^ Tsc ^ (Intr << 1);
+        g_VmcallShutdownNonce ^= (g_VmcallShutdownNonce >> 33);
+        g_VmcallShutdownNonce *= 0xFF51AFD7ED558CCDULL;
+        g_VmcallShutdownNonce ^= (g_VmcallShutdownNonce >> 33);
+        g_VmcallShutdownNonce *= 0xC4CEB9FE1A85EC53ULL;
+        g_VmcallShutdownNonce ^= (g_VmcallShutdownNonce >> 33);
+        if (g_VmcallShutdownNonce == 0) g_VmcallShutdownNonce = 0xA5A5A5A5A5A5A5A5ULL;
+        /* Do NOT log the value — it must stay inside the kernel module. */
+        LOG_INFO("VMCALL shutdown nonce initialised");
+    }
 
     /*
      * BUG FIX (Issue #8): Dynamically resolve KeSetTargetProcessorDpcEx.
