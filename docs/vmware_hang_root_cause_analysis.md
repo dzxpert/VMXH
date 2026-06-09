@@ -1,172 +1,174 @@
-# VMXHypervisorToolbox 完整 Bug 分析与修复报告
+[简体中文](vmware_hang_root_cause_analysis_CN.md) | English
 
-> **日期**：2026-04-11 ~ 2026-04-12  
-> **项目**：VMXHypervisorToolbox（Intel VT-x Blue Pill Hypervisor）  
-> **运行环境**：VMware Workstation（L0 Hypervisor）→ VMXToolbox（L1 Hypervisor）→ Windows Guest（L2）  
-> **状态**：✅ 全部修复，运行正常
+# VMXHypervisorToolbox Complete Bug Analysis and Resolution Report
 
----
-
-## 目录
-
-### Part 1：VMware 嵌套虚拟化卡住问题（2026-04-12）
-
-- [问题现象](#问题现象)
-- [背景：嵌套虚拟化架构](#背景嵌套虚拟化架构)
-- [排查历程与迭代](#排查历程与迭代)
-- [根因 #1：External Interrupt Handler 丢弃所有中断（IPI 丢失）](#根因-1external-interrupt-handler-丢弃所有中断ipi-丢失)
-- [根因 #2：HLT Handler 在 VMX Root Mode 中执行 \_enable() + \_\_halt()](#根因-2hlt-handler-在-vmx-root-mode-中执行-_enable--__halt)
-- [辅助优化 #3：I/O Bitmap 消除 UNCONDITIONAL\_IO\_EXIT 风暴](#辅助优化-3io-bitmap-消除-unconditional_io_exit-风暴)
-- [辅助优化 #4：CR3 Load Exit / MOV DR Exit / Exception Bitmap 优化](#辅助优化-4cr3-load-exit--mov-dr-exit--exception-bitmap-优化)
-
-### Part 2：EPT Hook 引擎与驱动框架 Bug（2026-04-11）
-
-- [Bug #A：Trampoline 指令截断导致 #UD → BSOD](#bug-atrampoline-指令截断导致-ud--bsod)
-- [Bug #B：HandleMtf 多核竞争条件导致无限 EPT Violation 循环](#bug-bhandlemtf-多核竞争条件导致无限-ept-violation-循环)
-- [Bug #C：EptSplitLargePage 后缺少 INVEPT 导致 EPT Misconfiguration](#bug-ceptsplitlargepage-后缺少-invept-导致-ept-misconfiguration)
-- [Bug #D：IOCTL 分发中 IoStatus.Information 未初始化](#bug-dioct-分发中-iostatusinformation-未初始化)
-
-### 总览
-
-- [全部修复方案汇总](#全部修复方案汇总)
-- [完整修改文件清单](#完整修改文件清单)
-- [编译兼容性说明](#编译兼容性说明)
-- [关键经验教训](#关键经验教训)
+> **Date**: 2026-04-11 ~ 2026-04-12  
+> **Project**: VMXHypervisorToolbox (Intel VT-x Blue Pill Hypervisor)  
+> **Environment**: VMware Workstation (L0 Hypervisor) → VMXToolbox (L1 Hypervisor) → Windows Guest (L2)  
+> **Status**: ✅ All Fixed, Running Normally
 
 ---
 
-# Part 1：VMware 嵌套虚拟化卡住问题
+## Table of Contents
 
-## 问题现象
+### Part 1: VMware Nested Virtualization Hang (2026-04-12)
 
-在 VMware Workstation 中运行 VMXToolbox 驱动时，执行 `IOCTL_VMX_INIT` 初始化 Hypervisor 后，**整个虚拟机冻结（hang）**，WinDbg 不再输出任何信息，VMware 窗口完全无响应。
+- [Symptoms](#symptoms)
+- [Background: Nested Virtualization Architecture](#background-nested-virtualization-architecture)
+- [Troubleshooting Process and Iterations](#troubleshooting-process-and-iterations)
+- [Root Cause #1: External Interrupt Handler Discards All Interrupts (IPI Loss)](#root-cause-1-external-interrupt-handler-discards-all-interrupts-ipi-loss)
+- [Root Cause #2: HLT Handler Executing _enable() + __halt() in VMX Root Mode](#root-cause-2-hlt-handler-executing-_enable--__halt-in-vmx-root-mode)
+- [Optimization #3: Neutralizing UNCONDITIONAL_IO_EXIT Storm via I/O Bitmap](#optimization-3-neutralizing-unconditional_io_exit-storm-via-io-bitmap)
+- [Optimization #4: CR3 Load Exit / MOV DR Exit / Exception Bitmap Optimizations](#optimization-4-cr3-load-exit--mov-dr-exit--exception-bitmap-optimizations)
 
-问题经历了多个阶段：
+### Part 2: EPT Hook Engine & Driver Framework Bugs (2026-04-11)
 
-| 阶段 | 现象 | 卡住位置 |
+- [Bug #A: Trampoline Instruction Truncation Leading to #UD → BSOD](#bug-a-trampoline-instruction-truncation-leading-to-ud--bsod)
+- [Bug #B: HandleMtf Multi-Core Race Condition Leading to Infinite EPT Violation Loop](#bug-b-handlemtf-multi-core-race-condition-leading-to-infinite-ept-violation-loop)
+- [Bug #C: EPT Misconfiguration Due to Missing INVEPT After EptSplitLargePage](#bug-c-ept-misconfiguration-due-to-missing-invept-after-eptsplitlargepage)
+- [Bug #D: Uninitialized IoStatus.Information in IOCTL Dispatch](#bug-d-uninitialized-iostatusinformation-in-ioctl-dispatch)
+
+### Overview
+
+- [Summary of All Resolutions](#summary-of-all-resolutions)
+- [Complete List of Modified Files](#complete-list-of-modified-files)
+- [Compilation Compatibility Notes](#compilation-compatibility-notes)
+- [Key Lessons Learned](#key-lessons-learned)
+
+---
+
+# Part 1: VMware Nested Virtualization Hang
+
+## Symptoms
+
+When running the VMXToolbox driver in VMware Workstation, executing `IOCTL_VMX_INIT` to initialize the hypervisor causes the **entire virtual machine to freeze (hang)**. WinDbg stops printing any information, and the VMware window becomes completely unresponsive.
+
+The issue progressed through several stages:
+
+| Stage | Symptom | Hang Location |
 |------|------|---------|
-| 初始 | CPU 0 VMLAUNCH 成功，CPU 1 永远等不到 DPC | `KeWaitForSingleObject` 超时 |
-| 中期 | CPU 0/1 都 VMLAUNCH 成功，但系统立即冻结 | VMLAUNCH 后无任何日志输出 |
-| 最终 | 正常运行 | ✅ 不再卡住 |
+| Initial | CPU 0 VMLAUNCH succeeded; CPU 1 never receives DPC | `KeWaitForSingleObject` timeout |
+| Middle | Both CPU 0 and 1 VMLAUNCH succeeded, but the system immediately froze | No log output after VMLAUNCH |
+| Final | Running normally | ✅ No longer hanging |
 
 ---
 
-## 背景：嵌套虚拟化架构
+## Background: Nested Virtualization Architecture
 
 ```
 ┌──────────────────────────────────────────────┐
-│                  物理硬件                      │
+│                  Physical Hardware           │
 ├──────────────────────────────────────────────┤
 │  L0: VMware Workstation (Host Hypervisor)     │
-│    ├─ 拦截所有 L1 的 VMXON/VMCS/VMLAUNCH     │
-│    ├─ 为 L1 模拟 VMX 指令                     │
-│    └─ 每次 L1 的 VM-Exit 都经过 L1→L0→L1     │
+│    ├─ Intercepts all L1 VMXON/VMCS/VMLAUNCH  │
+│    ├─ Emulates VMX instructions for L1       │
+│    └─ Every L1 VM-Exit goes through L1→L0→L1 │
 ├──────────────────────────────────────────────┤
 │  L1: VMXToolbox (Our Blue Pill Hypervisor)    │
-│    ├─ 使用 VMXON/VMLAUNCH 虚拟化 Guest        │
-│    ├─ 处理 VM-Exit（CPUID/MSR/EPT/中断等）     │
-│    └─ Guest = 原始 Windows OS（透明接管）      │
+│    ├─ Uses VMXON/VMLAUNCH to virtualize Guest │
+│    ├─ Handles VM-Exits (CPUID/MSR/EPT/Intr)  │
+│    └─ Guest = Original Windows OS (Transparent)│
 ├──────────────────────────────────────────────┤
-│  L2: Windows Guest (被虚拟化的原始 OS)         │
-│    ├─ 不知道自己在 hypervisor 之下              │
-│    └─ 正常运行 kernel + user-mode              │
+│  L2: Windows Guest (Virtualized Original OS) │
+│    ├─ Unaware of running under a hypervisor  │
+│    └─ Runs kernel + user-mode normally       │
 └──────────────────────────────────────────────┘
 ```
 
-**关键特性**：
-- **Blue Pill 架构**：Guest 就是原始运行的 Windows。Hypervisor 在运行时"潜入"并透明接管。
-- **嵌套虚拟化代价**：每次 L1 VM-Exit 实际上经历 `L2→L1→L0→L1→L2` 的完整路径，开销是原生的 **100-1000 倍**。
-- **must-be-1 bits**：VMware 通过 `IA32_VMX_PROCBASED_CTLS` 等 MSR 强制开启某些控制位（如 `HLT_EXIT`、`UNCONDITIONAL_IO_EXIT`、`EXTERNAL_INT_EXIT` 等），即使 L1 不想拦截这些事件。
+**Key Characteristics**:
+- **Blue Pill Architecture**: The Guest is the originally running Windows OS. The hypervisor "slips in" and takes over execution transparently at runtime.
+- **Nested Virtualization Overhead**: Each L1 VM-Exit actually goes through the full path of `L2 → L1 → L0 → L1 → L2`, introducing overhead that is **100–1000x** higher than bare-metal virtualization.
+- **must-be-1 bits**: VMware enforces certain control bits in MSRs like `IA32_VMX_PROCBASED_CTLS` to be 1 (e.g., `HLT_EXIT`, `UNCONDITIONAL_IO_EXIT`, `EXTERNAL_INT_EXIT`), even if L1 does not wish to intercept these events.
 
 ---
 
-## 排查历程与迭代
+## Troubleshooting Process and Iterations
 
-整个排查过程经历了 **5 轮迭代**，从症状修补逐步深入到真正的根因：
+The entire debugging process went through **5 iterations**, shifting from superficial hotfixes to diving deep into the true root causes:
 
-### 第 1 轮：禁用高频 VM-Exit 源
+### Iteration 1: Disabling High-Frequency VM-Exit Sources
 
-**假设**：VM-Exit 风暴导致 VMware L0 过载  
-**措施**：
-- 禁用 `PROC_BASED_CR3_LOAD_EXIT`（每次进程切换触发 VM-Exit）
-- 禁用 `PROC_BASED_MOV_DR_EXIT`（`SwapContext` 中频繁保存/恢复 DR 寄存器）
-- Exception Bitmap 设为 0（不拦截任何异常）
+**Hypothesis**: A VM-Exit storm overloaded VMware L0.  
+**Actions**:
+- Disabled `PROC_BASED_CR3_LOAD_EXIT` (triggered VM-Exits on every process switch).
+- Disabled `PROC_BASED_MOV_DR_EXIT` (frequent saving/restoring of DR registers in `SwapContext`).
+- Set Exception Bitmap to 0 (do not intercept any exceptions).
 
-**结果**：❌ 仍然卡住。减少了 VM-Exit 数量但没有解决根本问题。
+**Result**: ❌ Still hung. This reduced the number of VM-Exits but did not resolve the fundamental issue.
 
-### 第 2 轮：系统性代码审查
+### Iteration 2: Systematic Code Review
 
-**转变**：不再逐个尝试，而是对所有 VM-Exit handler 做全面审查。
+**Pivot**: Shifted from guestimate fixes to a comprehensive code review of all VM-Exit handlers.
 
-**发现了三个根本性 Bug**：
-1. External Interrupt handler 丢弃所有中断
-2. HLT handler 把 HLT 变成了 NOP（busy-wait）
-3. Interrupt Window handler 没注入保存的 pending interrupt
+**Discovered three fundamental bugs**:
+1. The External Interrupt handler discarded all interrupts.
+2. The HLT handler turned HLT into a NOP (busy-wait).
+3. The Interrupt Window handler did not inject saved pending interrupts.
 
-### 第 3 轮：修复中断丢弃 + HLT busy-wait
+### Iteration 3: Fixing Discarded Interrupts + HLT Busy-Wait
 
-**措施**：
-- External Interrupt handler：将中断向量重新注入 Guest
-- HLT handler：执行 `_enable() + __halt()` 让 CPU 在 VMX root mode 中真正 HLT
-- Interrupt Window handler：注入 pending interrupt
+**Actions**:
+- External Interrupt handler: Re-inject the interrupt vector back into the Guest.
+- HLT handler: Executed `_enable() + __halt()` to force the CPU to enter HLT while in VMX root mode.
+- Interrupt Window handler: Injected pending interrupts.
 
-**结果**：⚡ **CPU 0 和 CPU 1 都成功 VMLAUNCH！** 但系统在 VMLAUNCH 后立即冻结。说明中断修复解决了 IPI 丢失问题（CPU 1 的 DPC 能送达了），但 HLT 修复引入了新的致命 Bug。
+**Result**: ⚡ **VMLAUNCH succeeded on both CPU 0 and CPU 1!** However, the system froze immediately after VMLAUNCH. This indicated that the interrupt fix successfully resolved the IPI loss (allowing CPU 1's DPC to arrive), but the HLT fix introduced a new, critical bug.
 
-### 第 4 轮：分析 HLT handler 的致命问题
+### Iteration 4: Analyzing the Fatal Issue in the HLT Handler
 
-**发现**：在 VMX root mode 中执行 `_enable() + __halt()` 会导致中断在 Host stack 上通过 Host IDT 递送——这会破坏 VM-Exit handler 的执行流并可能导致 stack overflow。
+**Discovery**: Executing `_enable() + __halt()` in VMX root mode causes incoming interrupts to be delivered on the Host stack using the Host IDT. This corrupts the execution flow of the VM-Exit handler and can trigger stack overflow.
 
-**措施**：
-- HLT handler 改为设置 `Guest Activity State = HLT`（让硬件在 Guest 模式中 HLT）
-- External Interrupt handler 添加 HLT Activity State 唤醒逻辑
-- NMI handler 同样添加 HLT Activity State 唤醒逻辑
-- 添加 I/O Bitmap 消除 UNCONDITIONAL_IO_EXIT 风暴
+**Actions**:
+- Modified the HLT handler to set `Guest Activity State = HLT` (allowing hardware to enter HLT mode in the Guest state).
+- Added HLT Activity State wake-up logic to the External Interrupt handler.
+- Added HLT Activity State wake-up logic to the NMI handler.
+- Added I/O Bitmaps to neutralize the UNCONDITIONAL_IO_EXIT storm.
 
-### 第 5 轮（最终）：运行正常 ✅
+### Iteration 5 (Final): Running Normally ✅
 
-所有修复就位后，VMware 嵌套虚拟化环境下 Hypervisor 正常运行。
+With all fixes in place, the hypervisor runs normally under the VMware nested virtualization environment.
 
 ---
 
-## 根因 #1：External Interrupt Handler 丢弃所有中断（IPI 丢失）
+## Root Cause #1: External Interrupt Handler Discards All Interrupts (IPI Loss)
 
-### 严重程度：🔴 Critical — 直接导致 CPU 间 DPC 无法递送
+### Severity: 🔴 Critical — Directly prevents inter-processor DPC delivery
 
-### 问题分析
+### Issue Analysis
 
-当 `PIN_BASED_EXTERNAL_INT_EXIT` 被设置时（VMware must-be-1 强制开启），**所有外部中断**（时钟中断、IPI、设备中断等）都会导致 VM-Exit，中断向量保存在 `VMCS_EXIT_INTERRUPTION_INFO` 中。
+When `PIN_BASED_EXTERNAL_INT_EXIT` is set (enforced as must-be-1 by VMware), **all external interrupts** (timer interrupts, IPIs, device interrupts, etc.) cause a VM-Exit, with the interrupt vector saved in `VMCS_EXIT_INTERRUPTION_INFO`.
 
-**旧代码**：
+**Old Code**:
 
 ```c
 case EXIT_REASON_EXTERNAL_INT:
-    /* 什么都没做，直接 break */
+    /* Did nothing, directly broke out */
     break;
 ```
 
-这意味着：
-- ⏱️ 时钟中断 → **丢弃** → 调度器无法调度线程
-- 📨 IPI（处理器间中断）→ **丢弃** → DPC 无法跨 CPU 派发
-- 🔌 设备中断 → **丢弃** → 设备驱动无法响应
+This meant:
+- ⏱️ Timer Interrupts → **Discarded** → The scheduler could not schedule threads.
+- 📨 IPIs (Inter-Processor Interrupts) → **Discarded** → DPCs could not be dispatched across CPUs.
+- 🔌 Device Interrupts → **Discarded** → Device drivers could not respond.
 
-### 为什么导致卡住
+### Why It Caused the Hang
 
-VMXToolbox 使用**串行 CPU 初始化**：CPU 0 先 VMLAUNCH，成功后主线程在 CPU 0（已在 Guest mode）上排队 CPU 1 的 DPC。
+VMXToolbox uses **sequential CPU initialization**: CPU 0 executes VMLAUNCH first, and upon success, the main thread on CPU 0 (already in Guest mode) queues a DPC to execute on CPU 1.
 
 ```
-主线程（CPU 0，已虚拟化）：
+Main thread (CPU 0, virtualized):
   KeInsertQueueDpc(DPC for CPU 1)
-      → 内核发送 IPI 到 CPU 1
-      → CPU 1 收到中断 → VM-Exit (EXTERNAL_INT)
-      → Handler 丢弃中断 → IPI 丢失！
-      → CPU 1 永远不知道有 DPC 等待执行
-      → 主线程的 KeWaitForSingleObject 超时
-      → VMware 卡住
+      → Kernel sends IPI to CPU 1
+      → CPU 1 receives the interrupt → VM-Exit (EXTERNAL_INT)
+      → Handler discards the interrupt → IPI lost!
+      → CPU 1 never knows a DPC is waiting to run
+      → Main thread's KeWaitForSingleObject times out
+      → VMware hangs
 ```
 
-### 修复方案
+### Resolution
 
-将中断向量通过 `VMCS_CTRL_VMENTRY_INT_INFO` 重新注入 Guest：
+Re-inject the interrupt vector into the Guest using `VMCS_CTRL_VMENTRY_INT_INFO`:
 
 ```c
 case EXIT_REASON_EXTERNAL_INT:
@@ -180,13 +182,13 @@ case EXIT_REASON_EXTERNAL_INT:
 
         if ((GuestRflags & (1ULL << 9)) &&    /* IF=1 */
             !(Interruptibility & 0x3)) {       /* No STI/MOV SS blocking */
-            /* 立即注入 */
+            /* Inject immediately */
             VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO,
                      INTERRUPT_INFO_VALID |
                      (INTERRUPT_TYPE_EXTERNAL << INTERRUPT_INFO_TYPE_SHIFT) |
                      Vector);
         } else {
-            /* 延迟注入：保存 pending，启用 interrupt-window exiting */
+            /* Deferred injection: Save as pending, enable interrupt-window exiting */
             CpuContext->PendingInterrupt = TRUE;
             CpuContext->PendingInterruptVector = Vector;
 
@@ -194,7 +196,7 @@ case EXIT_REASON_EXTERNAL_INT:
             ProcBased |= PROC_BASED_INT_WINDOW_EXIT;
             VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
 
-            /* 如果 Guest 在 HLT 状态，必须唤醒 */
+            /* If the Guest is in HLT state, it must be woken up */
             if (ActivityState == 1)
                 VmxWrite(VMCS_GUEST_ACTIVITY_STATE, 0);
         }
@@ -203,80 +205,82 @@ case EXIT_REASON_EXTERNAL_INT:
 }
 ```
 
-**关键设计点**：
-- 当 Guest RFLAGS.IF=1 且无 STI/MOV SS 阻塞时，立即注入
-- 当 Guest 不可中断时，保存到 `PendingInterrupt` 并启用 interrupt-window exiting
-- 如果 Guest 处于 HLT Activity State，必须重置为 Active，否则 Guest 永远不能执行 STI 来使能中断
+**Key Design Points**:
+- When Guest `RFLAGS.IF=1` and there is no STI/MOV SS blocking, inject immediately.
+- When the Guest is non-interruptible, save the interrupt to `PendingInterrupt` and enable interrupt-window exiting.
+- If the Guest is in the `HLT` Activity State, it must be reset to `Active` (0), otherwise the Guest will never execute `STI` to enable interrupts.
 
 ---
 
-## 根因 #2：HLT Handler 在 VMX Root Mode 中执行 \_enable() + \_\_halt()
+## Root Cause #2: HLT Handler Executing _enable() + __halt() in VMX Root Mode
 
-### 严重程度：🔴 Critical — 直接导致系统在 VMLAUNCH 后冻结
+### Severity: 🔴 Critical — Directly freezes the system immediately after VMLAUNCH
 
-### 问题演变
+### Issue Evolution
 
-HLT handler 经历了三个版本：
+The HLT handler went through three versions:
 
-| 版本 | 实现 | 问题 |
+| Version | Implementation | Issue |
 |------|------|------|
-| V1（原始） | `VmxAdvanceGuestRip(); break;` | HLT 变成 NOP → 空闲 CPU 100% 忙等待 |
-| V2（第一次修复） | `_enable(); __halt(); _disable();` | 在 VMX root mode 中接收中断 → 致命 |
-| V3（最终修复） | `VmxAdvanceGuestRip(); VmxWrite(ACTIVITY_STATE, 1);` | ✅ 正确 |
+| V1 (Original) | `VmxAdvanceGuestRip(); break;` | HLT became NOP → Idle CPU busy-waits at 100% |
+| V2 (First Fix) | `_enable(); __halt(); _disable();` | Interrupt delivery in VMX root mode → Fatal |
+| V3 (Final Fix) | `VmxAdvanceGuestRip(); VmxWrite(ACTIVITY_STATE, 1);` | ✅ Correct |
 
-### V1 的问题：HLT 变 NOP
+### V1 Issue: HLT to NOP
 
 ```
 Guest idle loop:
     HLT
     ↓ VM-Exit (EXIT_REASON_HLT)
-    ↓ Handler: AdvanceGuestRip → 跳过 HLT
+    ↓ Handler: AdvanceGuestRip → skip HLT
     ↓ VMRESUME
-    ↓ Guest: JMP back to HLT  (idle loop 的循环)
+    ↓ Guest: JMP back to HLT (idle loop cycle)
     ↓ HLT
     ↓ VM-Exit...
-    ↓ (无限循环，每次都是 L1→L0→L1 完整路径)
+    ↓ (Infinite loop, each traversing the L1→L0→L1 path)
 ```
 
-每个空闲 CPU **每秒数万次 VM-Exit**，在嵌套虚拟化下每次耗费数微秒，累积消耗可以 100% 占满 VMware 的 L0 CPU。
+Each idle CPU generated **tens of thousands of VM-Exits per second**. Under nested virtualization, each exit takes several microseconds, which quickly accumulated to occupy 100% of VMware's L0 CPU.
 
-### V2 的问题：VMX Root Mode 中断递送致命
+### V2 Issue: Fatal Interrupt Delivery in VMX Root Mode
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ VM-Exit Handler (运行在 Host Stack, 16KB)            │
+│ VM-Exit Handler (Running on Host Stack, 16KB)        │
 │                                                      │
 │   case EXIT_REASON_HLT:                              │
-│     _enable();    ← CPU 中断打开（VMX root mode！）    │
-│     __halt();     ← CPU 停止等待中断                   │
+│     _enable();    ← CPU interrupts enabled (VMX root mode!) │
+│     __halt();     ← CPU halts, waiting for interrupt │
 │       │                                               │
-│       │  ←── 中断到来！                                │
+│       │  ←── Interrupt arrives!                       │
 │       │                                               │
 │   ┌───▼──────────────────────────────────────────┐   │
-│   │ 中断通过 Host IDT 递送（= Guest IDT）          │   │
-│   │ ISR 运行在 Host Stack 上！                     │   │
+│   │ Interrupt delivered via Host IDT (= Guest IDT)│   │
+│   │ ISR runs on the Host Stack!                  │   │
 │   │                                               │   │
-│   │ 问题 1: Host Stack 只有 16KB，ISR 调用链      │   │
-│   │         可能导致 stack overflow                 │   │
+│   │ Issue 1: Host Stack is only 16KB. The ISR     │   │
+│   │         call chain may cause stack overflow  │   │
 │   │                                               │   │
-│   │ 问题 2: ISR 运行在 VM-Exit handler 的调用     │   │
-│   │         栈帧中间，局部变量被覆盖               │   │
+│   │ Issue 2: ISR runs inside the call stack       │   │
+│   │         frame of the VM-Exit handler,        │   │
+│   │         overwriting local variables           │   │
 │   │                                               │   │
-│   │ 问题 3: ISR 中的 KeInsertQueueDpc/调度器      │   │
-│   │         代码假设正常的 kernel stack             │   │
+│   │ Issue 3: Code in ISR (e.g., KeInsertQueueDpc) │   │
+│   │         assumes a normal kernel stack        │   │
 │   │                                               │   │
-│   │ 问题 4: IRET 回到 __halt() 后面但 stack       │   │
-│   │         frame 可能已损坏                       │   │
+│   │ Issue 4: IRET returns execution to after     │   │
+│   │         __halt(), but the stack frame may    │   │
+│   │         be corrupted                         │   │
 │   └──────────────────────────────────────────────┘   │
 │                                                      │
-│     _disable();   ← 可能永远执行不到这里              │
+│     _disable();   ← Might never be reached            │
 │     break;                                           │
 └─────────────────────────────────────────────────────┘
 ```
 
-**为什么没有任何日志输出**：中断在 VMX root mode 中递送后，ISR 在损坏的栈上执行，系统进入不可恢复状态。WinDbg 的 `DbgPrintEx` 也依赖中断系统正常工作，所以连诊断信息都无法输出。
+**Why there was no log output**: Once an interrupt is delivered in VMX root mode, the ISR executes on a corrupted stack, placing the system in an unrecoverable state. Since WinDbg's `DbgPrintEx` relies on the interrupt system functioning normally, not even diagnostic information could be output.
 
-### V3 最终修复：Guest Activity State = HLT
+### V3 Final Fix: Guest Activity State = HLT
 
 ```c
 case EXIT_REASON_HLT:
@@ -285,121 +289,121 @@ case EXIT_REASON_HLT:
     break;
 ```
 
-**工作原理**：
+**How It Works**:
 
 ```
 Guest idle loop:
     HLT
     ↓ VM-Exit (EXIT_REASON_HLT)
-    ↓ Handler: AdvanceGuestRip, 设置 Activity State = HLT
-    ↓ VMRESUME → CPU 在 Guest 模式进入 HLT 状态
-    ↓ (CPU 真正停止，零功耗等待)
+    ↓ Handler: AdvanceGuestRip, set Activity State = HLT
+    ↓ VMRESUME → CPU enters HLT state in Guest mode
+    ↓ (CPU stops, waiting with zero power consumption)
     ↓
-    ↓ 外部中断到来
+    ↓ External interrupt arrives
     ↓ VM-Exit (EXIT_REASON_EXTERNAL_INT)
-    ↓ Handler: 注入中断到 Guest
-    ↓   → 注入时硬件自动将 Activity State 从 HLT → Active
-    ↓ VMRESUME → Guest 唤醒，ISR 在 Guest kernel stack 上正确执行
+    ↓ Handler: Inject interrupt into Guest
+    ↓   → Hardware automatically changes Activity State from HLT to Active on injection
+    ↓ VMRESUME → Guest wakes up, ISR executes correctly on Guest kernel stack
 ```
 
-**优势**：
-- ✅ CPU 在 **Guest 模式** 中 HLT，中断通过正常的 VM-Exit 路径处理
-- ✅ 不涉及 VMX root mode 中断递送的任何风险
-- ✅ 真正节能——CPU 硬件 HLT，没有 busy-wait
-- ✅ 中断注入时硬件自动唤醒 HLT 状态（Intel SDM Vol. 3C, 26.6.2）
+**Advantages**:
+- ✅ The CPU enters `HLT` in **Guest Mode**, allowing interrupts to be processed via standard VM-Exit paths.
+- ✅ Eliminates any risks associated with VMX root mode interrupt delivery.
+- ✅ True energy efficiency — the CPU hardware actually halts, preventing busy-waiting.
+- ✅ On interrupt injection, hardware automatically wakes the CPU from the HLT state (Intel SDM Vol. 3C, Section 26.6.2).
 
 ---
 
-## 辅助优化 #3：I/O Bitmap 消除 UNCONDITIONAL\_IO\_EXIT 风暴
+## Optimization #3: Neutralizing UNCONDITIONAL_IO_EXIT Storm via I/O Bitmap
 
-### 严重程度：🟡 Medium — 显著减少 VM-Exit 数量
+### Severity: 🟡 Medium — Significantly reduces the number of VM-Exits
 
-### 问题
+### Issue
 
-VMware 通过 must-be-1 bits 强制开启 `UNCONDITIONAL_IO_EXIT`，导致 **每条 IN/OUT 指令**（包括 PCI 配置、ACPI timer 读取、串口等）都触发 VM-Exit。虽然 I/O handler 能正确处理，但每次 exit 在嵌套虚拟化下耗费数微秒。
+VMware forces the `UNCONDITIONAL_IO_EXIT` control bit to be 1, causing **every IN/OUT instruction** (including PCI configuration, ACPI timer reads, serial port accesses, etc.) to trigger a VM-Exit. Although the I/O handler processed these correctly, each exit cost several microseconds under nested virtualization.
 
-### 修复
+### Resolution
 
-利用 Intel SDM 的规则：**当 `USE_IO_BITMAPS` 和 `UNCONDITIONAL_IO_EXIT` 同时设置时，I/O Bitmap 优先**。
+Utilized the rule in the Intel SDM: **When both `USE_IO_BITMAPS` and `UNCONDITIONAL_IO_EXIT` are set, the I/O Bitmaps take precedence.**
 
 ```c
-/* vmx.h — VMX_CPU_CONTEXT 中添加 */
-PVOID       IoBitmapAVa;    /* 4KB, 覆盖端口 0x0000-0x7FFF */
+/* Add to VMX_CPU_CONTEXT in vmx.h */
+PVOID       IoBitmapAVa;    /* 4KB, covers ports 0x0000-0x7FFF */
 ULONG64     IoBitmapAPa;
-PVOID       IoBitmapBVa;    /* 4KB, 覆盖端口 0x8000-0xFFFF */
+PVOID       IoBitmapBVa;    /* 4KB, covers ports 0x8000-0xFFFF */
 ULONG64     IoBitmapBPa;
 
-/* vmx_init.c — VmxSetupVmcs 中配置 */
+/* Configure in VmxSetupVmcs in vmx_init.c */
 RequestedProcBased |= PROC_BASED_USE_IO_BITMAPS;
-VmxWrite(VMCS_CTRL_IO_BITMAP_A, CpuCtx->IoBitmapAPa);  /* 全零 = 不触发 exit */
+VmxWrite(VMCS_CTRL_IO_BITMAP_A, CpuCtx->IoBitmapAPa);  /* All zeros = does not trigger exit */
 VmxWrite(VMCS_CTRL_IO_BITMAP_B, CpuCtx->IoBitmapBPa);
 ```
 
-Bitmap 全零 → 没有任何端口触发 VM-Exit → 完全中和了 `UNCONDITIONAL_IO_EXIT`。
+An all-zero Bitmap means no I/O ports trigger a VM-Exit, effectively neutralizing the `UNCONDITIONAL_IO_EXIT` enforcement.
 
 ---
 
-## 辅助优化 #4：CR3 Load Exit / MOV DR Exit / Exception Bitmap 优化
+## Optimization #4: CR3 Load Exit / MOV DR Exit / Exception Bitmap Optimizations
 
-### 严重程度：🟢 Low — 减少不必要的 VM-Exit
+### Severity: 🟢 Low — Minimizes unnecessary VM-Exits
 
-| 优化项 | 原因 | 效果 |
+| Optimization | Reason | Impact |
 |--------|------|------|
-| 禁用 `CR3_LOAD_EXIT` | 每次进程上下文切换（`SwapContext`）都会写 CR3 → VM-Exit | 每秒减少数千次 exit |
-| 禁用 `MOV_DR_EXIT` | `SwapContext` 保存/恢复 DR0-DR7 → 每次上下文切换多次 exit | 每秒减少数千次 exit |
-| Exception Bitmap 设为 0 | 不需要拦截任何异常（#BP/#DB 在调试功能未启用时无用） | 消除不必要的异常 exit |
+| Disable `CR3_LOAD_EXIT` | Every process context switch (`SwapContext`) writes to CR3 → triggers VM-Exit | Reduces thousands of exits per second |
+| Disable `MOV_DR_EXIT` | `SwapContext` saves/restores DR0-DR7 → multiple exits per context switch | Reduces thousands of exits per second |
+| Set Exception Bitmap to 0 | No need to intercept exceptions (#BP/#DB are unused when debugging features are disabled) | Eliminates unnecessary exception exits |
 
-这些优化单独不足以解决 hang 问题，但在嵌套虚拟化环境下能显著降低 VM-Exit 总量，改善系统响应性。
-
----
+While these optimizations alone could not resolve the hang, they significantly reduced the total volume of VM-Exits in the nested virtualization environment, improving overall system responsiveness.
 
 ---
 
-# Part 2：EPT Hook 引擎与驱动框架 Bug
+---
 
-> 以下 Bug 在嵌套虚拟化卡住问题之前修复（2026-04-11），涉及 EPT Hook 引擎的正确性和驱动框架的健壮性。
+# Part 2: EPT Hook Engine & Driver Framework Bugs
+
+> The following bugs were resolved prior to fixing the nested virtualization hang (on 2026-04-11). They concern the correctness of the EPT Hook engine and the robustness of the driver framework.
 
 ---
 
-## Bug #A：Trampoline 指令截断导致 #UD → BSOD
+## Bug #A: Trampoline Instruction Truncation Leading to #UD → BSOD
 
-### 严重程度：🔴 Critical
+### Severity: 🔴 Critical
 
-### 问题描述
+### Issue Description
 
-`EptHookFunction()` 在构建 trampoline（跳板）时，需要从目标函数头部"偷"走至少 12 字节（`48 B8 [imm64] FF E0` = MOV RAX, addr; JMP RAX），然后将这些原始字节复制到 trampoline 中，trampoline 末尾再 JMP 回原始函数 +12 的位置。
+When building a trampoline, `EptHookFunction()` needs to "steal" at least 12 bytes from the head of the target function (e.g., `48 B8 [imm64] FF E0` = `MOV RAX, addr; JMP RAX`), copy these original bytes to the trampoline, and then append a JMP at the end of the trampoline back to the target function +12 bytes.
 
-**原始代码**硬编码复制 14 字节：
+The original code hardcoded a 14-byte copy:
 
 ```c
-// 原始代码（有bug）
-Hook->OriginalBytesSize = 14;  // 硬编码
+// Original code (buggy)
+Hook->OriginalBytesSize = 14;  // Hardcoded
 RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, 14);
 ```
 
-x86-64 指令是**变长的**（1~15 字节），14 字节很可能恰好切断某条指令的中间：
+x86-64 instructions are variable-length (1–15 bytes). Copying exactly 14 bytes is highly likely to cut an instruction in half:
 
 ```
-目标函数前缀:
-  48 89 5C 24 08    MOV [RSP+8], RBX     (5 字节)
-  48 89 6C 24 10    MOV [RSP+10h], RBP   (5 字节)
-  48 89 74 24 18    MOV [RSP+18h], RSI   (5 字节)  ← 第14字节在这条指令中间!
+Target function prefix:
+  48 89 5C 24 08    MOV [RSP+8], RBX     (5 bytes)
+  48 89 6C 24 10    MOV [RSP+10h], RBP   (5 bytes)
+  48 89 74 24 18    MOV [RSP+18h], RSI   (5 bytes)  ← The 14th byte lies inside this instruction!
 ```
 
-Trampoline 会执行截断的 `48 89 74` 然后跳到垃圾字节 → `#UD`（Undefined Opcode）异常 → 内核态 → **BSOD**。
+The trampoline would execute the truncated `48 89 74` and then branch into garbage bytes, leading to an `#UD` (Undefined Opcode) exception in kernel mode, resulting in a **BSOD**.
 
-### 修复方案
+### Resolution
 
-1. **实现 `EptGetInstructionLength()` 函数**：一个最小化的 x64 指令长度解码器（~300 行），覆盖内核函数前缀中常见的所有指令：
-   - 前缀处理：Legacy prefixes（LOCK/REP/段覆盖）、66h/67h、REX（40h~4Fh）
-   - 单字节操作码：PUSH/POP reg、MOV reg,imm、JMP/CALL rel、ALU 操作等
-   - 双字节操作码（0Fh）：Jcc rel32、MOVZX/MOVSX、CMOVcc、SETcc 等
-   - 完整的 ModRM + SIB + Displacement 解码
+1. **Implemented the `EptGetInstructionLength()` function**: A minimal x64 instruction length decoder (~300 lines) covering common prefix instructions encountered in kernel functions:
+   - Prefix handling: Legacy prefixes (LOCK/REP/Segment overrides), `66h`/`67h`, and REX (`40h`–`4Fh`).
+   - Single-byte opcodes: `PUSH`/`POP` reg, `MOV` reg, imm, `JMP`/`CALL` rel, ALU operations, etc.
+   - Double-byte opcodes (0Fh): `Jcc` rel32, `MOVZX`/`MOVSX`, `CMOVcc`, `SETcc`, etc.
+   - Complete decoding of ModRM + SIB + Displacement.
 
-2. **修改 trampoline 构建逻辑**：
+2. **Modified trampoline construction logic**:
 
 ```c
-// 修复后代码
+// Fixed Code
 {
     ULONG TotalLen = 0;
     PUCHAR Code = (PUCHAR)TargetVa;
@@ -412,165 +416,165 @@ Trampoline 会执行截断的 `48 89 74` 然后跳到垃圾字节 → `#UD`（Un
         }
         TotalLen += InsnLen;
     }
-    Hook->OriginalBytesSize = TotalLen;  // 可能是 12, 13, 14, 15...
+    Hook->OriginalBytesSize = TotalLen;  // Could be 12, 13, 14, 15...
 }
 RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, Hook->OriginalBytesSize);
 ```
 
-3. **追加：OriginalBytes 缓冲区溢出保护**
+3. **Added `OriginalBytes` buffer overflow protection**:
 
-`OriginalBytes[16]` → `OriginalBytes[32]`（理论最大 TotalLen = 11 + 15 = 26，32 字节提供余量），并在循环中添加越界检查。
+Expanded `OriginalBytes[16]` to `OriginalBytes[32]` (theoretical maximum `TotalLen` is 11 + 15 = 26, so 32 bytes provides a safe margin) and added out-of-bounds checks inside the loop.
 
-4. **同步修复 AMD-V 侧 (`npt.c`)**：`NptHookFunction()` 存在相同问题，已同步修复。
+4. **Synchronized fix on the AMD-V side (`npt.c`)**: `NptHookFunction()` suffered from the same issue and was fixed in the same manner.
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/ept.c` | +`EptGetInstructionLength()`（~300 行）；修改 trampoline 构建逻辑；+越界保护 |
-| `driver/ept.h` | +`EptGetInstructionLength` 声明；`OriginalBytes[16]` → `OriginalBytes[32]` |
-| `driver/npt.c` | 硬编码 14 字节 → 指令边界对齐 + 越界保护（与 ept.c 一致） |
+| `driver/ept.c` | Added `EptGetInstructionLength()` (~300 lines); modified trampoline construction logic; added out-of-bounds protection. |
+| `driver/ept.h` | Declared `EptGetInstructionLength`; expanded `OriginalBytes[16]` to `OriginalBytes[32]`. |
+| `driver/npt.c` | Replaced 14-byte hardcoding with instruction boundary alignment + out-of-bounds protection (consistent with `ept.c`). |
 
 ---
 
-## Bug #B：HandleMtf 多核竞争条件导致无限 EPT Violation 循环
+## Bug #B: HandleMtf Multi-Core Race Condition Leading to Infinite EPT Violation Loop
 
-### 严重程度：🔴 Critical
+### Severity: 🔴 Critical
 
-### 问题描述
+### Issue Description
 
-EPT Hook 引擎使用 **execute-only** 页面实现隐藏 hook：
-- 静息状态：hook 页面 `R=0, W=0, X=1`（只能执行，不能读写）
-- 数据访问（如 PatchGuard 扫描）：EPT Violation → 切换到原始页面 `R=1, W=1, X=0` → 启用 MTF → 一条指令后 MTF 触发 → 恢复为 hook 页面
+The EPT Hook engine implements hidden hooks using **execute-only** pages:
+- **Resting state**: Hooked page is marked `R=0, W=0, X=1` (execute-only, no read/write access).
+- **Data access** (e.g., PatchGuard scan): Triggers an EPT Violation → switches to the original page (`R=1, W=1, X=0`) → enables Monitor Trap Flag (MTF) → MTF triggers after one instruction → restores the hooked page.
 
-**原始 `HandleMtf` 代码**在 MTF 触发时**恢复所有 1024 个 hook**：
+The original `HandleMtf` code restored all 1024 hooks when MTF triggered:
 
 ```c
-// 原始代码（有bug）
+// Original code (buggy)
 static BOOLEAN HandleMtf(PGUEST_CONTEXT Ctx)
 {
-    // 遍历所有 hook，全部恢复
+    // Loop through all hooks and restore them all
     for (i = 0; i < MAX_EPT_HOOKS; i++) {
         if (g_EptHookState.Hooks[i].Active && g_EptHookState.Hooks[i].TargetPte) {
             Pte->Read = 0;
             Pte->Write = 0;
-            // ...恢复 hook 页面...
+            // ...restore hooked page...
         }
     }
 }
 ```
 
-**多核竞争场景**：
+**Multi-Core Race Condition Scenario**:
 
 ```
-时间线：
-  T1: CPU 0 → Hook A 的 EPT Violation → 切换到 R=1,W=1 → 启用 MTF
-  T2: CPU 1 → Hook B 的 EPT Violation → 切换到 R=1,W=1 → 启用 MTF
-  T3: CPU 0 → MTF 触发 → 恢复 ALL hooks（包括 Hook B！）→ Hook B 变回 R=0,W=0
-  T4: CPU 1 → 还没执行完那条数据访问指令 → 再次 EPT Violation（Hook B）
-  T5: CPU 1 → 切换回 R=1,W=1 → 启用 MTF
-  T6: CPU 0 → 可能又有新的 MTF → 再次恢复 ALL hooks...
-  → 无限循环！CPU 1 永远无法完成那条指令
+Timeline:
+  T1: CPU 0 → EPT Violation for Hook A → Switches to R=1, W=1 → Enables MTF
+  T2: CPU 1 → EPT Violation for Hook B → Switches to R=1, W=1 → Enables MTF
+  T3: CPU 0 → MTF triggers → Restores ALL hooks (including Hook B!) → Hook B goes back to R=0, W=0
+  T4: CPU 1 → Has not finished executing the data access instruction → EPT Violation again (Hook B)
+  T5: CPU 1 → Switches back to R=1, W=1 → Enables MTF
+  T6: CPU 0 → Possibly another MTF triggers → Restores ALL hooks again...
+  → Infinite Loop! CPU 1 is permanently blocked from completing that single instruction.
 ```
 
-### 修复方案
+### Resolution
 
-引入 **per-CPU 跟踪机制**，每个 CPU 只恢复**它自己松弛的那个页面**上的 hook：
+Introduced a **per-CPU tracking mechanism**, ensuring each CPU only restores hooks on the specific physical page it previously relaxed:
 
 ```c
-// 每个 CPU 槽位记录它当前松弛了哪个物理页面
+// Each CPU slot records which physical page it has relaxed
 static volatile ULONG64 g_MtfRelaxedPagePa[64] = { 0 };
 
-// HandleEptViolation 中记录当前 CPU 松弛的页面
+// Track the relaxed page for the current CPU in HandleEptViolation
 EptMtfTrackRelaxedPage(Hook->TargetPhysicalAddr);
 
-// HandleMtf 改为只恢复当前 CPU 松弛的页面
+// Modify HandleMtf to only restore the page relaxed by the current CPU
 RelaxedPa = EptMtfGetAndClearRelaxedPage();
 for (i = 0; i < MAX_EPT_HOOKS; i++) {
     if (RelaxedPa != 0 &&
         g_EptHookState.Hooks[i].TargetPhysicalAddr != RelaxedPa) {
-        continue;  // ★ 跳过不是当前 CPU 松弛的页面
+        continue;  // ★ Skip pages that were not relaxed by the current CPU
     }
-    // ...恢复 hook...
+    // ...restore hook...
 }
 ```
 
-**安全兜底**：如果 `RelaxedPa == 0`（理论上不会发生），回退到恢复所有 hook。
+**Safety Fallback**: If `RelaxedPa == 0` (which theoretically should not occur), fall back to restoring all hooks.
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/ept.c` | +`g_MtfRelaxedPagePa[64]`；+`EptMtfTrackRelaxedPage()`；+`EptMtfGetAndClearRelaxedPage()` |
-| `driver/ept.h` | +上述两个函数的声明 |
-| `driver/vmx_exit.c` | `HandleMtf` 改为查询 per-CPU 跟踪数组，只恢复特定页面 |
+| `driver/ept.c` | Added `g_MtfRelaxedPagePa[64]`, `EptMtfTrackRelaxedPage()`, and `EptMtfGetAndClearRelaxedPage()`. |
+| `driver/ept.h` | Declared the two tracking functions above. |
+| `driver/vmx_exit.c` | Modified `HandleMtf` to query the per-CPU tracking array and only restore the targeted page. |
 
 ---
 
-## Bug #C：EptSplitLargePage 后缺少 INVEPT 导致 EPT Misconfiguration
+## Bug #C: EPT Misconfiguration Due to Missing INVEPT After EptSplitLargePage
 
-### 严重程度：🔴 Critical
+### Severity: 🔴 Critical
 
-### 问题描述
+### Issue Description
 
-`EptHookFunction()` 在安装 hook 前需要将 2MB 大页拆分为 512 个 4KB 页。**原始代码**在拆分后没有刷新 EPT TLB：
+Before installing a hook, `EptHookFunction()` must split a 2MB large page into 512 4KB pages. The original code modified the page tables without invalidating the EPT TLB afterwards:
 
 ```c
-// 原始代码（有bug）
+// Original code (buggy)
 EptSplitLargePage(TargetPa);
-// ← 缺少 INVEPT！
+// ← Missing INVEPT!
 Pte = EptGetPteForPhysicalAddress(TargetPa);
 ```
 
-**后果**：
+**Consequences**:
 
 ```
-CPU 0:  执行 EptSplitLargePage()
-        → 修改 PDE: 2MB 大页条目 → 指向新的 4KB 页表
+CPU 0:  Executes EptSplitLargePage()
+        → Modifies PDE: 2MB large page entry → points to new 4KB page table
         
-CPU 1-N: TLB 中仍然缓存着旧的 2MB PDE
-        → 下一次内存访问时，CPU 用旧的 2MB PDE 格式解释新数据
-        → PDE 格式不匹配新的 PT → EPT Misconfiguration
+CPU 1-N: TLB still caches the old 2MB PDE
+        → On subsequent memory access, CPU interprets new structure using the old 2MB PDE layout
+        → PDE format mismatch with the new page table layout → EPT Misconfiguration
         → VMX shutdown → BSOD
 ```
 
-EPT Misconfiguration（页表结构错误）不可恢复，直接导致 VMX 关闭。
+An EPT Misconfiguration is fatal and unrecoverable, leading directly to a VMX shutdown.
 
-### 修复方案
+### Resolution
 
-在 `EptSplitLargePage()` 调用后**立即**执行 `EptInvalidateFromGuest()`：
+Immediately call `EptInvalidateFromGuest()` after executing `EptSplitLargePage()`:
 
 ```c
 EptSplitLargePage(TargetPa);
-EptInvalidateFromGuest();  // ← 新增：刷新所有 CPU 的 EPT TLB
+EptInvalidateFromGuest();  // ← New: Invalidate EPT TLB on all CPUs
 Pte = EptGetPteForPhysicalAddress(TargetPa);
 ```
 
-> `EptInvalidateFromGuest()` 使用 generation counter 机制（`InterlockedIncrement`），每个 CPU 在下一次 VM-Exit 时检查并执行 INVEPT。
+> `EptInvalidateFromGuest()` utilizes a generation counter mechanism (`InterlockedIncrement`). Each CPU checks this counter on its next VM-Exit and executes an `INVEPT` if needed.
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/ept.c` | `EptHookFunction()` 中 `EptSplitLargePage()` 后添加 `EptInvalidateFromGuest()` |
+| `driver/ept.c` | Added `EptInvalidateFromGuest()` after `EptSplitLargePage()` inside `EptHookFunction()`. |
 
 ---
 
-## Bug #D：IOCTL 分发中 IoStatus.Information 未初始化
+## Bug #D: Uninitialized IoStatus.Information in IOCTL Dispatch
 
-### 严重程度：🟡 Medium
+### Severity: 🟡 Medium
 
-### 问题描述
+### Issue Description
 
-`DispatchDeviceControl` 在 `METHOD_BUFFERED` 模式下处理 IOCTL 请求。`Irp->IoStatus.Information` 告诉 I/O 管理器应复制多少字节回用户态。
+`DispatchDeviceControl` processes IOCTL requests under the `METHOD_BUFFERED` mode. `Irp->IoStatus.Information` informs the I/O Manager how many bytes of data to copy back to user mode.
 
-**原始代码**没有在分发前初始化该字段：
+The original code did not initialize this field before dispatching the request:
 
 ```c
-// 原始代码（有bug）
+// Original code (buggy)
 IoStack = IoGetCurrentIrpStackLocation(Irp);
 IoControlCode = IoStack->Parameters.DeviceIoControl.IoControlCode;
-// ← 没有初始化 Irp->IoStatus.Information
+// ← Irp->IoStatus.Information is not initialized
 
 switch (IoControlCode) {
     case IOCTL_VMX_INIT:
@@ -578,104 +582,104 @@ switch (IoControlCode) {
         break;
     default:
         Status = STATUS_INVALID_DEVICE_REQUEST;
-        break;  // ← Information 保持未初始化的脏值！
+        break;  // ← Information remains an uninitialized dirty value!
 }
 ```
 
-**问题**：
-- 失败路径或 `default` 分支中 `Information` 保持未初始化的脏值
-- I/O 管理器根据脏值复制数据 → **内核信息泄露** 或 **越界复制 → BSOD**
+**Issues**:
+- In error paths or the `default` case, `Information` remains an uninitialized dirty value.
+- The I/O Manager copies bytes based on this dirty value, risking either **kernel information disclosure** or an **out-of-bounds copy → BSOD**.
 
-### 修复方案
+### Resolution
 
 ```c
-Irp->IoStatus.Information = 0;  // ← 在 switch 前统一初始化
+Irp->IoStatus.Information = 0;  // ← Unified initialization before the switch statement
 
 switch (IoControlCode) {
     // ...
 }
 ```
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/vmxdrv.c` | `DispatchDeviceControl` 中 switch 前添加 `Irp->IoStatus.Information = 0` |
+| `driver/vmxdrv.c` | Added `Irp->IoStatus.Information = 0` before the switch block in `DispatchDeviceControl`. |
 
 ---
 
-# 总览
+# Overview
 
-## 全部修复方案汇总
+## Summary of All Resolutions
 
-### Part 1：嵌套虚拟化卡住问题
+### Part 1: Nested Virtualization Hang
 
-| # | 修复 | 解决的问题 | 影响 |
+| # | Resolution | Resolved Issue | Impact |
 |---|------|-----------|------|
-| 1 | External Interrupt 重注入 | IPI 丢失 → CPU 间 DPC 无法递送 | 🔴 主因：CPU 1 初始化卡住 |
-| 2 | HLT → Guest Activity State | VMX root mode 中断递送 → 系统崩溃 | 🔴 主因：VMLAUNCH 后系统冻结 |
-| 3 | Interrupt Window 注入 pending 中断 | 延迟中断无法递送 | 🟠 配合修复 #1 |
-| 4 | NMI handler HLT 唤醒 | NMI 无法唤醒 HLT 状态 Guest | 🟠 配合修复 #2 |
-| 5 | I/O Bitmap 全零 | UNCONDITIONAL_IO_EXIT 风暴 | 🟡 性能优化 |
-| 6 | 禁用 CR3 Load Exit | 上下文切换 VM-Exit 风暴 | 🟢 性能优化 |
-| 7 | 禁用 MOV DR Exit | DR 访问 VM-Exit 风暴 | 🟢 性能优化 |
-| 8 | Exception Bitmap = 0 | 不必要的异常拦截 | 🟢 性能优化 |
+| 1 | External Interrupt Re-injection | IPI loss → inter-processor DPCs could not be delivered | 🔴 Primary Cause: CPU 1 initialization hang |
+| 2 | HLT → Guest Activity State | Interrupt delivery in VMX root mode → system crash | 🔴 Primary Cause: System froze after VMLAUNCH |
+| 3 | Interrupt Window injection of pending interrupts | Deferred interrupts could not be delivered | 🟠 Co-resolution for Fix #1 |
+| 4 | NMI handler HLT wake-up | NMI cannot wake Guest from HLT state | 🟠 Co-resolution for Fix #2 |
+| 5 | All-zero I/O Bitmap | UNCONDITIONAL_IO_EXIT storm | 🟡 Performance optimization |
+| 6 | Disable CR3 Load Exit | Context switch VM-Exit storm | 🟢 Performance optimization |
+| 7 | Disable MOV DR Exit | DR access VM-Exit storm | 🟢 Performance optimization |
+| 8 | Exception Bitmap = 0 | Unnecessary exception interception | 🟢 Performance optimization |
 
-**因果链**：
+**Causal Chain**:
 
 ```
-修复 #1（中断重注入）解决了：
-  IPI 不再丢失 → DPC 正确派发 → CPU 1 能收到初始化 DPC → VMLAUNCH 成功
+Fix #1 (Interrupt Re-injection) resolved:
+  IPIs no longer lost → DPCs dispatched correctly → CPU 1 receives initialization DPC → VMLAUNCH succeeds
 
-修复 #2（HLT Activity State）解决了：
-  不再在 VMX root mode 递送中断 → Host stack 不被破坏 →
-  VM-Exit handler 正常运行 → 中断正确注入回 Guest →
-  调度器/定时器/设备驱动正常工作 → 系统不再冻结
+Fix #2 (HLT Activity State) resolved:
+  Interrupts no longer delivered in VMX root mode → Host stack remains intact →
+  VM-Exit handler runs normally → Interrupts injected back to the Guest correctly →
+  Scheduler/Timers/Device Drivers function normally → System no longer freezes
 ```
 
-### Part 2：EPT Hook 引擎与驱动框架 Bug
+### Part 2: EPT Hook Engine & Driver Framework Bugs
 
-| # | 修复 | 解决的问题 | 影响 |
+| # | Resolution | Resolved Issue | Impact |
 |---|------|-----------|------|
-| A | Trampoline 指令边界对齐 | 截断指令 → #UD → BSOD | 🔴 hook 时必现崩溃 |
-| B | HandleMtf per-CPU 跟踪 | 多核 MTF 竞争 → 无限 EPT Violation 循环 | 🔴 多核 hook 时死锁 |
-| C | EptSplitLargePage 后 INVEPT | 过时 TLB → EPT Misconfiguration → BSOD | 🔴 首次 hook 时概率崩溃 |
-| D | IoStatus.Information 初始化 | 脏值 → 信息泄露或越界复制 | 🟡 IOCTL 失败时触发 |
+| A | Trampoline instruction boundary alignment | Truncated instructions → #UD → BSOD | 🔴 Fatal crash during hook |
+| B | HandleMtf per-CPU tracking | Multi-core MTF race → infinite EPT Violation loop | 🔴 Deadlock during multi-core hook |
+| C | INVEPT after EptSplitLargePage | Outdated TLB → EPT Misconfiguration → BSOD | 🔴 Random crash during initial hook |
+| D | Initialize IoStatus.Information | Dirty value → information disclosure or out-of-bounds copy | 🟡 Triggered when IOCTL fails |
 
 ---
 
-## 完整修改文件清单
+## Complete List of Modified Files
 
-| 文件 | 来源 | 修改内容 |
+| File | Source | Changes |
 |------|------|---------|
-| `driver/vmx.h` | Part 1 | `VMX_CPU_CONTEXT` 添加 `IoBitmapAVa/Pa`、`IoBitmapBVa/Pa` 字段 |
-| `driver/vmx_init.c` | Part 1 | `VmxAllocateCpuContext()`: 分配 I/O Bitmap A/B（各 4KB，全零） |
-| `driver/vmx_init.c` | Part 1 | `VmxFreeCpuContext()`: 释放 I/O Bitmap A/B |
-| `driver/vmx_init.c` | Part 1 | `VmxSetupVmcs()`: 添加 `PROC_BASED_USE_IO_BITMAPS`，写入 I/O Bitmap 物理地址 |
-| `driver/vmx_init.c` | Part 1 | `VmxSetupVmcs()`: 禁用 `CR3_LOAD_EXIT`、`MOV_DR_EXIT`，Exception Bitmap=0 |
-| `driver/vmx_init.c` | Part 1 | `VmxInitialize()` 循环后添加直接 `DbgPrintEx` 诊断输出 |
-| `driver/vmx_exit.c` | Part 1 | `EXIT_REASON_HLT`: V1(NOP)→V2(`__halt()`)→V3(Activity State=HLT) |
-| `driver/vmx_exit.c` | Part 1 | `EXIT_REASON_EXTERNAL_INT`: 丢弃→重注入，含 HLT 唤醒逻辑 |
-| `driver/vmx_exit.c` | Part 1 | `EXIT_REASON_INT_WINDOW`: 添加 pending interrupt 注入 |
-| `driver/vmx_exit.c` | Part 1 | NMI handler: 延迟路径添加 HLT Activity State 唤醒 |
-| `driver/vmx_exit.c` | Part 2 | `HandleMtf` 改为 per-CPU 跟踪，只恢复当前 CPU 松弛的页面 |
-| `driver/ept.c` | Part 2 | +`EptGetInstructionLength()`（~300 行 x64 指令解码器） |
-| `driver/ept.c` | Part 2 | 修改 trampoline 构建逻辑：硬编码 14 字节 → 指令边界对齐 ≥12 字节 |
-| `driver/ept.c` | Part 2 | +`g_MtfRelaxedPagePa[64]` per-CPU 跟踪数组及辅助函数 |
-| `driver/ept.c` | Part 2 | `HandleEptViolation` 两条路径添加 `EptMtfTrackRelaxedPage` 调用 |
-| `driver/ept.c` | Part 2 | `EptHookFunction()` 中 `EptSplitLargePage()` 后添加 `EptInvalidateFromGuest()` |
-| `driver/ept.h` | Part 2 | +`EptGetInstructionLength` 声明；`OriginalBytes[16]` → `OriginalBytes[32]` |
-| `driver/ept.h` | Part 2 | +`EptMtfTrackRelaxedPage` 和 `EptMtfGetAndClearRelaxedPage` 声明 |
-| `driver/npt.c` | Part 2 | 硬编码 14 字节 → 指令边界对齐 + 越界保护（与 ept.c 一致） |
-| `driver/vmxdrv.c` | Part 2 | `DispatchDeviceControl` 中 switch 前添加 `Irp->IoStatus.Information = 0` |
+| `driver/vmx.h` | Part 1 | Added `IoBitmapAVa/Pa` and `IoBitmapBVa/Pa` fields to `VMX_CPU_CONTEXT` |
+| `driver/vmx_init.c` | Part 1 | `VmxAllocateCpuContext()`: Allocate I/O Bitmaps A and B (4KB each, all zeros) |
+| `driver/vmx_init.c` | Part 1 | `VmxFreeCpuContext()`: Free I/O Bitmaps A and B |
+| `driver/vmx_init.c` | Part 1 | `VmxSetupVmcs()`: Enable `PROC_BASED_USE_IO_BITMAPS` and write physical addresses of I/O Bitmaps |
+| `driver/vmx_init.c` | Part 1 | `VmxSetupVmcs()`: Disabled `CR3_LOAD_EXIT` and `MOV_DR_EXIT`, set Exception Bitmap to 0 |
+| `driver/vmx_init.c` | Part 1 | `VmxInitialize()`: Added direct `DbgPrintEx` diagnostics after the initialization loop |
+| `driver/vmx_exit.c` | Part 1 | `EXIT_REASON_HLT`: Refactored V1 (NOP) → V2 (`__halt()`) → V3 (Activity State = HLT) |
+| `driver/vmx_exit.c` | Part 1 | `EXIT_REASON_EXTERNAL_INT`: Refactored discard → re-injection, including HLT wake-up logic |
+| `driver/vmx_exit.c` | Part 1 | `EXIT_REASON_INT_WINDOW`: Added pending interrupt injection |
+| `driver/vmx_exit.c` | Part 1 | NMI handler: Added HLT Activity State wake-up in deferred paths |
+| `driver/vmx_exit.c` | Part 2 | `HandleMtf`: Modified to use per-CPU tracking to only restore pages relaxed by the current CPU |
+| `driver/ept.c` | Part 2 | Added `EptGetInstructionLength()` (~300-line x64 instruction decoder) |
+| `driver/ept.c` | Part 2 | Modified trampoline construction: replaced 14-byte hardcoding with instruction boundary alignment (≥12 bytes) |
+| `driver/ept.c` | Part 2 | Added `g_MtfRelaxedPagePa[64]` per-CPU tracking array and helper functions |
+| `driver/ept.c` | Part 2 | `HandleEptViolation`: Added `EptMtfTrackRelaxedPage` calls in both execution paths |
+| `driver/ept.c` | Part 2 | `EptHookFunction()`: Added `EptInvalidateFromGuest()` after `EptSplitLargePage()` |
+| `driver/ept.h` | Part 2 | Declared `EptGetInstructionLength`; expanded `OriginalBytes[16]` to `OriginalBytes[32]` |
+| `driver/ept.h` | Part 2 | Declared `EptMtfTrackRelaxedPage` and `EptMtfGetAndClearRelaxedPage` |
+| `driver/npt.c` | Part 2 | Replaced 14-byte hardcoding with instruction boundary alignment + out-of-bounds protection (consistent with `ept.c`) |
+| `driver/vmxdrv.c` | Part 2 | `DispatchDeviceControl`: Added `Irp->IoStatus.Information = 0` before switch |
 
 ---
 
-## 编译兼容性说明
+## Compilation Compatibility Notes
 
-本项目使用 **WDK 7600**（Windows 7 DDK），其 MSVC 编译器要求 **C89 风格**的变量声明（所有变量必须在代码块开头声明，不能在语句之间声明）。
+This project uses the **WDK 7600** (Windows 7 DDK), whose MSVC compiler mandates **C89-style** variable declarations (all variables must be declared at the beginning of a block, not interspersed with statements).
 
-`EptGetInstructionLength()` 函数的所有局部变量已移至函数开头：
+All local variables in the `EptGetInstructionLength()` function have been moved to the beginning of the function:
 
 ```c
 ULONG EptGetInstructionLength(PUCHAR Code)
@@ -691,73 +695,73 @@ ULONG EptGetInstructionLength(PUCHAR Code)
     BOOLEAN HasModRM = FALSE;
     ULONG   ImmSize = 0;
     UCHAR   b, Op2, Group, SubOp, SIB, SibBase, EffRM;
-    // ...函数体...
+    // ...function body...
 }
 ```
 
-所有其他修改（per-CPU 数组、I/O Bitmap、中断注入等）都不涉及 C89 兼容性问题。
+All other modifications (per-CPU arrays, I/O Bitmaps, interrupt injection, etc.) are free of C89 compatibility issues.
 
 ---
 
-## 关键经验教训
+## Key Lessons Learned
 
-### 1. Blue Pill Hypervisor 中的中断处理是核心中的核心
+### 1. Interrupt Handling is the absolute core of a Blue Pill Hypervisor
 
-在 Blue Pill 架构下，Guest 就是原始 OS。**所有中断都必须正确递送回 Guest**，包括：
-- 时钟中断（调度器依赖）
-- IPI（多 CPU 通信依赖）
-- 设备中断（驱动依赖）
-- NMI（系统检查依赖）
+Under the Blue Pill architecture, the Guest is the original OS. **All interrupts must be correctly delivered back to the Guest**, including:
+- Timer interrupts (critical for the scheduler)
+- IPIs (critical for inter-processor communication)
+- Device interrupts (critical for driver operation)
+- NMIs (critical for system diagnostic checks)
 
-任何一类中断被丢弃，都会导致系统功能异常或完全冻结。
+If any type of interrupt is discarded, it leads to malfunctioning or a complete system freeze.
 
-### 2. VMX Root Mode 中不要递送中断
+### 2. Never Deliver Interrupts in VMX Root Mode
 
-VMX root mode 运行在专用的 Host stack（通常很小）上，通过 Host IDT 递送中断会导致：
-- ISR 在错误的栈上执行
-- 可能的 stack overflow
-- VM-Exit handler 执行流被破坏
-- 不可恢复的系统状态
+VMX root mode runs on a dedicated Host stack (which is typically very small). Delivering interrupts through the Host IDT causes:
+- The ISR to execute on the wrong stack
+- Potential stack overflows
+- Disruption of the VM-Exit handler's execution flow
+- Unrecoverable system states
 
-正确的做法是利用 Intel VT-x 提供的硬件机制（VM-Entry injection、Activity State、interrupt-window exiting）在 **Guest 模式** 中递送中断。
+The correct approach is to utilize the hardware mechanisms provided by Intel VT-x (`VM-Entry injection`, `Activity State`, `interrupt-window exiting`) to deliver interrupts in **Guest mode**.
 
-### 3. 嵌套虚拟化环境下的 must-be-1 bits 必须全面处理
+### 3. The must-be-1 Bits in Nested Virtualization Must Be Fully Handled
 
-VMware 通过 `IA32_VMX_PROCBASED_CTLS` 等 MSR 强制开启的控制位不是可选的——它们**必须被正确处理**。对于每个 forced-on 的 VM-Exit 源，handler 必须有正确的实现，否则就是一颗定时炸弹。
+Control bits forced to 1 by VMware via MSRs like `IA32_VMX_PROCBASED_CTLS` are not optional — **they must be handled correctly**. For every forced-on VM-Exit source, the handler must implement correct behavior; otherwise, it is a ticking time bomb.
 
-### 4. 多核环境下的 EPT 操作需要精确的同步
+### 4. EPT Operations in Multi-Core Environments Require Precise Synchronization
 
-EPT 页表是所有 CPU 共享的全局结构：
-- **页表修改后必须 INVEPT**：否则其他 CPU 的 TLB 中有过时条目 → EPT Misconfiguration
-- **MTF 恢复必须 per-CPU 隔离**：否则一个 CPU 的 MTF 会破坏另一个 CPU 正在进行的 EPT 权限切换
-- **指令边界必须精确计算**：x86-64 变长指令意味着不能硬编码字节数
+EPT page tables are global structures shared by all CPUs:
+- **INVEPT is mandatory after modifying page tables**: Otherwise, other CPUs will have stale TLB entries → EPT Misconfiguration.
+- **MTF restoration must be isolated per-CPU**: Otherwise, one CPU's MTF processing will corrupt another CPU's active EPT permission transitions.
+- **Instruction boundaries must be calculated precisely**: The variable-length nature of x86-64 instructions means byte counts cannot be hardcoded.
 
-### 5. 逐症修补 vs 系统性审查
+### 5. Superficial Fixes vs. Systematic Reviews
 
-前几轮的"禁用 CR3 Exit"、"禁用 DR Exit"等修改是**症状缓解**，没有触及根因。真正解决问题需要：
-1. 列出所有 VM-Exit 类型及其 handler
-2. 逐一验证每个 handler 的正确性
-3. 特别关注中断/异常处理路径（最容易出错也影响最大）
-4. 特别关注多核竞争路径（单核测试无法复现）
+The early iterations of "disabling CR3 Exits" and "disabling DR Exits" only mitigated symptoms without addressing the core issues. Resolving the problems fully required:
+1. Listing all VM-Exit types and their corresponding handlers.
+2. Verifying the correctness of each handler individually.
+3. Paying special attention to interrupt/exception handling paths (which are the most error-prone and have the highest impact).
+4. Paying special attention to multi-core race condition paths (which cannot be reproduced in single-core testing).
 
-### 6. 日志系统也可能是受害者
+### 6. The Logging System Can Also Be a Victim
 
-当中断处理有问题时，日志 flush thread（依赖调度器中断）可能无法运行。**在关键路径上添加直接 `DbgPrintEx` 调用**（绕过 ring buffer）对调试至关重要。
+When interrupt handling is broken, the log-flushing thread (which relies on scheduler interrupts) might not run. **Adding direct `DbgPrintEx` calls in critical paths** (bypassing ring buffers) is vital for debugging.
 
-### 7. 防御性编程：初始化所有输出字段
+### 7. Defensive Programming: Initialize All Output Fields
 
-IOCTL handler 的 `IoStatus.Information` 未初始化看似小问题，但在失败路径上可能导致内核信息泄露或蓝屏。**所有输出字段在分发前应统一初始化为安全值（0）**。
-
----
-
-## 待确认事项
-
-1. **Bug #A - 指令解码器覆盖范围**：当前解码器覆盖了内核函数前缀的绝大多数常见指令。如果目标函数使用了极其罕见的前缀指令（如 SSE/AVX 等），解码器会返回 0 并安全地拒绝安装 hook。是否需要扩展覆盖范围？
-
-2. **Bug #B - per-CPU 数组大小**：当前硬编码为 64 个处理器槽位。如果系统有超过 64 个逻辑处理器（如大型服务器），超出范围的 CPU 将无法被跟踪（回退到恢复全部 hook）。是否需要动态分配或增大上限？
-
-3. **Bug #C - INVEPT 时机**：当前使用 generation counter + lazy INVEPT 机制。理论上在 `EptSplitLargePage` 到下一次 VM-Exit 之间存在一个很小的时间窗口。是否需要更激进的同步机制（如 IPI）？
+Leaving `IoStatus.Information` uninitialized in the IOCTL handler might seem minor, but it can lead to kernel information disclosure or a BSOD on failure paths. **All output fields should be uniformly initialized to a safe value (e.g., 0) prior to dispatching.**
 
 ---
 
-*文档结束。*
+## Open Questions / Items to Confirm
+
+1. **Bug #A - Instruction Decoder Coverage**: The current decoder covers the vast majority of common instruction prefixes found in kernel function headers. If a target function uses extremely rare instruction prefixes (e.g., SSE/AVX), the decoder returns 0 and safely rejects the hook installation. Is there a need to expand this coverage?
+
+2. **Bug #B - per-CPU Array Size**: Currently hardcoded to 64 processor slots. If a system has more than 64 logical processors (e.g., large servers), CPUs out of range will not be tracked (falling back to restoring all hooks). Do we need to allocate this dynamically or increase the limit?
+
+3. **Bug #C - INVEPT Timing**: Currently uses a generation counter + lazy INVEPT mechanism. Theoretically, there is a small window of vulnerability between `EptSplitLargePage` and the next VM-Exit on other CPUs. Do we need a more aggressive synchronization mechanism (e.g., IPI)?
+
+---
+
+*End of Document.*

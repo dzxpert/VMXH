@@ -1,45 +1,47 @@
-# VMX 核心执行机制审查报告
+[简体中文](vmx_core_mechanism_review_CN.md) | English
 
-> **日期**：2026-04-11  
-> **审查范围**：VMX 裸机虚拟化引擎（不含 EPT Hook 逻辑）  
-> **涉及文件**：`vmx_init.c`, `vmx_exit.c`, `vmx_asm.asm`, `vmx.h`, `vmxdrv.c`, `msr.c`, `hv_detect.c`  
-> **状态**：✅ 已修复
+# VMX Core Execution Mechanism Review Report
 
----
-
-## 目录
-
-- [一、架构概述](#一架构概述)
-- [二、发现的问题](#二发现的问题)
-  - [问题 A：VmxOpsGetCurrentCpuContext 使用 static 局部变量（非线程安全）](#问题-avmxopsgetcurrentcpucontext-使用-static-局部变量非线程安全)
-  - [问题 B：HandleCrAccess 对 MOV to CR0 写了 ReadShadow 但值不正确](#问题-bhandlecraccess-对-mov-to-cr0-写了-readshadow-但值不正确)
-  - [问题 C：外部中断处理缺少 Interruptibility State 检查](#问题-c外部中断处理缺少-interruptibility-state-检查)
-  - [问题 D：HandleRdtscp 存在 RIP 双重推进风险](#问题-dhandlerdtscp-存在-rip-双重推进风险)
-  - [问题 E：DPC 初始化上下文存在栈生命周期风险](#问题-edpc-初始化上下文存在栈生命周期风险)
-  - [问题 F：HandleException 中 NMI 重注入缺少 NMI-window 控制](#问题-fhandleexception-中-nmi-重注入缺少-nmi-window-控制)
-  - [问题 G：LMSW 处理未应用 CR0 固定位](#问题-glmsw-处理未应用-cr0-固定位)
-  - [问题 H：VmxShutdown 路径 RFLAGS 未恢复](#问题-hvmxshutdown-路径-rflags-未恢复)
-- [三、代码质量观察（非 Bug，但值得注意）](#三代码质量观察非-bug但值得注意)
-- [四、整体评估](#四整体评估)
-- [五、修改文件汇总](#五修改文件汇总)
+> **Date**: 2026-04-11  
+> **Review Scope**: VMX bare-metal virtualization engine (excluding EPT Hook logic)  
+> **Files involved**: `vmx_init.c`, `vmx_exit.c`, `vmx_asm.asm`, `vmx.h`, `vmxdrv.c`, `msr.c`, `hv_detect.c`  
+> **Status**: ✅ Fixed
 
 ---
 
-## 一、架构概述
+## Table of Contents
 
-整体 VMX 引擎采用经典的 Blue Pill 架构：
+- [1. Architectural Overview](#1-architectural-overview)
+- [2. Identified Issues](#2-identified-issues)
+  - [Issue A: VmxOpsGetCurrentCpuContext uses static local variable (Not Thread-Safe)](#issue-a-vmxopsgetcurrentcpucontext-uses-static-local-variable-not-thread-safe)
+  - [Issue B: HandleCrAccess writes incorrect value to ReadShadow for MOV to CR0](#issue-b-handlecraccess-writes-incorrect-value-to-readshadow-for-mov-to-cr0)
+  - [Issue C: External interrupt handling lacks Interruptibility State check](#issue-c-external-interrupt-handling-lacks-interruptibility-state-check)
+  - [Issue D: HandleRdtscp risk of double-advancing RIP](#issue-d-handlerdtscp-risk-of-double-advancing-rip)
+  - [Issue E: DPC initialization context poses stack lifetime risk](#issue-e-dpc-initialization-context-poses-stack-lifetime-risk)
+  - [Issue F: NMI re-injection in HandleException lacks NMI-window control](#issue-f-nmi-re-injection-in-handleexception-lacks-nmi-window-control)
+  - [Issue G: LMSW handling fails to apply CR0 fixed bits](#issue-g-lmsw-handling-fails-to-apply-cr0-fixed-bits)
+  - [Issue H: RFLAGS not restored in VmxShutdown path](#issue-h-rflags-not-restored-in-vmxshutdown-path)
+- [3. Code Quality Observations (Non-Bugs, but noteworthy)](#3-code-quality-observations-non-bugs-but-noteworthy)
+- [4. Overall Assessment](#4-overall-assessment)
+- [5. Summary of Modified Files](#5-summary-of-modified-files)
+
+---
+
+## 1. Architectural Overview
+
+The overall VMX engine adopts a classic Blue Pill architecture:
 
 ```
 DriverEntry (vmxdrv.c)
   → VmxInitialize (vmx_init.c)
-    → VmxCheckCapabilities()        读取 MSR 能力
-    → EptInitialize()               全局 EPT 初始化
+    → VmxCheckCapabilities()        Read MSR capabilities
+    → EptInitialize()               Global EPT initialization
     → for each CPU:
         DPC → VmxInitDpcRoutine()
           → VmxEnableOnCpu()        CR4.VMXE + VMXON
-          → VmxSetupVmcs()          写入 VMCS 所有字段
-          → AsmVmxLaunch()          VMLAUNCH 进入 Guest
-            (CPU 现在运行在 VMX non-root)
+          → VmxSetupVmcs()          Write all VMCS fields
+          → AsmVmxLaunch()          VMLAUNCH into Guest
+            (CPU is now running in VMX non-root)
 
 VM-Exit → AsmVmxExitHandler (vmx_asm.asm)
   → save GP regs → call VmxExitHandler (vmx_exit.c)
@@ -55,47 +57,47 @@ VmxTerminate (vmx_init.c)
   → free per-CPU resources
 ```
 
-**总体代码质量**：非常好。VMCS 字段设置完整，GDT 解析正确，True Controls 路径正确，Enlightened VMCS 嵌套模式支持完整。以下是审查中发现的问题。
+**Overall Code Quality**: Excellent. The VMCS fields are fully configured, GDT parsing is correct, the True Controls path is implemented properly, and Enlightened VMCS nested mode support is complete. Below are the issues discovered during the review.
 
 ---
 
-## 二、发现的问题
+## 2. Identified Issues
 
 ---
 
-### 问题 A：VmxOpsGetCurrentCpuContext 使用 static 局部变量（非线程安全）
+### Issue A: VmxOpsGetCurrentCpuContext uses static local variable (Not Thread-Safe)
 
-**严重程度**：🟡 Medium → ✅ 已修复
+**Severity**: 🟡 Medium → ✅ Fixed
 
-**位置**：`vmx_init.c` — `VmxOpsGetCurrentCpuContext()`
+**Location**: `vmx_init.c` — `VmxOpsGetCurrentCpuContext()`
 
-**问题描述**：
+**Problem Description**:
 
 ```c
 static PHV_CPU_CONTEXT VmxOpsGetCurrentCpuContext(VOID)
 {
-    static HV_CPU_CONTEXT VmxHvCtx;  // ← 全局唯一的 static 变量！
+    static HV_CPU_CONTEXT VmxHvCtx;  // ← Globally unique static variable!
     ULONG Cpu = KeGetCurrentProcessorNumber();
     if (Cpu < MAX_PROCESSORS) {
         VmxHvCtx.ProcessorNumber = g_VmxState.CpuContexts[Cpu].ProcessorNumber;
         VmxHvCtx.HvEnabled = g_VmxState.CpuContexts[Cpu].VmxEnabled;
-        // ...填充其他字段...
+        // ...fill in other fields...
     }
     return &VmxHvCtx;
 }
 ```
 
-`VmxHvCtx` 是 `static` 局部变量——**全局唯一**。如果两个 CPU 同时（或近乎同时）调用这个函数，CPU 0 填充了自己的数据后返回指针，CPU 1 在 CPU 0 使用这个指针之前又覆盖了 `VmxHvCtx` 的内容 → **CPU 0 读到的是 CPU 1 的数据**。
+`VmxHvCtx` is a `static` local variable—**globally unique**. If two CPUs call this function concurrently (or near-concurrently), CPU 0 fills in its own data and returns the pointer, and CPU 1 overwrites the contents of `VmxHvCtx` before CPU 0 actually uses that pointer → **CPU 0 reads CPU 1's data**.
 
-虽然在 VMX root mode（VM-Exit handler）中，中断被禁止，单个 CPU 上不会被抢占，但**不同 CPU 可以同时进入 VM-Exit handler**，所以这个 race condition 是真实的。
+Although interrupts are disabled in VMX root mode (VM-Exit handler) and a single CPU will not be preempted, **different CPUs can enter the VM-Exit handler simultaneously**, making this race condition real.
 
-**影响分析**：需要看 `GetCurrentCpuContext` 的调用方。如果调用方只是短暂读取返回值然后丢弃（不保存指针跨越可能被中断的代码段），问题可能不会 manifest。但这是一个**潜在定时炸弹**。
+**Impact Analysis**: This depends on the callers of `GetCurrentCpuContext`. If a caller only briefly reads the returned value and discards it (without holding the pointer across code segments where interrupts could occur), the issue might not manifest immediately. However, this is a **latent ticking time bomb**.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_init.c`
+**Modified File**: `vmx_init.c`
 
-将单一 `static HV_CPU_CONTEXT` 改为 `static HV_CPU_CONTEXT[MAX_PROCESSORS]` per-CPU 数组，每个 CPU 使用自己的槽位，彻底消除竞态条件：
+Change the single `static HV_CPU_CONTEXT` to a per-CPU `static HV_CPU_CONTEXT[MAX_PROCESSORS]` array, allowing each CPU to use its own slot, completely eliminating the race condition:
 
 ```c
 static PHV_CPU_CONTEXT VmxOpsGetCurrentCpuContext(VOID)
@@ -116,65 +118,65 @@ static PHV_CPU_CONTEXT VmxOpsGetCurrentCpuContext(VOID)
 }
 ```
 
-**关键变化**：
+**Key Changes**:
 - `static HV_CPU_CONTEXT VmxHvCtx` → `static HV_CPU_CONTEXT VmxHvCtx[MAX_PROCESSORS]`
-- 所有字段访问改为 `VmxHvCtx[Cpu].xxx`
-- `Cpu >= MAX_PROCESSORS` 时返回 `NULL` 而非未初始化的数据
+- All field accesses changed to `VmxHvCtx[Cpu].xxx`
+- Returns `NULL` instead of uninitialized data when `Cpu >= MAX_PROCESSORS`
 
 ---
 
-### 问题 B：HandleCrAccess 对 MOV to CR0 写了 ReadShadow 但值不正确
+### Issue B: HandleCrAccess writes incorrect value to ReadShadow for MOV to CR0
 
-**严重程度**：🟡 Medium → ✅ 已修复
+**Severity**: 🟡 Medium → ✅ Fixed
 
-**位置**：`vmx_exit.c` — `HandleCrAccess()` 中 `CR_ACCESS_TYPE_MOV_TO_CR, CrNum == 0`
+**Location**: `vmx_exit.c` — `HandleCrAccess()` in `CR_ACCESS_TYPE_MOV_TO_CR, CrNum == 0`
 
-**问题描述**：
+**Problem Description**:
 
-`HandleCrAccess` 对 `MOV to CR0` 正确地应用了 VMX 固定位（`VMX_CR0_FIXED0` / `FIXED1`），但把 **adjust 后的值** 写入了 ReadShadow：
+`HandleCrAccess` correctly applies VMX fixed bits (`VMX_CR0_FIXED0` / `FIXED1`) to `MOV to CR0`, but writes the **adjusted value** to the ReadShadow:
 
 ```c
 if (CrNum == 0) {
-    NewValue |= __readmsr(MSR_IA32_VMX_CR0_FIXED0);  // ✅ 正确
+    NewValue |= __readmsr(MSR_IA32_VMX_CR0_FIXED0);  // ✅ Correct
     NewValue &= __readmsr(MSR_IA32_VMX_CR0_FIXED1);
     VmxWrite(VMCS_GUEST_CR0, NewValue);
-    VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, NewValue);    // ← BUG: 应为原始值
+    VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, NewValue);    // ← BUG: Should be the original value
 }
 ```
 
-Intel SDM 建议：**Read Shadow 应该保存 Guest 期望看到的值**（即 Guest 写入的原始值），而 **实际 Guest CR0 字段** 保存的是 adjust 后的值。这样 Guest 的 `MOV from CR0` 读回的是它自己写的值（不含 VMX 强制位），实现透明虚拟化。
+The Intel SDM recommends: **the Read Shadow should store the value that the guest expects to see** (i.e., the original value written by the guest), while the **actual Guest CR0 field** stores the adjusted value. This ensures that the guest's `MOV from CR0` reads back the value it wrote itself (excluding VMX-enforced bits), achieving transparent virtualization.
 
-**注意**：由于当前 `CR0_GUEST_HOST_MASK = 0`（不拦截 CR0），这段代码当前不会执行。这是**潜在 bug**，在修改 guest/host mask 后会触发。
+**Note**: Since `CR0_GUEST_HOST_MASK = 0` (CR0 is not intercepted) currently, this code block is not executed. This is a **latent bug** that would trigger once the guest/host mask is modified.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_exit.c`
+**Modified File**: `vmx_exit.c`
 
-在应用固定位之前先保存 Guest 原始值，将原始值写入 ReadShadow：
+Save the guest's original value before applying the fixed bits, and write this original value to the ReadShadow:
 
 ```c
 else if (CrNum == 0) {
-    ULONG64 ShadowValue = NewValue;             /* 保存 Guest 原始值 */
+    ULONG64 ShadowValue = NewValue;             /* Save guest's original value */
     NewValue |= __readmsr(MSR_IA32_VMX_CR0_FIXED0);
     NewValue &= __readmsr(MSR_IA32_VMX_CR0_FIXED1);
     VmxWrite(VMCS_GUEST_CR0, NewValue);
-    VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, ShadowValue);  /* shadow = 原始值 */
+    VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, ShadowValue);  /* shadow = original value */
 }
 ```
 
-**同时更新**：`vmx_init.c` 的 `VmxSetupVmcs()` 中初始 ReadShadow 添加了说明注释（由于初始时 Cr0 已经含 VMX 固定位，值相同，但添加注释保持一致性）。
+**Also Updated**: Explanatory comments were added to the initial ReadShadow configuration in `VmxSetupVmcs()` inside `vmx_init.c` (even though the initial CR0 already contains the VMX fixed bits and thus the values are identical, comments were added for consistency).
 
 ---
 
-### 问题 C：外部中断处理缺少 Interruptibility State 检查
+### Issue C: External interrupt handling lacks Interruptibility State check
 
-**严重程度**：🔴 High → ✅ 已修复
+**Severity**: 🔴 High → ✅ Fixed
 
-**位置**：`vmx_exit.c` — `EXIT_REASON_EXTERNAL_INT` 处理
+**Location**: `vmx_exit.c` — `EXIT_REASON_EXTERNAL_INT` handling
 
-**问题描述**：
+**Problem Description**:
 
-`EXIT_REASON_EXTERNAL_INT` 处理代码在注入中断前只检查了 `RFLAGS.IF`：
+The `EXIT_REASON_EXTERNAL_INT` handling code only checks `RFLAGS.IF` before injecting an interrupt:
 
 ```c
 ULONG64 GuestRflags = VmxRead(VMCS_GUEST_RFLAGS);
@@ -184,29 +186,29 @@ if (GuestRflags & (1ULL << 9)) {
 }
 ```
 
-但 Intel SDM Vol. 3C, Section 26.3.1.5 规定，VM-Entry 注入外部中断的前提条件不仅仅是 `RFLAGS.IF=1`，还包括：
+However, Intel SDM Vol. 3C, Section 26.3.1.5 stipulates that the prerequisites for VM-Entry to inject an external interrupt are not just `RFLAGS.IF=1`, but also include:
 
-- **Guest Interruptibility State** 的以下位必须为 0：
-  - Bit 0：Blocking by STI（`STI` 指令后的一条指令窗口）
-  - Bit 1：Blocking by MOV SS（`MOV SS` 后的一条指令窗口）
+- The following bits of the **Guest Interruptibility State** must be 0:
+  - Bit 0: Blocking by STI (the instruction window immediately following an `STI` instruction)
+  - Bit 1: Blocking by MOV SS (the instruction window immediately following a `MOV SS` instruction)
 
-**触发场景**：
+**Triggering Scenario**:
 
 ```asm
-; Guest 代码
+; Guest Code
 cli             ; IF=0
-; ...某些操作...
-sti             ; IF=1, 但接下来一条指令期间 "blocking by STI" = 1
-nop             ; ← 如果恰好在这里 VM-Exit 了
+; ...certain operations...
+sti             ; IF=1, but "blocking by STI" = 1 for the next instruction
+nop             ; ← If a VM-Exit happens to occur exactly here
 ```
 
-VM-Exit 时 `RFLAGS.IF=1` 但 `Interruptibility.BlockingBySTI=1` → 直接注入中断 → VM-Entry failure → BSOD。
+At the time of VM-Exit, `RFLAGS.IF=1` but `Interruptibility.BlockingBySTI=1` → direct injection of the interrupt → VM-Entry failure → BSOD.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_exit.c`
+**Modified File**: `vmx_exit.c`
 
-注入前同时检查 `RFLAGS.IF` 和 `VMCS_GUEST_INTERRUPTIBILITY` 的 blocking 位（bit 0 和 bit 1）：
+Before injection, check both `RFLAGS.IF` and the blocking bits (bit 0 and bit 1) of `VMCS_GUEST_INTERRUPTIBILITY`:
 
 ```c
 ULONG64 GuestRflags = VmxRead(VMCS_GUEST_RFLAGS);
@@ -221,37 +223,37 @@ if ((GuestRflags & (1ULL << 9)) && !(Interruptibility & 0x3)) {
 }
 ```
 
-**关键变化**：注入条件从 `if (GuestRflags & IF_BIT)` 改为 `if ((GuestRflags & IF_BIT) && !(Interruptibility & 0x3))`，不满足条件时走延迟注入路径。
+**Key Changes**: The injection condition is updated from `if (GuestRflags & IF_BIT)` to `if ((GuestRflags & IF_BIT) && !(Interruptibility & 0x3))`. If the condition is not met, the code falls back to the deferred injection path.
 
 ---
 
-### 问题 D：HandleRdtscp 存在 RIP 双重推进风险
+### Issue D: HandleRdtscp risk of double-advancing RIP
 
-**严重程度**：🟢 Low → ✅ 已处理（添加防御性文档）
+**Severity**: 🟢 Low → ✅ Addressed (Defensive documentation added)
 
-**位置**：`vmx_exit.c` — `HandleRdtscp()`
+**Location**: `vmx_exit.c` — `HandleRdtscp()`
 
-**问题描述**：
+**Problem Description**:
 
 ```c
 static BOOLEAN HandleRdtscp(PGUEST_CONTEXT Ctx)
 {
-    AadHandleRdtsc(Ctx);               // ← 内部调用 HvAdvanceGuestRip()
+    AadHandleRdtsc(Ctx);               // ← Internally calls HvAdvanceGuestRip()
     Ctx->Rcx = __readmsr(MSR_IA32_TSC_AUX) & 0xFFFFFFFF;
     /* Note: AadHandleRdtsc already advanced RIP */
     return TRUE;
 }
 ```
 
-存在**隐性耦合风险**：
-- 若 `AadHandleRdtsc` 被修改为不推进 RIP → Guest 无限循环
-- 若有人在此函数末尾误加 `VmxAdvanceGuestRip()` → 双重推进 → 跳过指令 → 崩溃
+There is an **implicit coupling risk**:
+- If `AadHandleRdtsc` is modified to not advance the RIP → the guest falls into an infinite loop.
+- If someone mistakenly appends `VmxAdvanceGuestRip()` to this function → double advancement → skips instruction → crash.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_exit.c`
+**Modified File**: `vmx_exit.c`
 
-在 `HandleRdtscp` 中添加详细的防御性注释块，明确标注 `AadHandleRdtsc` 内部已推进 RIP 的设计契约，以及如果未来重构时需要注意的事项：
+Add a detailed defensive comment block in `HandleRdtscp` to explicitly document the design contract that `AadHandleRdtsc` internally advances the RIP, along with considerations for future refactoring:
 
 ```c
 static BOOLEAN HandleRdtscp(PGUEST_CONTEXT Ctx)
@@ -271,43 +273,43 @@ static BOOLEAN HandleRdtscp(PGUEST_CONTEXT Ctx)
 
 ---
 
-### 问题 E：DPC 初始化上下文存在栈生命周期风险
+### Issue E: DPC initialization context poses stack lifetime risk
 
-**严重程度**：🟢 Low → ✅ 已处理（添加安全注释）
+**Severity**: 🟢 Low → ✅ Addressed (Safety comments added)
 
-**位置**：`vmx_init.c` — `VmxInitialize()` DPC 循环
+**Location**: `vmx_init.c` — `VmxInitialize()` DPC loop
 
-**问题描述**：
+**Problem Description**:
 
 ```c
 for (i = 0; i < CpuCount; i++) {
     KDPC            Dpc;
-    VMX_DPC_CONTEXT DpcCtx;       // ← 栈上分配
+    VMX_DPC_CONTEXT DpcCtx;       // ← Stack-allocated
     // ...
-    KeWaitForSingleObject(&DpcCtx.Event, ...);  // ← 阻塞等待保证安全
+    KeWaitForSingleObject(&DpcCtx.Event, ...);  // ← Blocking wait ensures safety
 }
 ```
 
-当前代码是正确的（`KeWaitForSingleObject` 保证了栈对象的生命周期）。但这种模式很脆弱：如果未来有人移除 wait 或改为并行，栈变量可能在 DPC 执行前被覆盖 → BSOD。
+The current code is correct (the `KeWaitForSingleObject` call guarantees the lifetime of the stack object). However, this pattern is brittle: if someone removes the wait or changes the loop to execute in parallel in the future, the stack variables could be overwritten before the DPC finishes executing → BSOD.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_init.c`
+**Modified File**: `vmx_init.c`
 
-在 DPC 循环前添加醒目的安全注释块，明确说明：
-1. `Dpc` 和 `DpcCtx` 必须保持有效直到 `KeSetEvent` 被调用
-2. 绝对不能移除或延迟 `KeWaitForSingleObject`
-3. 如果需要并行启动，必须从 NonPagedPool 分配
+Add a prominent safety comment block before the DPC loop, explicitly stating:
+1. `Dpc` and `DpcCtx` must remain valid until `KeSetEvent` is called.
+2. Under no circumstances should `KeWaitForSingleObject` be removed or deferred.
+3. If parallel initialization is required in the future, memory must be allocated from the `NonPagedPool`.
 
 ---
 
-### 问题 F：HandleException 中 NMI 重注入缺少 NMI-window 控制
+### Issue F: NMI re-injection in HandleException lacks NMI-window control
 
-**严重程度**：🟡 Medium → ✅ 已修复
+**Severity**: 🟡 Medium → ✅ Fixed
 
-**位置**：`vmx_exit.c` — `HandleException()` NMI 分支
+**Location**: `vmx_exit.c` — `HandleException()` NMI branch
 
-**问题描述**：
+**Problem Description**:
 
 ```c
 if (IntType == INTERRUPT_TYPE_NMI) {
@@ -319,15 +321,15 @@ if (IntType == INTERRUPT_TYPE_NMI) {
 }
 ```
 
-直接重注入 NMI 而不检查 "blocking by NMI" 位。如果某些 CPU 通过 `VmxAdjustControls` 的 must-be-1 位强制启用了 `VIRTUAL_NMIS`，NMI blocking 可能未被自动清除，导致 VM-Entry 失败。
+Directly re-injecting the NMI without checking the "blocking by NMI" bit is problematic. If certain CPUs force-enable `VIRTUAL_NMIS` via the must-be-1 bits of `VmxAdjustControls`, the NMI blocking status might not be cleared automatically, leading to VM-Entry failure.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_exit.c`
+**Modified File**: `vmx_exit.c`
 
-1. NMI 注入前检查 `VMCS_GUEST_INTERRUPTIBILITY` 的 bit 3（blocking by NMI）
-2. 如果被阻塞，设置 `PROC_BASED_NMI_WINDOW_EXIT` 延迟注入
-3. 新增 `EXIT_REASON_NMI_WINDOW` 分支处理：清除 NMI-window exiting 位并注入 NMI
+1. Check bit 3 (blocking by NMI) of `VMCS_GUEST_INTERRUPTIBILITY` before NMI injection.
+2. If blocked, set `PROC_BASED_NMI_WINDOW_EXIT` to defer injection.
+3. Add a new dispatch branch for `EXIT_REASON_NMI_WINDOW` to clear the NMI-window exiting bit and inject the NMI.
 
 ```c
 if (IntType == INTERRUPT_TYPE_NMI) {
@@ -346,7 +348,7 @@ if (IntType == INTERRUPT_TYPE_NMI) {
 }
 ```
 
-**新增处理分支**：
+**New Dispatch Branch**:
 
 ```c
 case EXIT_REASON_NMI_WINDOW:
@@ -358,13 +360,13 @@ case EXIT_REASON_NMI_WINDOW:
 
 ---
 
-### 问题 G：LMSW 处理未应用 CR0 固定位
+### Issue G: LMSW handling fails to apply CR0 fixed bits
 
-**严重程度**：🟡 Medium → ✅ 已修复
+**Severity**: 🟡 Medium → ✅ Fixed
 
-**位置**：`vmx_exit.c` — `HandleCrAccess()` 中 `CR_ACCESS_TYPE_LMSW`
+**Location**: `vmx_exit.c` — `HandleCrAccess()` in `CR_ACCESS_TYPE_LMSW`
 
-**问题描述**：
+**Problem Description**:
 
 ```c
 case CR_ACCESS_TYPE_LMSW:
@@ -373,19 +375,19 @@ case CR_ACCESS_TYPE_LMSW:
         USHORT  Msw = (USHORT)(ExitQual >> 16);
         Cr0 = (Cr0 & ~0xFFFFULL) | Msw;
         Cr0 |= CR0_PE;
-        VmxWrite(VMCS_GUEST_CR0, Cr0);  // ← 未应用固定位
+        VmxWrite(VMCS_GUEST_CR0, Cr0);  // ← VMX fixed bits are not applied here
     }
 ```
 
-VMX 要求 Guest CR0 的某些位必须为 1/0。如果 LMSW 指令改变了受限位（如清除 NE），下次 VM-Entry 会失败。
+VMX requires certain bits of Guest CR0 to be fixed to 1 or 0. If the LMSW instruction changes any restricted bits (such as clearing NE), the subsequent VM-Entry will fail.
 
-**注意**：由于当前 `CR0_GUEST_HOST_MASK = 0`，LMSW 不会触发 VM-Exit。但修改 mask 后这是真实 bug。
+**Note**: Since `CR0_GUEST_HOST_MASK = 0` currently, LMSW will not trigger a VM-Exit. However, this becomes a real bug once the mask is modified.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_exit.c`
+**Modified File**: `vmx_exit.c`
 
-在 LMSW 处理末尾、写入 Guest CR0 之前，应用 VMX 固定位：
+Apply VMX fixed bits at the end of the LMSW handling before writing back to Guest CR0:
 
 ```c
 case CR_ACCESS_TYPE_LMSW:
@@ -404,27 +406,27 @@ case CR_ACCESS_TYPE_LMSW:
 
 ---
 
-### 问题 H：VmxShutdown 路径 RFLAGS 未恢复
+### Issue H: RFLAGS not restored in VmxShutdown path
 
-**严重程度**：🟢 Low → ✅ 已修复
+**Severity**: 🟢 Low → ✅ Fixed
 
-**位置**：`vmx_asm.asm` — `VmxShutdown` 标签
+**Location**: `vmx_asm.asm` — `VmxShutdown` label
 
-**问题描述**：
+**Problem Description**:
 
-`VmxShutdown` 在执行 `vmxoff` 后恢复了所有 GP 寄存器（RAX~R15），但**没有恢复 Guest RFLAGS**。`vmxoff` 后 RFLAGS 是 Host 上下文的值而非 Guest 的值。
+`VmxShutdown` restores all GP registers (RAX~R15) after executing `vmxoff`, but **fails to restore Guest RFLAGS**. After `vmxoff`, the RFLAGS contains Host context values instead of Guest values.
 
-**影响分析**：实际影响较小（后续 C 代码会覆盖大部分标志位），但 TF（Trap Flag）等特殊标志不会被正确恢复。
+**Impact Analysis**: The practical impact is relatively small (subsequent C code typically overwrites most flags), but special flags such as TF (Trap Flag) will not be restored correctly.
 
-#### ✅ 修复方案
+#### ✅ Resolution
 
-**修改文件**：`vmx_asm.asm`
+**Modified File**: `vmx_asm.asm`
 
-1. 新增 `VMCS_GUEST_RFLAGS_ENCODING EQU 06820h` 常量
-2. 在 `vmxoff` 之前通过 `vmread` 读取 Guest RFLAGS
-3. 将 Guest RFLAGS 压入 Guest 栈
-4. 恢复 GP 寄存器后，通过 `popfq` 恢复 RFLAGS
-5. 最后 `ret` 跳转到 Guest RIP
+1. Add the `VMCS_GUEST_RFLAGS_ENCODING EQU 06820h` constant.
+2. Read Guest RFLAGS via `vmread` prior to calling `vmxoff`.
+3. Push Guest RFLAGS onto the Guest stack.
+4. After restoring GP registers, restore RFLAGS using `popfq`.
+5. Finally, use `ret` to jump to Guest RIP.
 
 ```asm
 VmxShutdown:
@@ -459,21 +461,21 @@ VmxShutdown:
     ret                         ; pop Guest RIP, resume
 ```
 
-**Guest 栈布局**（从高到低）：
+**Guest Stack Layout** (High to Low):
 ```
-[Guest RSP - 8]  = Guest RIP   (由 ret 弹出)
-[Guest RSP - 16] = Guest RFLAGS (由 popfq 弹出)
+[Guest RSP - 8]  = Guest RIP   (Popped by ret)
+[Guest RSP - 16] = Guest RFLAGS (Popped by popfq)
 ```
 
 ---
 
-## 三、代码质量观察（非 Bug，但值得注意）
+## 3. Code Quality Observations (Non-Bugs, but noteworthy)
 
-### 1. IA32_FEATURE_CONTROL 未锁定时的处理
+### 1. Handling of Unlocked IA32_FEATURE_CONTROL
 
-**位置**：`vmx_init.c` 第 62-68 行 / `hv_detect.c` 第 81-83 行
+**Location**: `vmx_init.c` lines 62-68 / `hv_detect.c` lines 81-83
 
-当 `IA32_FEATURE_CONTROL` MSR 未锁定时（bit 0 = 0），代码只是打了一个 warning 然后继续。根据 Intel SDM，在某些情况下 `VMXON` 会失败如果 MSR 未锁定。建议至少尝试写入 MSR 来锁定它（设置 bit 0 和 bit 2）：
+When the `IA32_FEATURE_CONTROL` MSR is not locked (bit 0 = 0), the code only prints a warning and continues. According to the Intel SDM, in some scenarios `VMXON` will fail if the MSR is unlocked. It is recommended to attempt to lock the MSR by setting bit 0 and bit 2:
 
 ```c
 if (!(FeatureControl & FEATURE_CONTROL_LOCKED)) {
@@ -482,47 +484,47 @@ if (!(FeatureControl & FEATURE_CONTROL_LOCKED)) {
 }
 ```
 
-### 2. MSR bitmap 只拦截了 IA32_DEBUGCTL
+### 2. MSR Bitmap Only Intercepts IA32_DEBUGCTL
 
-**位置**：`msr.c` 第 63-77 行
+**Location**: `msr.c` lines 63-77
 
-当前只拦截了 `MSR_IA32_DEBUGCTL` 的读写。如果未来需要拦截更多 MSR（如 `IA32_EFER`、`IA32_KERNEL_GS_BASE` 等），需要在 `MsrBitmapInitialize` 中添加。目前的设计是清晰的（bitmap 默认全 0 = 全部直通），但建议在代码注释中说明这个设计决策。
+Currently, only reads and writes to `MSR_IA32_DEBUGCTL` are intercepted. If more MSRs (e.g., `IA32_EFER`, `IA32_KERNEL_GS_BASE`) need to be intercepted in the future, they should be added in `MsrBitmapInitialize`. The current design is clean (bitmap default of all 0s = all passthrough), but it is recommended to explicitly document this design decision in code comments.
 
-### 3. Host Stack 16KB 可能不足
+### 3. 16KB Host Stack May Be Insufficient
 
-**位置**：`vmx_init.c` 第 203-204 行
+**Location**: `vmx_init.c` lines 203-204
 
 ```c
 CpuCtx->HostStackSize = 4 * PAGE_SIZE_4KB;  // 16KB
 ```
 
-VM-Exit handler 会在 Host Stack 上运行，包括调用 `VmxExitHandler` 以及它调用的所有子函数（EPT violation handler、anti-anti-debug、logging 等）。如果调用链很深，16KB 可能不够（Windows 内核默认线程栈是 12KB-24KB，DPC 共享 16KB）。如果遇到栈溢出，表现为随机内存损坏，极难调试。
+The VM-Exit handler runs on the Host Stack, which includes executing `VmxExitHandler` and all its child functions (EPT violation handler, anti-anti-debug, logging, etc.). If the call stack gets deep, 16KB might be insufficient (Windows kernel default thread stack is 12KB-24KB, and DPC stack is 16KB). If a stack overflow occurs, it manifests as random memory corruption, which is extremely difficult to debug.
 
-建议考虑增大到 32KB（`8 * PAGE_SIZE_4KB`），或者在 Host Stack 底部放置 guard page。
+It is recommended to increase the stack size to 32KB (`8 * PAGE_SIZE_4KB`) or place a guard page at the bottom of the Host Stack.
 
-### 4. VmxIsSupported 和 HvCheckVmxSupport 功能重复
+### 4. Duplicate Functionality in VmxIsSupported and HvCheckVmxSupport
 
-**位置**：`vmx_init.c` 第 42-71 行 / `hv_detect.c` 第 61-87 行
+**Location**: `vmx_init.c` lines 42-71 / `hv_detect.c` lines 61-87
 
-这两个函数做了几乎相同的事情。`VmxIsSupported` 在 `vmx_init.c` 中定义但实际上被 `g_VmxOps.IsSupported` 指向，而 `HvCheckVmxSupport` 在 `hv_detect.c` 中定义被 `DriverEntry` 调用。建议统一为一个函数。
+These two functions do almost exactly the same thing. `VmxIsSupported` is defined in `vmx_init.c` but is actually pointed to by `g_VmxOps.IsSupported`, while `HvCheckVmxSupport` is defined in `hv_detect.c` and is called by `DriverEntry`. It is recommended to consolidate these into a single function.
 
-### 5. XSETBV 处理未做 XCR0 合法性检查 → ✅ 已修复
+### 5. XSETBV Handling Lacks XCR0 Validity Check → ✅ Fixed
 
-**位置**：`vmx_exit.c` — `HandleXsetbv()`
+**Location**: `vmx_exit.c` — `HandleXsetbv()`
 
-**原始问题**：代码直接将 Guest 请求的 XCR0 值写入物理 XCR0，没有做合法性检查。如果 Guest 写入非法的 XCR0 组合（例如设置 AVX 位但不设置 SSE 位），`XSETBV` 会触发 `#GP`，但这发生在 Host 上下文中 → **Hypervisor 自身的 #GP** → BSOD。
+**Original Issue**: The code directly writes the guest-requested XCR0 value to the physical XCR0 register without any validity checks. If the guest writes an invalid combination of XCR0 values (e.g., setting the AVX bit but not setting the SSE bit), `XSETBV` triggers a `#GP`. Since this execution occurs in the Host context, it results in a **Hypervisor-level #GP** → BSOD.
 
-**修复方案**：在执行 `AsmXsetbv` 前添加 XCR0 合法性验证：
-- XCR 索引必须为 0（只有 XCR0 有效）
-- Bit 0（x87 FPU）必须为 1
-- AVX（bit 2）要求 SSE（bit 1）也被设置
+**Resolution**: Add XCR0 validation checks before executing `AsmXsetbv`:
+- The XCR index must be 0 (only XCR0 is valid).
+- Bit 0 (x87 FPU) must be 1.
+- AVX (bit 2) requires SSE (bit 1) to be set.
 
-验证失败时注入 `#GP(0)` 到 Guest 而非执行非法操作：
+When validation fails, inject a `#GP(0)` into the guest instead of executing the invalid operation:
 
 ```c
-if (Ecx != 0) goto InjectGp;               /* 只有 XCR0 有效 */
-if (!(Value & 1)) goto InjectGp;            /* x87 必须为 1 */
-if ((Value & 4) && !(Value & 2)) goto InjectGp;  /* AVX 要求 SSE */
+if (Ecx != 0) goto InjectGp;               /* Only XCR0 is valid */
+if (!(Value & 1)) goto InjectGp;            /* x87 must be 1 */
+if ((Value & 4) && !(Value & 2)) goto InjectGp;  /* AVX requires SSE */
 
 AsmXsetbv(Ecx, Value);
 VmxAdvanceGuestRip();
@@ -536,36 +538,36 @@ InjectGp:
 
 ---
 
-## 四、整体评估
+## 4. Overall Assessment
 
-| 分类 | 评价 |
+| Category | Evaluation |
 |------|------|
-| **VMCS 初始化** | ✅ 完整正确：所有 Guest/Host 状态字段、控制字段、True Controls、段描述符解析都正确 |
-| **VM-Exit 分发** | ✅ 覆盖全面：CPUID、MSR、CR、DR、Exception、RDTSC、XSETBV、INVD、INVLPG、WBINVD、Triple Fault 等都有处理 |
-| **外部中断** | ✅ 逻辑完整（IF + Interruptibility 检查 + interrupt window）—— 问题 C 已修复 |
-| **NMI 处理** | ✅ NMI blocking 检查 + NMI-window 延迟注入 —— 问题 F 已修复 |
-| **VMLAUNCH / VMRESUME** | ✅ ASM 实现正确：寄存器保存/恢复顺序正确，RSP 对齐正确，shutdown 路径含 RFLAGS 恢复 |
-| **嵌套模式** | ✅ Enlightened VMCS 支持完整：VP Assist Page、eVMCS 分配/激活、Clean Fields 管理 |
-| **DPC 序列化** | ✅ 正确使用 per-CPU DPC + Event 实现串行初始化/终止，添加安全注释 |
-| **内存管理** | ✅ 分配清零、释放检查、物理地址获取都正确 |
-| **错误处理** | ✅ VmxInitialize 的 InitFailed 路径能正确回滚已启动的 CPU |
-| **CR0/CR4 处理** | ✅ ReadShadow 保存 Guest 原始值，LMSW 应用固定位 —— 问题 B、G 已修复 |
-| **XSETBV** | ✅ XCR0 合法性验证，非法值注入 #GP(0) 而非崩溃 |
+| **VMCS Initialization** | ✅ Complete and correct: All Guest/Host state fields, control fields, True Controls, and segment descriptor parsing are correct. |
+| **VM-Exit Dispatching** | ✅ Comprehensive coverage: CPUID, MSR, CR, DR, Exception, RDTSC, XSETBV, INVD, INVLPG, WBINVD, Triple Fault, etc., are all handled. |
+| **External Interrupts** | ✅ Complete logic (IF + Interruptibility check + interrupt window) —— Issue C is fixed. |
+| **NMI Handling** | ✅ NMI blocking check + NMI-window deferred injection —— Issue F is fixed. |
+| **VMLAUNCH / VMRESUME** | ✅ Correct ASM implementation: Register save/restore sequence is correct, RSP alignment is correct, and shutdown path includes RFLAGS restoration. |
+| **Nested Mode** | ✅ Complete Enlightened VMCS support: VP Assist Page, eVMCS allocation/activation, and Clean Fields management. |
+| **DPC Serialization** | ✅ Proper use of per-CPU DPC + Event to implement serial initialization/termination, with safety comments added. |
+| **Memory Management** | ✅ Correct allocation zeroing, release checks, and physical address retrieval. |
+| **Error Handling** | ✅ The `InitFailed` path in `VmxInitialize` correctly rolls back already-started CPUs. |
+| **CR0/CR4 Handling** | ✅ ReadShadow stores the Guest's original value, LMSW applies fixed bits —— Issues B and G are fixed. |
+| **XSETBV** | ✅ XCR0 validity validation; invalid values inject `#GP(0)` instead of causing a crash. |
 
-**总体结论**：所有 8 个发现的问题 + 1 个代码质量问题（XSETBV）均已修复。
-
----
-
-## 五、修改文件汇总
-
-| 文件 | 修复的问题 | 修改内容 |
-|------|-----------|---------|
-| `vmx_init.c` | A, B, E | A: `VmxOpsGetCurrentCpuContext` 改为 per-CPU 数组；B: 初始 CR0 ReadShadow 添加注释；E: DPC 循环添加安全注释 |
-| `vmx_exit.c` | B, C, D, F, G, XSETBV | B: CR0 ReadShadow 保存原始值；C: 外部中断检查 Interruptibility；D: RDTSCP 添加耦合文档；F: NMI blocking 检查 + NMI-window 处理分支；G: LMSW 应用 CR0 固定位；XSETBV: XCR0 合法性验证 |
-| `vmx_asm.asm` | H | VmxShutdown 路径：vmread Guest RFLAGS → push 到 Guest 栈 → vmxoff → 恢复 GP 寄存器 → popfq → ret |
-
-**C89 兼容性**：所有新增变量声明均放在代码块顶部，符合 WDK 7600 的 MSVC C89 要求。
+**Overall Conclusion**: All 8 identified issues + 1 code quality issue (XSETBV) have been successfully resolved.
 
 ---
 
-*文档结束。所有问题已修复并补充到此报告中。*
+## 5. Summary of Modified Files
+
+| File | Fixed Issues | Changes |
+|------|--------------|---------|
+| `vmx_init.c` | A, B, E | A: Changed `VmxOpsGetCurrentCpuContext` to a per-CPU array; B: Added comments to initial CR0 ReadShadow; E: Added safety comments to the DPC loop. |
+| `vmx_exit.c` | B, C, D, F, G, XSETBV | B: CR0 ReadShadow stores the original value; C: Added Interruptibility check for external interrupts; D: Added coupling documentation for RDTSCP; F: Added NMI blocking check + NMI-window processing branch; G: Applied CR0 fixed bits in LMSW; XSETBV: Added XCR0 validity check. |
+| `vmx_asm.asm` | H | VmxShutdown path: vmread Guest RFLAGS → push onto Guest stack → vmxoff → restore GP registers → popfq → ret. |
+
+**C89 Compatibility**: All newly added variable declarations are placed at the top of their respective code blocks, adhering to MSVC C89 requirements for WDK 7600.
+
+---
+
+*End of document. All issues have been resolved and documented in this report.*

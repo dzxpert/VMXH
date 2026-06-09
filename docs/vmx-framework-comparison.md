@@ -1,284 +1,286 @@
-# VMXHypervisorToolbox vs NBP v0.32 — VMX 虚拟化框架层详细对比分析
+[简体中文](vmx-framework-comparison_CN.md) | English
 
-**分析目的:** 逐项对比两个驱动在 VMX 虚拟化框架层的实现，发现 VMXHypervisorToolbox 可能存在的架构性问题。  
-**分析日期:** 2026-04-14
+# VMXHypervisorToolbox vs NBP v0.32 — Detailed Comparative Analysis of the VMX Virtualization Framework Layer
+
+**Analysis Purpose:** Compare the VMX virtualization framework layer implementations of the two drivers item by item to identify potential architectural issues in VMXHypervisorToolbox.  
+**Analysis Date:** 2026-04-14
 
 ---
 
-## 一、总体评估
+## I. Overall Evaluation
 
-| 维度 | VMXHypervisorToolbox | NBP v0.32 | 评价 |
+| Dimension | VMXHypervisorToolbox | NBP v0.32 | Evaluation |
 |------|---------------------|-----------|------|
-| 目标平台 | x64 only | x86 + x64 | 我们更简单（无 32 位代码路径） |
-| EPT/VPID | 完整支持 | 无 | 我们远超 |
-| VMCS 字段完整度 | 高 | 中 | 我们更完整 |
-| VM-Exit 覆盖率 | 高（30+ 种） | 低（仅注册需要的） | 我们更全面 |
-| Guest 状态保存 | 正确 | 有缺陷（EBP push 两次） | 我们正确 |
-| 关闭路径 | popfq + ret | IRETQ（更规范） | **NBP 更好** |
-| Host Stack | 16KB | 64KB | **NBP 更安全** |
-| IDT-Vectoring 重注入 | 完整实现 | 无 | 我们远超 |
-| Host GDT/IDT | 共用 Guest 的 | 独立分配 | **NBP 更安全** |
+| Target Platform | x64 only | x86 + x64 | Ours is simpler (no 32-bit code path) |
+| EPT/VPID | Full Support | None | Ours is far superior |
+| VMCS Field Completeness | High | Medium | Ours is more complete |
+| VM-Exit Coverage | High (30+ types) | Low (only registers those needed) | Ours is more comprehensive |
+| Guest State Saving | Correct | Flawed (pushes EBP twice) | Ours is correct |
+| Shutdown Path | popfq + ret | IRETQ (more standard) | **NBP is better** |
+| Host Stack | 16KB | 64KB | **NBP is safer** |
+| IDT-Vectoring Re-injection | Fully Implemented | None | Ours is far superior |
+| Host GDT/IDT | Shared with Guest | Independently Allocated | **NBP is safer** |
 
 ---
 
-## 二、VMCS 控制字段对比
+## II. Comparison of VMCS Control Fields
 
 ### 2.1 Pin-Based Controls
 
-| 功能位 | VMXHypervisorToolbox | NBP | 分析 |
+| Feature Bit | VMXHypervisorToolbox | NBP | Analysis |
 |--------|---------------------|-----|------|
-| EXTERNAL_INT_EXIT | **不请求** | 不请求 | 一致。Blue Pill 应让外部中断直接通过 Guest IDT |
-| NMI_EXIT | **请求** | 不请求 | 我们更完善（WinDbg Ctrl+Break 支持 + NMI 重注入） |
-| VIRTUAL_NMI | 不请求 | 不请求 | 一致 |
+| EXTERNAL_INT_EXIT | **Do not request** | Do not request | Consistent. Blue Pill should allow external interrupts to pass directly through the Guest IDT. |
+| NMI_EXIT | **Request** | Do not request | Ours is more complete (WinDbg Ctrl+Break support + NMI re-injection). |
+| VIRTUAL_NMI | Do not request | Do not request | Consistent. |
 
-**结论:** 我们的 Pin-Based 配置正确且更完善。
+**Conclusion:** Our Pin-Based configuration is correct and more complete.
 
 ### 2.2 Primary Processor-Based Controls
 
-| 功能位 | VMXHypervisorToolbox | NBP | 分析 |
+| Feature Bit | VMXHypervisorToolbox | NBP | Analysis |
 |--------|---------------------|-----|------|
-| USE_MSR_BITMAPS | 请求 | 条件请求 | 一致 |
-| USE_IO_BITMAPS | **请求** | 条件请求 | 我们始终启用，配合全零位图 = 无 I/O 退出 |
-| SECONDARY_CONTROLS | 请求 | 不支持 | 我们需要 EPT |
-| CR3_LOAD_EXIT | **请求** | 不请求 | 我们需要进程切换跟踪 |
-| MOV_DR_EXIT | **请求** | 不请求 | 我们需要 anti-debug DR 伪造 |
-| USE_TSC_OFFSETTING | **请求** | 不请求 | 我们用硬件 TSC 偏移（比 RDTSC 拦截高效） |
-| RDTSC_EXITING | 不请求 | 条件请求 | NBP 用 RDTSC 拦截做反检测 |
-| HLT_EXIT | 可能被 must-be-1 强制 | 不处理 | 我们有完善的 HLT 模拟 |
+| USE_MSR_BITMAPS | Request | Conditional request | Consistent. |
+| USE_IO_BITMAPS | **Request** | Conditional request | We always enable it, combined with a zeroed-out bitmap = no I/O exits. |
+| SECONDARY_CONTROLS | Request | Not supported | We need EPT. |
+| CR3_LOAD_EXIT | **Request** | Do not request | We need process switch tracking. |
+| MOV_DR_EXIT | **Request** | Do not request | We need anti-debug DR spoofing. |
+| USE_TSC_OFFSETTING | **Request** | Do not request | We use hardware TSC offsetting (more efficient than RDTSC intercepting). |
+| RDTSC_EXITING | Do not request | Conditional request | NBP uses RDTSC intercepting for anti-detection. |
+| HLT_EXIT | May be forced by must-be-1 | No handling | We have complete HLT emulation. |
 
-**结论:** 我们的 Primary Controls 更丰富，但要注意 must-be-1 位可能强制开启不需要的拦截。我们已有诊断日志记录强制位。
+**Conclusion:** Our Primary Controls are richer, but care must be taken as must-be-1 bits may force intercepts that are not needed. We already have diagnostic logs to record forced bits.
 
 ### 2.3 Secondary Processor-Based Controls
 
-| 功能位 | VMXHypervisorToolbox | NBP | 分析 |
+| Feature Bit | VMXHypervisorToolbox | NBP | Analysis |
 |--------|---------------------|-----|------|
-| ENABLE_EPT | 请求 | N/A | NBP 无 EPT |
-| ENABLE_VPID | 请求 | N/A | NBP 无 VPID |
-| ENABLE_RDTSCP | 请求 | N/A | |
-| ENABLE_INVPCID | 请求 | N/A | |
-| ENABLE_XSAVES | 请求 | N/A | |
+| ENABLE_EPT | Request | N/A | NBP has no EPT. |
+| ENABLE_VPID | Request | N/A | NBP has no VPID. |
+| ENABLE_RDTSCP | Request | N/A | |
+| ENABLE_INVPCID | Request | N/A | |
+| ENABLE_XSAVES | Request | N/A | |
 
-**结论:** 我们的 Secondary Controls 完整，无问题。
+**Conclusion:** Our Secondary Controls are complete with no issues.
 
 ### 2.4 VM-Exit Controls
 
-| 功能位 | VMXHypervisorToolbox | NBP | 分析 |
+| Feature Bit | VMXHypervisorToolbox | NBP | Analysis |
 |--------|---------------------|-----|------|
-| HOST_ADDR_SPACE_SIZE | 请求 | 请求 (x64) | 一致 |
-| ACK_INT_ON_EXIT | **不请求** | 请求 | NBP 请求了但我们不需要（不拦截外部中断） |
-| SAVE_IA32_EFER | **请求** | 不请求 | 我们更完善 |
-| LOAD_IA32_EFER | **请求** | 不请求 | 我们更完善 |
+| HOST_ADDR_SPACE_SIZE | Request | Request (x64) | Consistent. |
+| ACK_INT_ON_EXIT | **Do not request** | Request | NBP requested it but we do not need it (we do not intercept external interrupts). |
+| SAVE_IA32_EFER | **Request** | Do not request | Ours is more complete. |
+| LOAD_IA32_EFER | **Request** | Do not request | Ours is more complete. |
 
-> **⚠️ 潜在问题 #1: SAVE/LOAD_IA32_PAT 缺失**
+> **⚠️ Potential Issue #1: Missing SAVE/LOAD_IA32_PAT**
 >
-> 我们请求了 SAVE/LOAD_IA32_EFER，但**没有**请求 `SAVE_IA32_PAT` / `LOAD_IA32_PAT`。
-> PAT (Page Attribute Table) MSR 控制内存类型缓存策略。如果 VM-Exit 时不保存/加载 PAT，
-> Host 和 Guest 共享同一个 PAT 值。对于 Blue Pill hypervisor（Host 和 Guest 运行同一 OS），
-> 这通常不是问题，因为两者的 PAT 相同。但如果 Guest 修改了 PAT 而 Host 不跟踪，可能导致
-> Host 的 EPT 缓存类型与实际 PAT 不匹配。
+> We requested SAVE/LOAD_IA32_EFER but did **not** request `SAVE_IA32_PAT` / `LOAD_IA32_PAT`.
+> The PAT (Page Attribute Table) MSR controls memory type caching policies. If PAT is not saved/loaded during VM-Exit,
+> Host and Guest share the same PAT value. For a Blue Pill hypervisor (where Host and Guest run the same OS),
+> this is usually not an issue because both share the same PAT. However, if the Guest modifies the PAT and the Host does not track it, it may lead to
+> a mismatch between the Host's EPT memory type caching and the actual PAT.
 >
-> **风险等级: 低**（64-bit Windows 几乎不修改 PAT）
-> **建议:** 如果将来遇到 EPT 缓存异常，考虑添加 SAVE/LOAD_IA32_PAT。
+> **Risk Level: Low** (64-bit Windows rarely modifies the PAT)  
+> **Suggestion:** If EPT caching anomalies are encountered in the future, consider adding SAVE/LOAD_IA32_PAT.
 
 ### 2.5 VM-Entry Controls
 
-| 功能位 | VMXHypervisorToolbox | NBP | 分析 |
+| Feature Bit | VMXHypervisorToolbox | NBP | Analysis |
 |--------|---------------------|-----|------|
-| IA32E_MODE_GUEST | 请求 | 请求 (x64) | 一致 |
-| LOAD_IA32_EFER | **请求** | 不请求 | 我们更完善 |
+| IA32E_MODE_GUEST | Request | Request (x64) | Consistent. |
+| LOAD_IA32_EFER | **Request** | Do not request | Ours is more complete. |
 
-**结论:** 我们的 Entry Controls 正确。
+**Conclusion:** Our Entry Controls are correct.
 
 ---
 
-## 三、Guest 状态初始化对比
+## III. Comparison of Guest State Initialization
 
-### 3.1 段寄存器
+### 3.1 Segment Registers
 
-| 字段 | VMXHypervisorToolbox | NBP | 分析 |
+| Field | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| Selector | 从当前 CPU 读取 | 从当前 CPU / Guest GDT | 一致 |
-| Base | **从 GDT 解析** | 从 GDT 解析 | 一致 |
-| Limit | **从 GDT 解析** | 从 GDT 解析 | 一致 |
-| Access Rights | **从 GDT 解析** | 从 GDT 解析 | 一致 |
-| FS_BASE | **从 MSR 读取** | 从 MSR 读取 | 一致 |
-| GS_BASE | **从 MSR 读取** | 从 MSR 读取 | 一致 |
-| LDTR | **完整设置** | 完整设置 | 一致 |
-| TR (64位系统段) | **16 字节描述符解析** | 16 字节描述符解析 | 一致 |
+| Selector | Read from current CPU | Read from current CPU / Guest GDT | Consistent. |
+| Base | Parsed from GDT | Parsed from GDT | Consistent. |
+| Limit | Parsed from GDT | Parsed from GDT | Consistent. |
+| Access Rights | Parsed from GDT | Parsed from GDT | Consistent. |
+| FS_BASE | Read from MSR | Read from MSR | Consistent. |
+| GS_BASE | Read from MSR | Read from MSR | Consistent. |
+| LDTR | Fully configured | Fully configured | Consistent. |
+| TR (64-bit system segment) | 16-byte descriptor parsing | 16-byte descriptor parsing | Consistent. |
 
-**Unusable Segment 处理:**
-- 我们: `Selector == 0 || (Selector & 0xFFF8) == 0` → 返回 `0x10000` (Unusable)
+**Unusable Segment Handling:**
+- Ours: `Selector == 0 || (Selector & 0xFFF8) == 0` → returns `0x10000` (Unusable)
 - NBP: `if (!Selector) uAccessRights |= 0x10000`
 
-两者逻辑等价，我们的判断更严格（多了 `Selector & 0xFFF8 == 0` 判断，覆盖 RPL 不为零但 Index 为零的情况）。
+Both logics are equivalent, but our check is stricter (adding the `Selector & 0xFFF8 == 0` check to cover cases where RPL is non-zero but the Index is zero).
 
-> **⚠️ 潜在问题 #2: DS/ES 在 64-bit 可能需要 Unusable 标记**
+> **⚠️ Potential Issue #2: DS/ES may need Unusable flag in 64-bit mode**
 >
-> 在 64-bit long mode 中，DS 和 ES 的 Selector 可能为 0（Windows 64-bit 内核确实使用 DS=0x2B、ES=0x2B）。
-> 但如果某些情况下 DS/ES Selector 为 0，我们的代码会返回 Base=0, Limit=0, AR=0x10000。
-> 这是正确行为（Intel SDM: 64-bit mode ignores base/limit for DS/ES/SS segments）。
+> In 64-bit long mode, the Selector of DS and ES may be 0 (the Windows 64-bit kernel indeed uses DS=0x2B and ES=0x2B).
+> However, if DS/ES Selector is 0 in some cases, our code returns Base=0, Limit=0, AR=0x10000.
+> This is correct behavior (Intel SDM: 64-bit mode ignores base/limit for DS/ES/SS segments).
 >
-> **风险等级: 无** — 当前实现正确。
+> **Risk Level: None** — The current implementation is correct.
 
-### 3.2 控制寄存器
+### 3.2 Control Registers
 
-| 字段 | VMXHypervisorToolbox | NBP | 分析 |
+| Field | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| Guest CR0 | `__readcr0()` | `RegGetCr0()` | 一致 |
-| Guest CR3 | `__readcr3()` | `RegGetCr3()` | 一致 |
-| Guest CR4 | `__readcr4()` | `RegGetCr4()` | 一致 |
-| CR0 Guest-Host Mask | **0** (不拦截) | `X86_CR0_PG` (拦截 PG 位) | **差异** |
-| CR4 Guest-Host Mask | `CR4_VMXE` (隐藏 VMXE) | `X86_CR4_VMXE` | 一致 |
-| CR0 Read Shadow | `Cr0` (当前值) | `CR0 & PG | PG` | 含义相同 |
-| CR4 Read Shadow | `Cr4 & ~VMXE` | `0` | **差异** |
+| Guest CR0 | `__readcr0()` | `RegGetCr0()` | Consistent. |
+| Guest CR3 | `__readcr3()` | `RegGetCr3()` | Consistent. |
+| Guest CR4 | `__readcr4()` | `RegGetCr4()` | Consistent. |
+| CR0 Guest-Host Mask | **0** (do not intercept) | `X86_CR0_PG` (intercept PG bit) | **Difference** |
+| CR4 Guest-Host Mask | `CR4_VMXE` (hide VMXE) | `X86_CR4_VMXE` | Consistent. |
+| CR0 Read Shadow | `Cr0` (current value) | `CR0 & PG | PG` | Same meaning. |
+| CR4 Read Shadow | `Cr4 & ~VMXE` | `0` | **Difference** |
 
-> **⚠️ 潜在问题 #3: CR0 Guest-Host Mask = 0**
+> **⚠️ Potential Issue #3: CR0 Guest-Host Mask = 0**
 >
-> 我们的 CR0 Guest-Host Mask 设为 0（不拦截任何 CR0 位修改），但 NBP 拦截 PG 位。
-> 在我们的架构中，CR0 修改通过 `CR_ACCESS_TYPE_MOV_TO_CR` 和 `CR_ACCESS_TYPE_LMSW`
-> 在 HandleCrAccess 中处理，**但前提是 CR3_LOAD_EXIT 触发了 CR 访问拦截**。
+> Our CR0 Guest-Host Mask is set to 0 (no interception of any CR0 modifications), whereas NBP intercepts the PG bit.
+> In our architecture, CR0 modifications are handled via `CR_ACCESS_TYPE_MOV_TO_CR` and `CR_ACCESS_TYPE_LMSW` in `HandleCrAccess`,
+> but only if a CR access intercept is triggered.
 >
-> 实际上 CR0 Guest-Host Mask = 0 意味着 Guest 对 CR0 的所有写入都**不**触发 VM-Exit。
-> 这意味着 Guest 可以直接修改 CR0 而不经过我们的 `HandleCrAccess` 处理。
+> In reality, CR0 Guest-Host Mask = 0 means all Guest writes to CR0 do **not** trigger a VM-Exit.
+> This means the Guest can directly modify CR0 without going through our `HandleCrAccess`.
 >
-> **但是，VMX Fixed Bits 保护了关键位：**
-> - `MSR_IA32_VMX_CR0_FIXED0` 强制某些位为 1 (PE, NE, ET, PG)
-> - `MSR_IA32_VMX_CR0_FIXED1` 限制某些位为 0
-> - VM-Entry 会检查 Guest CR0 是否符合 Fixed Bits 约束
+> **However, VMX Fixed Bits protect key bits:**
+> - `MSR_IA32_VMX_CR0_FIXED0` forces certain bits to 1 (PE, NE, ET, PG)
+> - `MSR_IA32_VMX_CR0_FIXED1` restricts certain bits to 0
+> - VM-Entry checks if Guest CR0 conforms to the Fixed Bits constraints
 >
-> 如果 Guest 写入违反 Fixed Bits 的值，**VM-Entry 会失败**！但因为 Mask=0，Guest
-> 的写入直接生效而不经过我们的 Handler，所以无法应用 Fixed Bits 调整。
+> If the Guest writes a value violating the Fixed Bits, **VM-Entry will fail**! However, because Mask=0, the Guest's
+> write takes effect directly without passing through our Handler, so Fixed Bits adjustments cannot be applied.
 >
-> **然而，在实践中：**
-> - 64-bit Windows 内核不会清除 PG, PE, NE 位
-> - CR0 的 TS 位由 CLTS 指令清除（会触发单独的 VM-Exit 类型）
-> - LMSW 指令会触发 VM-Exit（Intel SDM: LMSW 总是触发 CR-access VM-Exit）
+> **However, in practice:**
+> - The 64-bit Windows kernel will not clear the PG, PE, or NE bits.
+> - The TS bit of CR0 is cleared by the CLTS instruction (which triggers a separate VM-Exit type).
+> - The LMSW instruction triggers a VM-Exit (Intel SDM: LMSW always triggers a CR-access VM-Exit).
 >
-> **风险等级: 低** — 但如果 Guest 执行 `MOV CR0, <违反 Fixed Bits 的值>`，
-> 将导致下次 VM-Entry 失败。建议将 CR0 Mask 设为至少包含 VMX Fixed Bits 要求的位。
+> **Risk Level: Low** — But if the Guest executes `MOV CR0, <value violating Fixed Bits>`,
+> it will cause the next VM-Entry to fail. It is recommended to set CR0 Mask to at least contain the bits required by the VMX Fixed Bits.
 
-> **⚠️ 潜在问题 #4: CR4 Read Shadow 差异**
+> **⚠️ Potential Issue #4: CR4 Read Shadow Differences**
 >
-> 我们: `Cr4 & ~CR4_VMXE` — 返回当前 CR4 但隐藏 VMXE
-> NBP: `0` — 返回空值
+> Ours: `Cr4 & ~CR4_VMXE` — returns the current CR4 but hides VMXE.  
+> NBP: `0` — returns an empty value.
 >
-> 我们的做法更正确。NBP 的 `CR4_READ_SHADOW = 0` 意味着 Guest 读取 CR4 被 Mask
-> 拦截的位（VMXE）时看到 0，但不影响其他位。两者效果相同：Guest 看不到 VMXE。
+> Our approach is more correct. NBP's `CR4_READ_SHADOW = 0` means that when the Guest reads CR4, the bits masked
+> by the Guest-Host Mask (VMXE) are read as 0, but it does not affect other bits. Both achieve the same effect: the Guest cannot see VMXE.
 >
-> **风险等级: 无** — 我们的实现正确。
+> **Risk Level: None** — Our implementation is correct.
 
-### 3.3 其他 Guest 状态字段
+### 3.3 Other Guest State Fields
 
-| 字段 | VMXHypervisorToolbox | NBP | 分析 |
+| Field | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| DR7 | `__readdr(7)` (实际值) | `0x400` (硬编码) | **差异** |
-| RFLAGS | `AsmGetRflags()` | `RegGetRflags()` | 一致 |
-| DEBUGCTL | `__readmsr(IA32_DEBUGCTL)` | `__readmsr(IA32_DEBUGCTL)` | 一致 |
-| EFER | **`__readmsr(IA32_EFER)`** | 不设置 | 我们更完善 |
-| SYSENTER_CS/ESP/EIP | 从 MSR 读取 | 从 MSR 读取 | 一致 |
-| XSS | **从 MSR 读取（条件）** | N/A | 我们更完善 |
-| Activity State | 0 (Active) | 0 (Active) | 一致 |
-| Interruptibility | 0 | 0 | 一致 |
-| Pending DBG Exceptions | 0 | 未显式设置 | 我们更完善 |
-| VMCS Link Pointer | 0xFFFFFFFFFFFFFFFF | 0xFFFFFFFF (x86) | 一致 |
+| DR7 | `__readdr(7)` (actual value) | `0x400` (hardcoded) | **Difference** |
+| RFLAGS | `AsmGetRflags()` | `RegGetRflags()` | Consistent. |
+| DEBUGCTL | `__readmsr(IA32_DEBUGCTL)` | `__readmsr(IA32_DEBUGCTL)` | Consistent. |
+| EFER | **`__readmsr(IA32_EFER)`** | Not configured | Ours is more complete. |
+| SYSENTER_CS/ESP/EIP | Read from MSR | Read from MSR | Consistent. |
+| XSS | Read from MSR (conditional) | N/A | Ours is more complete. |
+| Activity State | 0 (Active) | 0 (Active) | Consistent. |
+| Interruptibility | 0 | 0 | Consistent. |
+| Pending DBG Exceptions | 0 | Not explicitly set | Ours is more complete. |
+| VMCS Link Pointer | 0xFFFFFFFFFFFFFFFF | 0xFFFFFFFF (x86) | Consistent. |
 
-> **发现 #1: DR7 初始化差异**
+> **Finding #1: DR7 Initialization Difference**
 >
-> 我们读取真实 DR7 值（`__readdr(7)`），NBP 硬编码 `0x400`。
-> `0x400` 是 DR7 的默认值（所有断点禁用，Bit 10 = reserved, always 1）。
-> 在 Blue Pill 场景中，因为我们在运行时虚拟化 OS，当前 DR7 可能有调试器设置的
-> 断点。读取真实值是正确做法。
+> We read the real DR7 value (`__readdr(7)`), whereas NBP hardcodes `0x400`.  
+> `0x400` is the default value of DR7 (all breakpoints disabled, Bit 10 = reserved, always 1).  
+> In a Blue Pill scenario, since we virtualize the OS at runtime, the current DR7 might contain breakpoints
+> set by a debugger. Reading the real value is the correct approach.
 >
-> **风险等级: 无** — 我们的实现更正确。
+> **Risk Level: None** — Our implementation is more correct.
 
 ---
 
-## 四、Host 状态初始化对比
+## IV. Comparison of Host State Initialization
 
-### 4.1 Host 段寄存器
+### 4.1 Host Segment Registers
 
-| 字段 | VMXHypervisorToolbox | NBP | 分析 |
+| Field | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| CS/SS/DS/ES/FS/GS | `Selector & 0xFFF8` | `Selector & 0xF8` | **差异** |
-| TR | `Tr & 0xFFF8` | `Tr & 0xF8` | **差异** |
+| CS/SS/DS/ES/FS/GS | `Selector & 0xFFF8` | `Selector & 0xF8` | **Difference** |
+| TR | `Tr & 0xFFF8` | `Tr & 0xF8` | **Difference** |
 
-> **⚠️ 潜在问题 #5: Host Selector 掩码差异**
+> **⚠️ Potential Issue #5: Host Selector Mask Difference**
 >
-> 我们: `& 0xFFF8` — 清除低 3 位（RPL + TI）
-> NBP: `& 0xF8` — 只清除低 3 位但限制 Index 在低 5 位范围
+> Ours: `& 0xFFF8` — clears the lower 3 bits (RPL + TI).  
+> NBP: `& 0xF8` — only clears the lower 3 bits but restricts the Index to the lower 5 bits.
 >
-> `0xFFF8` 是正确的掩码（Intel SDM Vol. 3C, Section 26.2.3: Host selector RPL 和 TI
-> 必须为 0）。NBP 的 `0xF8` 是一个 bug——如果 Selector 值大于 0xFF（GDT 中有超过 31
-> 个条目），高位会被清零。但 64-bit Windows 的内核段选择子都在低范围，所以实际上不会触发。
+> `0xFFF8` is the correct mask (Intel SDM Vol. 3C, Section 26.2.3: Host selector RPL and TI
+> must be 0). NBP's `0xF8` is a bug — if the Selector value is greater than `0xFF` (more than 31
+> entries in the GDT), the high bits would be cleared. However, the kernel segment selectors of 64-bit Windows are all in the low range, so it is never triggered in practice.
 >
-> **风险等级: 无** — 我们的实现正确。
+> **Risk Level: None** — Our implementation is correct.
 
 ### 4.2 Host GDT/IDT
 
-| 方面 | VMXHypervisorToolbox | NBP | 分析 |
+| Aspect | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| GDT | **共用 Guest 的** | **独立分配** | **重要差异** |
-| IDT | **共用 Guest 的** | **独立分配** | **重要差异** |
+| GDT | **Shared with Guest** | **Independently Allocated** | **Important Difference** |
+| IDT | **Shared with Guest** | **Independently Allocated** | **Important Difference** |
 
-> **⚠️ 潜在问题 #6: Host 共用 Guest GDT/IDT**
+> **⚠️ Potential Issue #6: Host Shares Guest GDT/IDT**
 >
-> 我们的 Host GDTR_BASE 和 IDTR_BASE 设置为当前（即将成为 Guest 的）GDT/IDT 地址。
-> 这意味着 Host（VMX root mode）和 Guest 共享同一张 GDT 和 IDT。
+> Our Host GDTR_BASE and IDTR_BASE are set to the current (soon-to-be Guest) GDT/IDT addresses.
+> This means the Host (in VMX root mode) and the Guest share the same GDT and IDT.
 >
-> **风险分析:**
-> - **GDT 风险:** 如果 Guest 修改 GDT（例如添加/修改段描述符），Host 在下次 VM-Exit
->   时使用的也是修改后的 GDT。Blue Pill 模式下 Guest = Host OS，所以两者应该用同一
->   GDT。但如果 anti-rootkit 软件修改 GDT 来检测 hypervisor，Host 可能受影响。
-> - **IDT 风险:** 类似问题。如果 Guest 修改 IDT，Host 的 ISR 也受影响。
+> **Risk Analysis:**
+> - **GDT Risk:** If the Guest modifies the GDT (e.g., adding/modifying segment descriptors), the Host will use the modified GDT
+>   on the next VM-Exit. In Blue Pill mode, Guest = Host OS, so both should use the same
+>   GDT. However, if anti-rootkit software modifies the GDT to detect the hypervisor, the Host might be affected.
+> - **IDT Risk:** Similar issue. If the Guest modifies the IDT, the Host's ISR will also be affected.
 >
-> **NBP 的做法:** 分配独立 GDT/IDT，复制原始条目，避免 Guest 篡改影响 Host。
-> 这更安全但增加了内存开销和复杂度。
+> **NBP's Approach:** Allocates an independent GDT/IDT, copying the original entries, to prevent Guest tampering from affecting the Host.
+> This is safer but increases memory overhead and complexity.
 >
-> **对于我们的场景（Blue Pill anti-debug）:**
-> 共用 GDT/IDT 是可接受的，因为：
-> 1. Host 在 VMX root mode 运行时间极短（仅 VM-Exit handler）
-> 2. Guest = 当前 OS，不会恶意修改 GDT/IDT
-> 3. 独立 GDT/IDT 需要同步更新（OS 修改 GDT 时 Host 副本也要更新），反而更复杂
+> **For our scenario (Blue Pill anti-debug):**  
+> Sharing the GDT/IDT is acceptable because:
+> 1. The Host runs in VMX root mode for an extremely short time (only the VM-Exit handler).
+> 2. Guest = current OS, and will not maliciously modify the GDT/IDT.
+> 3. Independent GDT/IDTs require synchronous updates (the Host copy must be updated when the OS modifies GDT), which increases complexity.
 >
-> **风险等级: 低** — 对于 anti-debug 用途可接受，但如果需要对抗 rootkit 检测则需要改进。
+> **Risk Level: Low** — Acceptable for anti-debug purposes, but needs improvement if countering rootkit detection is required.
 
 ### 4.3 Host Stack
 
-| 方面 | VMXHypervisorToolbox | NBP | 分析 |
+| Aspect | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| 大小 | **16KB (4 pages)** | **64KB (16 pages)** | **NBP 4x 大** |
-| 分配方式 | ExAllocatePoolWithTag | MmAllocateContiguousMemory | NBP 物理连续 |
-| CPU 上下文位置 | 全局数组 | 栈尾部 | NBP 更高效 |
-| RSP 对齐 | 16 字节对齐 - 8 | 固定偏移 0x0C00 | **差异** |
+| Size | **16KB (4 pages)** | **64KB (16 pages)** | **NBP is 4x larger** |
+| Allocation Method | ExAllocatePoolWithTag | MmAllocateContiguousMemory | NBP is physically contiguous |
+| CPU Context Location | Global Array | End of Stack | NBP is more efficient |
+| RSP Alignment | 16-byte aligned - 8 | Fixed offset 0x0C00 | **Difference** |
 
-> **⚠️ 潜在问题 #7: Host Stack 只有 16KB — 栈溢出风险**
+> **⚠️ Potential Issue #7: Host Stack is only 16KB — Risk of Stack Overflow**
 >
-> 我们的 Host Stack 只有 16KB。VM-Exit handler 的栈使用分析：
+> Our Host Stack is only 16KB. Stack usage analysis of the VM-Exit handler:
 >
 > ```
-> GUEST_CONTEXT 保存:     128 bytes
-> x64 ABI shadow space:    40 bytes
-> VmxExitHandler 局部变量: ~200 bytes (含 static 变量不在栈上)
-> HandleCrAccess:          ~100 bytes
-> HandleCpuid:             ~200 bytes (AadHandleCpuid 有多个局部变量)
-> HandleRdmsr/Wrmsr:       ~300 bytes (MsrHandleRead/Write 含位图查找)
-> HandleEptViol:           ~400 bytes (EPT 遍历 + hook 查找)
-> EptInvalidateSingleContext: ~100 bytes
-> VMXROOT_LOG_* 调用:      ~200 bytes (格式化缓冲区)
-> 最深调用链 (EPT violation → hook → log):  ~1500 bytes
+> GUEST_CONTEXT saving:         128 bytes
+> x64 ABI shadow space:          40 bytes
+> VmxExitHandler local vars:   ~200 bytes (static variables are not on the stack)
+> HandleCrAccess:              ~100 bytes
+> HandleCpuid:                 ~200 bytes (AadHandleCpuid has multiple local variables)
+> HandleRdmsr/Wrmsr:           ~300 bytes (MsrHandleRead/Write contains bitmap lookup)
+> HandleEptViol:               ~400 bytes (EPT traversal + hook lookup)
+> EptInvalidateSingleContext:  ~100 bytes
+> VMXROOT_LOG_* calls:         ~200 bytes (formatted buffer)
+> Deepest call chain (EPT violation → hook → log):  ~1500 bytes
 > ```
 >
-> **正常情况下约 2KB 栈使用，峰值约 4KB。** 16KB 看似足够。
+> **Under normal circumstances, stack usage is about 2KB, with a peak of about 4KB.** 16KB seems sufficient.
 >
-> **但考虑以下场景:**
-> - 如果编译器在 `/Od` (无优化) 下编译，局部变量不会被复用，栈使用可能翻 2-3 倍
-> - 如果添加新的 deep handler (如 SSDT hook 回调)，调用链会加深
-> - WDK 默认不做栈保护（/GS），溢出不会被捕获
+> **However, consider the following scenarios:**
+> - If compiled under `/Od` (no optimization), local variables will not be reused, and stack usage could double or triple.
+> - If a new deep handler is added (such as an SSDT hook callback), the call chain will deepen.
+> - The WDK does not enable stack protection (`/GS`) by default, so overflows will not be caught.
 >
-> **风险等级: 中** — 当前足够，但没有安全余量。
-> **建议:** 考虑将 Host Stack 增加到 32KB (8 pages)，代价仅多 16KB × CPU数。
+> **Risk Level: Medium** — Sufficient for now, but leaves no safety margin.  
+> **Suggestion:** Consider increasing the Host Stack to 32KB (8 pages). The cost is only an extra 16KB × CPU count.
 
-### 4.4 Host RSP 设置
+### 4.4 Host RSP Setup
 
 ```c
 // VMXHypervisorToolbox:
@@ -291,201 +293,200 @@ VmxWrite(VMCS_HOST_RSP, StackTop);
 VmxWrite(HOST_RSP, (ULONG64)Cpu);  // Cpu structure at stack end
 ```
 
-> **分析:** 我们的 RSP 对齐处理正确。`-8` 确保 VM-Exit 入口时 RSP % 16 == 8，
-> 模拟了 CALL 指令 push 返回地址后的状态，满足 x64 ABI。
+> **Analysis:** Our RSP alignment handling is correct. `-8` ensures that at the VM-Exit entry, `RSP % 16 == 8`,
+> simulating the state after a `CALL` instruction pushes the return address, satisfying the x64 ABI.
 >
-> NBP 的方式不同：CPU 结构放在栈尾，HOST_RSP 指向 CPU 结构开头。VM-Exit handler
-> 通过 `[RSP]` 直接访问 CPU 上下文，无需全局变量查找。
+> NBP uses a different approach: the CPU structure is placed at the end of the stack, and `HOST_RSP` points to the start of the CPU structure. The VM-Exit handler
+> directly accesses the CPU context via `[RSP]`, avoiding global variable lookups.
 >
-> **风险等级: 无** — 两种方式都正确。
+> **Risk Level: None** — Both approaches are correct.
 
 ---
 
-## 五、ASM VM-Exit Handler 对比
+## V. ASM VM-Exit Handler Comparison
 
-### 5.1 寄存器保存
+### 5.1 Register Saving
 
-| 方面 | VMXHypervisorToolbox | NBP | 分析 |
+| Aspect | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| 保存时机 | **立即保存（VMENTRY 前第一件事）** | 立即保存 | 一致 |
-| 保存范围 | **全部 16 个 GP 寄存器** | 仅 8 个 (EAX-EDI, 无 R8-R15) | 我们更完整 (x64) |
-| RSP 处理 | 保存 Host RSP 占位 + 从 VMCS 同步 | 不保存 ESP | 我们正确 |
-| XMM 寄存器 | **不保存** | 不保存 | **两者都不保存** |
-| 段寄存器 | **不保存** | 不保存 | 一致（硬件保存/恢复） |
+| Saving Timing | **Immediately saved (first thing after VM-Exit)** | Immediately saved | Consistent. |
+| Saved Range | **All 16 GP registers** | Only 8 (EAX-EDI, no R8-R15) | Ours is more complete (x64). |
+| RSP Handling | Saves Host RSP placeholder + syncs from VMCS | Does not save ESP | Ours is correct. |
+| XMM Registers | **Not saved** | Not saved | **Neither saves them** |
+| Segment Registers | **Not saved** | Not saved | Consistent (hardware saved/restored). |
 
-> **⚠️ 潜在问题 #8: XMM/YMM 寄存器未保存**
+> **⚠️ Potential Issue #8: XMM/YMM Registers Not Saved**
 >
-> 我们和 NBP 都不保存 XMM0-XMM15 / YMM0-YMM15 寄存器。
+> Neither we nor NBP save the XMM0-XMM15 / YMM0-YMM15 registers.
 >
-> **为什么这通常不是问题:**
-> Intel SDM Vol. 3C, Section 27.1: VM-Exit 不修改 XMM/YMM 寄存器。
-> 它们在 Host 和 Guest 之间保持不变。
+> **Why this is usually not an issue:**  
+> Intel SDM Vol. 3C, Section 27.1: VM-Exit does not modify XMM/YMM registers.
+> They remain unchanged between Host and Guest.
 >
-> **但有一个隐患:**
-> 如果 VM-Exit handler 中的 C 代码使用了 SSE/AVX 指令（编译器可能自动生成
-> `movaps`, `movdqu` 等用于内存复制或结构体赋值），这些指令会修改 XMM 寄存器，
-> 破坏 Guest 的 XMM 状态。
+> **However, there is a hidden hazard:**  
+> If the C code in the VM-Exit handler uses SSE/AVX instructions (the compiler might automatically generate
+> `movaps`, `movdqu`, etc. for memory copying or struct assignments), these instructions will modify XMM registers,
+> corrupting the Guest's XMM state.
 >
-> **WDK 7600 默认行为:**
-> - `/kernel` 编译选项会禁用 SSE codegen（内核模式无 SSE）
-> - 但 `RtlZeroMemory` / `RtlCopyMemory` 的内联版本可能使用 REP MOVSB，安全
+> **WDK 7600 Default Behavior:**
+> - The `/kernel` compilation option disables SSE codegen (no SSE in kernel mode).
+> - However, the inline versions of `RtlZeroMemory` / `RtlCopyMemory` may use `REP MOVSB`, which is safe.
 >
-> **风险等级: 极低** — WDK 内核编译不使用 SSE，但需确认 `/kernel` 标志存在。
-> **建议:** 确认 `driver/sources` 中没有 `/arch:SSE2` 或类似选项。
+> **Risk Level: Extremely Low** — WDK kernel compilation does not use SSE, but the presence of the `/kernel` flag must be verified.  
+> **Suggestion:** Confirm that `driver/sources` does not contain `/arch:SSE2` or similar options.
 
-### 5.2 VMRESUME 失败处理
+### 5.2 VMRESUME Failure Handling
 
-| 方面 | VMXHypervisorToolbox | NBP | 分析 |
+| Aspect | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| 错误读取 | **vmread VM_INSTRUCTION_ERROR** | 不处理 | 我们更完善 |
-| 错误报告 | **调用 C 函数记录** | 无 | 我们更完善 |
-| 恢复策略 | **vmxoff + cli + hlt** | vmresume 后直接 ret | 我们更安全 |
+| Error Reading | **vmread VM_INSTRUCTION_ERROR** | No handling | Ours is more complete. |
+| Error Reporting | **Logged by calling a C function** | None | Ours is more complete. |
+| Recovery Strategy | **vmxoff + cli + hlt** | Direct ret after vmresume | Ours is safer. |
 
-**结论:** 我们的 VMRESUME 失败处理显著优于 NBP。
+**Conclusion:** Our VMRESUME failure handling is significantly better than NBP's.
 
-### 5.3 VmxShutdown (VMXOFF) 路径
+### 5.3 VmxShutdown (VMXOFF) Path
 
-| 方面 | VMXHypervisorToolbox | NBP | 分析 |
+| Aspect | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| Guest 状态恢复 | vmread RSP/RIP/RFLAGS → 压栈 → vmxoff → 恢复 GP → popfq → ret | 动态 Trampoline → vmxoff → IRETQ | **NBP 更规范** |
-| CS:SS 恢复 | **不恢复**（依赖段寄存器不变） | **通过 IRETQ 恢复 CS/SS** | **重要差异** |
-| GDT/IDT 恢复 | **不恢复** | **显式 lgdt/lidt** | **重要差异** |
-| FS_BASE/GS_BASE | **不恢复** | **通过 wrmsr 恢复** | **重要差异** |
+| Guest State Recovery | vmread RSP/RIP/RFLAGS → push to stack → vmxoff → restore GP → popfq → ret | Dynamic Trampoline → vmxoff → IRETQ | **NBP is more standard** |
+| CS:SS Recovery | **No recovery** (relies on segment registers remaining unchanged) | **Restores CS/SS via IRETQ** | **Important Difference** |
+| GDT/IDT Recovery | **No recovery** | **Explicit lgdt/lidt** | **Important Difference** |
+| FS_BASE/GS_BASE | **No recovery** | **Restores via wrmsr** | **Important Difference** |
 
-> **⚠️ 潜在问题 #9: VmxShutdown 不恢复段寄存器和 MSR**
+> **⚠️ Potential Issue #9: VmxShutdown Does Not Restore Segment Registers and MSRs**
 >
-> 我们的 VmxShutdown ASM 路径：
+> Our VmxShutdown ASM path:
 > 1. vmread Guest RSP/RIP/RFLAGS
-> 2. 在 Guest 栈上压入 RIP 和 RFLAGS
+> 2. Push RIP and RFLAGS onto the Guest stack
 > 3. vmxoff
-> 4. 恢复 GP 寄存器
+> 4. Restore GP registers
 > 5. `mov rsp, [Guest RSP]` → `popfq` → `ret`
 >
-> **缺失的恢复:**
-> - **CS 段寄存器:** vmxoff 后 CS 仍然是 Host CS（虽然在 Blue Pill 中 Host CS = Guest CS，所以通常不是问题）
-> - **FS_BASE / GS_BASE MSR:** vmxoff 后这些 MSR 保持 Host 值。如果 Host 和 Guest
->   的 FS_BASE/GS_BASE 相同（Blue Pill 中是的），则无影响。
-> - **GDT / IDT:** vmxoff 后 GDTR/IDTR 保持 Host 值（Blue Pill 中等同 Guest 值）。
+> **Missing Restoration:**
+> - **CS Segment Register:** After `vmxoff`, CS remains as Host CS (though in Blue Pill, Host CS = Guest CS, so this is usually not an issue).
+> - **FS_BASE / GS_BASE MSRs:** After `vmxoff`, these MSRs keep their Host values. If Host and Guest
+>   share the same FS_BASE/GS_BASE (which they do in Blue Pill), there is no effect.
+> - **GDT / IDT:** After `vmxoff`, GDTR/IDTR keep their Host values (which are identical to Guest values in Blue Pill).
 >
-> **NBP 的 Trampoline 方式更健壮：**
+> **NBP's Trampoline approach is more robust:**
 > 1. vmxoff
-> 2. 恢复所有 GP 寄存器
-> 3. `lgdt [Guest GDTR]` — 显式恢复 GDT
-> 4. `lidt [Guest IDTR]` — 显式恢复 IDT
-> 5. `wrmsr MSR_FS_BASE` — 恢复 FS_BASE
-> 6. `wrmsr MSR_GS_BASE` — 恢复 GS_BASE
-> 7. 构建 IRETQ 栈帧 (SS:RSP, RFLAGS, CS:RIP)
-> 8. `IRETQ` — 原子恢复 CS:RIP, SS:RSP, RFLAGS
+> 2. Restore all GP registers
+> 3. `lgdt [Guest GDTR]` — explicitly restores the GDT
+> 4. `lidt [Guest IDTR]` — explicitly restores the IDT
+> 5. `wrmsr MSR_FS_BASE` — restores FS_BASE
+> 6. `wrmsr MSR_GS_BASE` — restores GS_BASE
+> 7. Construct an IRETQ stack frame (SS:RSP, RFLAGS, CS:RIP)
+> 8. `IRETQ` — atomically restores CS:RIP, SS:RSP, and RFLAGS
 >
-> **为什么 IRETQ 更好:**
-> - `ret` 只恢复 RIP，CS 不变
-> - `IRETQ` 同时恢复 CS:RIP + SS:RSP + RFLAGS，是 Intel 推荐的特权级切换方式
-> - 如果 Host CS ≠ Guest CS（理论上在 Blue Pill 中不会发生），`ret` 会导致
->   代码段选择子错误
+> **Why IRETQ is better:**
+> - `ret` only restores RIP, leaving CS unchanged.
+> - `IRETQ` restores CS:RIP + SS:RSP + RFLAGS simultaneously, which is the Intel-recommended method for privilege level transitions.
+> - If Host CS ≠ Guest CS (which theoretically does not happen in Blue Pill), `ret` would cause
+>   a code segment selector fault.
 >
-> **风险等级: 低** — Blue Pill 场景中 Host = Guest，段寄存器相同。但代码不够健壮。
-> **建议:** 长期考虑改用 IRETQ 方式恢复。如果将来需要修改 Host CS（例如用独立 GDT），
-> 当前的 `popfq + ret` 方式将会崩溃。
+> **Risk Level: Low** — In the Blue Pill scenario, Host = Guest, and the segment registers are identical. However, the code is not robust enough.  
+> **Suggestion:** In the long term, consider switching to the IRETQ restoration method. If Host CS needs to be modified in the future (e.g., using an independent GDT), the current `popfq + ret` method will crash.
 
 ---
 
-## 六、VM-Exit 处理覆盖率对比
+## VI. Comparison of VM-Exit Handling Coverage
 
-### 6.1 处理的 VM-Exit 原因
+### 6.1 Intercepted VM-Exit Reasons
 
-| VM-Exit Reason | VMXHypervisorToolbox | NBP | 注释 |
+| VM-Exit Reason | VMXHypervisorToolbox | NBP | Comments |
 |----------------|---------------------|-----|------|
-| CPUID | ✅ 完整 (anti-debug) | ✅ 简单 (直通+后门) | 我们更丰富 |
-| RDMSR / WRMSR | ✅ 完整 (bitmap+安全网) | ✅ 基础 (直通/拦截) | 我们更安全 |
-| CR Access | ✅ 完整 (CR0/3/4 + CLTS + LMSW) | ✅ 基础 (MOV TO CR) | 我们更完整 |
-| DR Access | ✅ 完整 (anti-debug) | ❌ 不拦截 | 我们独有 |
-| Exception/NMI | ✅ NMI 重注入 + anti-debug | ❌ 不拦截 NMI | 我们更安全 |
-| EPT Violation | ✅ 完整 hook 引擎 | N/A (无 EPT) | 我们独有 |
-| EPT Misconfig | ✅ 错误报告 | N/A | 我们独有 |
-| MTF (单步) | ✅ per-CPU hook 恢复 | ❌ | 我们独有 |
-| VMCALL | ✅ 关机 + 内存读写 | ✅ 关机 | 我们更丰富 |
-| XSETBV | ✅ 验证 + 执行 | ❌ 不拦截 | 我们更安全 |
-| INVD | ✅ 转换为 WBINVD | ❌ 不拦截 | 我们更安全 |
-| INVLPG | ✅ 执行 + 推进 RIP | ❌ 不拦截 | 我们处理 |
-| WBINVD | ✅ 执行 + 推进 RIP | ❌ 不拦截 | 我们处理 |
-| HLT | ✅ Activity State = HLT | ❌ 不拦截 | 我们处理 |
-| I/O 指令 | ✅ 完整模拟 (IN/OUT) | ✅ 条件 (PS/2 键盘) | 一致 |
-| VMX 指令 | ✅ 全部注入 #UD | ✅ 注册为 trap | 一致 |
-| Triple Fault | ✅ 诊断 + 关机 | ✅ 注册为 trap | 一致 |
-| Task Switch | ✅ 注入 #GP | ❌ | 我们处理 |
-| EXTERNAL_INT | ✅ 防御性 stub | ✅ 注册为 trap | 一致 |
-| INT_WINDOW | ✅ 清除位 | ❌ | 我们处理 |
-| NMI_WINDOW | ✅ 注入 + 清除位 | ❌ | 我们处理 |
-| INVPCID | ✅ 全 TLB 刷新 | N/A | 我们处理 |
-| XSAVES/XRSTORS | ✅ 注入 #UD | N/A | 我们处理 |
-| GETSEC | ✅ 注入 #UD | ❌ | 我们处理 |
-| RDPMC | ✅ 注入 #GP | ❌ | 我们处理 |
-| MONITOR/MWAIT | ✅ NOP + 推进 RIP | ❌ | 我们处理 |
-| PAUSE | ✅ 推进 RIP | ❌ | 我们处理 |
-| GDT/IDT/LDT/TR Access | ✅ 推进 RIP | ❌ | 我们处理 |
-| APIC Access | ✅ 推进 RIP | ❌ | 我们处理 |
-| TPR Below | ✅ 直接恢复 | ❌ | 我们处理 |
-| Preemption Timer | ✅ 直接恢复 | ❌ | 我们处理 |
-| IDT-Vectoring 重注入 | ✅ 完整实现 | ❌ 缺失 | **我们的关键优势** |
+| CPUID | ✅ Complete (anti-debug) | ✅ Simple (passthrough + backdoor) | Ours is richer. |
+| RDMSR / WRMSR | ✅ Complete (bitmap + safety net) | ✅ Basic (passthrough / intercept) | Ours is safer. |
+| CR Access | ✅ Complete (CR0/3/4 + CLTS + LMSW) | ✅ Basic (MOV TO CR) | Ours is more complete. |
+| DR Access | ✅ Complete (anti-debug) | ❌ Not intercepted | Ours only. |
+| Exception/NMI | ✅ NMI re-injection + anti-debug | ❌ Does not intercept NMI | Ours is safer. |
+| EPT Violation | ✅ Complete hook engine | N/A (No EPT) | Ours only. |
+| EPT Misconfig | ✅ Error reporting | N/A | Ours only. |
+| MTF (Single Step) | ✅ per-CPU hook recovery | ❌ | Ours only. |
+| VMCALL | ✅ Shutdown + memory R/W | ✅ Shutdown | Ours is richer. |
+| XSETBV | ✅ Verification + execution | ❌ Not intercepted | Ours is safer. |
+| INVD | ✅ Converted to WBINVD | ❌ Not intercepted | Ours is safer. |
+| INVLPG | ✅ Execute + advance RIP | ❌ Not intercepted | Handled by us. |
+| WBINVD | ✅ Execute + advance RIP | ❌ Not intercepted | Handled by us. |
+| HLT | ✅ Activity State = HLT | ❌ Not intercepted | Handled by us. |
+| I/O Instructions | ✅ Complete emulation (IN/OUT) | ✅ Conditional (PS/2 keyboard) | Consistent. |
+| VMX Instructions | ✅ Inject #UD for all | ✅ Registered as trap | Consistent. |
+| Triple Fault | ✅ Diagnosis + Shutdown | ✅ Registered as trap | Consistent. |
+| Task Switch | ✅ Inject #GP | ❌ | Handled by us. |
+| EXTERNAL_INT | ✅ Defensive stub | ✅ Registered as trap | Consistent. |
+| INT_WINDOW | ✅ Clear bit | ❌ | Handled by us. |
+| NMI_WINDOW | ✅ Inject + clear bit | ❌ | Handled by us. |
+| INVPCID | ✅ Full TLB flush | N/A | Handled by us. |
+| XSAVES/XRSTORS | ✅ Inject #UD | N/A | Handled by us. |
+| GETSEC | ✅ Inject #UD | ❌ | Handled by us. |
+| RDPMC | ✅ Inject #GP | ❌ | Handled by us. |
+| MONITOR/MWAIT | ✅ NOP + advance RIP | ❌ | Handled by us. |
+| PAUSE | ✅ Advance RIP | ❌ | Handled by us. |
+| GDT/IDT/LDT/TR Access | ✅ Advance RIP | ❌ | Handled by us. |
+| APIC Access | ✅ Advance RIP | ❌ | Handled by us. |
+| TPR Below | ✅ Direct recovery | ❌ | Handled by us. |
+| Preemption Timer | ✅ Direct recovery | ❌ | Handled by us. |
+| IDT-Vectoring Re-injection | ✅ Full implementation | ❌ Missing | **Our key advantage** |
 
-**结论:** 我们的 VM-Exit 覆盖率远超 NBP，处理了几乎所有可能的退出原因。
+**Conclusion:** Our VM-Exit coverage far exceeds NBP, handling almost all possible exit reasons.
 
-### 6.2 未处理的 VM-Exit 原因
+### 6.2 Unhandled VM-Exit Reasons
 
-以下是 Intel SDM 定义的 VM-Exit reason 中我们**未显式处理**的（走 `default` 分支）：
+The following are VM-Exit reasons defined by the Intel SDM that we do not explicitly handle (they fall into the `default` branch):
 
-| Exit Reason # | 名称 | 是否需要处理 |
+| Exit Reason # | Name | Need to Handle? |
 |---------------|------|-------------|
-| 0 | EXCEPTION_NMI | ✅ 已处理 |
-| 2 | TRIPLE_FAULT | ✅ 已处理 |
-| 3 | INIT | ❌ 未处理 — 但 INIT 在 VMX non-root 被阻塞 |
-| 4 | SIPI | ❌ 未处理 — 同上 |
-| 5 | IO_SMI | ❌ 未处理 — SMI 不触发 VM-Exit |
-| 6 | OTHER_SMI | ❌ 未处理 |
-| 7 | INT_WINDOW | ✅ 已处理 |
-| 8 | NMI_WINDOW | ✅ 已处理 |
-| 36 | APIC_WRITE | ❌ 未处理 — 需要 APIC-register virt |
-| 55 | XSAVES | ✅ 已处理 |
-| 56 | XRSTORS | ✅ 已处理 |
+| 0 | EXCEPTION_NMI | ✅ Handled |
+| 2 | TRIPLE_FAULT | ✅ Handled |
+| 3 | INIT | ❌ Unhandled — but INIT is blocked in VMX non-root mode |
+| 4 | SIPI | ❌ Unhandled — same as above |
+| 5 | IO_SMI | ❌ Unhandled — SMI does not trigger VM-Exit |
+| 6 | OTHER_SMI | ❌ Unhandled |
+| 7 | INT_WINDOW | ✅ Handled |
+| 8 | NMI_WINDOW | ✅ Handled |
+| 36 | APIC_WRITE | ❌ Unhandled — requires APIC-register virtualization |
+| 55 | XSAVES | ✅ Handled |
+| 56 | XRSTORS | ✅ Handled |
 
-> **发现 #2: 几乎无遗漏**
+> **Finding #2: Almost No Omissions**
 >
-> 对于裸机 Blue Pill 场景，几乎不存在未处理但会触发的 VM-Exit。
-> INIT/SIPI 在 VMX non-root 中被阻塞不会触发 VM-Exit。
-> SMI 不触发 VM-Exit（除非启用了 dual-monitor treatment）。
+> For a bare-metal Blue Pill scenario, there are almost no unhandled VM-Exits that would actually trigger.
+> INIT/SIPI are blocked in VMX non-root mode and will not trigger VM-Exits.
+> SMI does not trigger a VM-Exit (unless dual-monitor treatment is enabled).
 >
-> **风险等级: 无** — VM-Exit 处理覆盖完整。
+> **Risk Level: None** — VM-Exit handling coverage is complete.
 
 ---
 
-## 七、IDT-Vectoring 事件重注入对比
+## VII. Comparison of IDT-Vectoring Event Re-injection
 
-| 方面 | VMXHypervisorToolbox | NBP | 分析 |
+| Aspect | VMXHypervisorToolbox | NBP | Analysis |
 |------|---------------------|-----|------|
-| 实现 | ✅ 完整 | ❌ 完全缺失 | **我们的关键优势** |
-| 检查时机 | VM-Exit handler 末尾 | N/A | 正确 |
-| 冲突检测 | 检查 VMENTRY_INT_INFO 有效位 | N/A | 正确 |
-| Error Code 重注入 | ✅ | N/A | 正确 |
-| Software Exception 指令长度 | ✅ | N/A | 正确 |
-| 诊断日志 | ✅ 前 20 次 + 每 1000 次 | N/A | 正确 |
+| Implementation | ✅ Full | ❌ Completely missing | **Our key advantage** |
+| Checking Timing | End of VM-Exit handler | N/A | Correct. |
+| Conflict Detection | Check VMENTRY_INT_INFO valid bit | N/A | Correct. |
+| Error Code Re-injection | ✅ | N/A | Correct. |
+| Software Exception Instruction Length | ✅ | N/A | Correct. |
+| Diagnostic Logs | First 20 times + every 1000 times | N/A | Correct. |
 
-**结论:** IDT-Vectoring 重注入是我们相对于 NBP 最重要的架构改进。没有它，Guest 在 IDT 事件交付过程中发生 VM-Exit 时会丢失异常，最终导致三重故障。
+**Conclusion:** IDT-Vectoring re-injection is our most crucial architectural improvement over NBP. Without it, the Guest would lose exceptions if a VM-Exit occurs during IDT event delivery, ultimately leading to a triple fault.
 
 ---
 
-## 八、VMLAUNCH 流程对比
+## VIII. Comparison of VMLAUNCH Flow
 
 ### VMXHypervisorToolbox:
 
 ```
 AsmVmxLaunch:
-  1. push rbx/rbp/rdi/rsi/r12-r15  (保存非易失寄存器)
+  1. push rbx/rbp/rdi/rsi/r12-r15  (Save non-volatile registers)
   2. vmwrite GUEST_RSP = current RSP
   3. vmwrite GUEST_RIP = &_LaunchSuccess
   4. vmlaunch
-  5. 失败: pop 寄存器, return 1
-  _LaunchSuccess:  (Guest 从这里开始)
-  6. pop 寄存器, return 0
+  5. Failure: pop registers, return 1
+  _LaunchSuccess:  (Guest starts here)
+  6. pop registers, return 0
 ```
 
 ### NBP:
@@ -497,98 +498,98 @@ CmSlipIntoMatrix:
   3. call VmxVirtualize(GuestRsp, GuestRip)
      → VmxLaunch (vmlaunch)
      → never returns
-  _CmSlipIntoMatrix_end:  (Guest 从这里恢复)
+  _CmSlipIntoMatrix_end:  (Guest resumes here)
   4. restore saved registers
   5. return to caller
 ```
 
-> **⚠️ 潜在问题 #10: VMLAUNCH 在 DPC 中执行**
+> **⚠️ Potential Issue #10: VMLAUNCH Executed in DPC**
 >
-> 我们的 VMLAUNCH 在 DPC 例程中执行（`VmxInitDpcRoutine`）。DPC 运行在 DISPATCH_LEVEL
-> (IRQL = 2)。Intel SDM 没有禁止在任何 IRQL 执行 VMLAUNCH，但需注意：
+> Our VMLAUNCH is executed in a DPC routine (`VmxInitDpcRoutine`). DPC runs at `DISPATCH_LEVEL`
+> (`IRQL = 2`). The Intel SDM does not forbid executing `VMLAUNCH` at any IRQL, but note:
 >
-> 1. DPC 例程有时间限制（Windows 建议 DPC 不超过 100μs）
-> 2. VMLAUNCH 成功后，DPC 继续以 Guest 身份运行，然后 KeSetEvent 唤醒等待线程
-> 3. 如果 VMLAUNCH 后的第一个 VM-Exit 很慢（例如大量诊断日志），可能超时
+> 1. DPC routines have execution time limits (Windows recommends DPC not exceed 100μs).
+> 2. After a successful `VMLAUNCH`, the DPC continues running as the Guest, then calls `KeSetEvent` to wake the waiting thread.
+> 3. If the first VM-Exit after `VMLAUNCH` is slow (e.g., due to heavy diagnostic logging), it might time out.
 >
-> NBP 使用类似方式（`HvmSwallowBluepill` → `CmSubvert` 在 DPC 中运行）。
+> NBP uses a similar approach (`HvmSwallowBluepill` → `CmSubvert` runs in a DPC).
 >
-> **风险等级: 低** — 这是 Blue Pill 标准做法。
+> **Risk Level: Low** — This is standard Blue Pill practice.
 
 ---
 
-## 九、发现的潜在问题汇总
+## IX. Summary of Identified Potential Issues
 
-### 严重级别分类
+### Severity Classification
 
-#### 🟢 无风险 (确认正确)
-- 段寄存器初始化（完整且正确）
+#### 🟢 No Risk (Confirmed Correct)
+- Segment register initialization (complete and correct)
 - Pin-Based / Primary / Secondary Controls
-- VM-Exit 处理覆盖率
-- IDT-Vectoring 重注入
-- 寄存器保存/恢复
-- VPID 分配
+- VM-Exit handling coverage
+- IDT-Vectoring re-injection
+- Register saving/restoration
+- VPID allocation
 
-#### 🟡 低风险 (建议关注)
-1. **#3 CR0 Guest-Host Mask = 0** — Guest 可直接修改 CR0，若违反 Fixed Bits 则 VM-Entry 失败
-2. **#6 Host 共用 Guest GDT/IDT** — 对 Blue Pill 可接受，但不够健壮
-3. **#9 VmxShutdown 不恢复段寄存器/MSR** — Blue Pill 中 Host=Guest 所以无影响，但代码不健壮
+#### 🟡 Low Risk (Recommended to Monitor)
+1. **#3 CR0 Guest-Host Mask = 0** — Guest can directly modify CR0; if Fixed Bits are violated, VM-Entry fails.
+2. **#6 Host Shares Guest GDT/IDT** — Acceptable for Blue Pill, but not robust enough.
+3. **#9 VmxShutdown Does Not Restore Segment Registers/MSRs** — Host = Guest in Blue Pill, so there is no impact, but the code is not robust.
 
-#### 🟠 中等风险 (建议改进)
-4. **#7 Host Stack 16KB** — 当前足够但无安全余量，建议增至 32KB
+#### 🟠 Medium Risk (Recommended to Improve)
+4. **#7 Host Stack 16KB** — Currently sufficient but has no safety margin; recommended to increase to 32KB.
 
-#### 🔴 高风险 (无)
-无高风险问题发现。
+#### 🔴 High Risk (None)
+No high-risk issues found.
 
 ---
 
-## 十、建议的改进优先级
+## X. Recommended Improvement Priorities
 
-### 短期 (如果裸机测试出问题):
+### Short-term (If Bare-metal Testing Fails):
 
-1. **检查 CR0 Fixed Bits 是否被违反** — 如果 VM-Entry 失败日志显示 "VM-Entry failure"，
-   检查 Guest CR0 是否违反 `MSR_IA32_VMX_CR0_FIXED0/FIXED1`。
-   修复: 将 `CR0_GUEST_HOST_MASK` 设为 `__readmsr(MSR_IA32_VMX_CR0_FIXED0)` 中的强制位。
+1. **Check if CR0 Fixed Bits are Violated** — If the VM-Entry failure log shows "VM-Entry failure",
+   check whether Guest CR0 violates `MSR_IA32_VMX_CR0_FIXED0/FIXED1`.  
+   Fix: Set `CR0_GUEST_HOST_MASK` to the mandatory bits in `__readmsr(MSR_IA32_VMX_CR0_FIXED0)`.
 
-2. **增加 Host Stack 到 32KB** — 修改 `VmxAllocateCpuContext`:
+2. **Increase Host Stack to 32KB** — Modify `VmxAllocateCpuContext`:
    ```c
    CpuCtx->HostStackSize = 8 * PAGE_SIZE_4KB;  // 32KB
    ```
 
-### 中期 (稳定后):
+### Medium-term (After Stabilization):
 
-3. **改用 IRETQ 关闭路径** — 参考 NBP 的 Trampoline 方式，在 VmxShutdown 中恢复
-   完整的 Guest 状态（CS, SS, GDT, IDT, FS_BASE, GS_BASE）后用 IRETQ 返回。
+3. **Switch to IRETQ Shutdown Path** — Reference NBP's Trampoline method to restore
+   the complete Guest state (CS, SS, GDT, IDT, FS_BASE, GS_BASE) in `VmxShutdown` before returning with IRETQ.
 
-4. **添加 CPUID 后门** — 参考 NBP 的 `0xbabecafe` 检测机制，用于快速验证 hypervisor
-   是否活跃。
+4. **Add a CPUID Backdoor** — Reference NBP's `0xbabecafe` detection mechanism to quickly verify if the
+   hypervisor is active.
 
-### 长期 (可选优化):
+### Long-term (Optional Optimizations):
 
-5. **独立 Host GDT/IDT** — 如果需要对抗高级 rootkit 检测，分配独立的 Host GDT/IDT。
-6. **添加 SAVE/LOAD_IA32_PAT** — 如果遇到 EPT 缓存类型异常。
+5. **Independent Host GDT/IDT** — If advanced rootkit detection must be countered, allocate independent Host GDT/IDTs.
+6. **Add SAVE/LOAD_IA32_PAT** — If EPT memory type caching anomalies are encountered.
 
 ---
 
-## 十一、结论
+## XI. Conclusion
 
-**VMXHypervisorToolbox 的 VMX 框架层整体质量良好**，在以下方面显著优于 NBP v0.32:
-- VM-Exit 覆盖率（30+ 种 vs NBP 的 ~10 种）
-- IDT-Vectoring 事件重注入（NBP 完全缺失）
-- NMI 处理（拦截 + 重注入 vs NBP 不处理）
-- EPT/VPID 完整支持
-- MSR 安全处理（预探测 bitmap）
-- VMRESUME 失败处理
+**The overall quality of VMXHypervisorToolbox's VMX framework layer is excellent**, significantly outperforming NBP v0.32 in the following aspects:
+- VM-Exit coverage (30+ types vs NBP's ~10 types)
+- IDT-Vectoring event re-injection (completely missing in NBP)
+- NMI handling (interception + re-injection vs NBP's no handling)
+- Full EPT/VPID support
+- Secure MSR handling (pre-probed bitmap)
+- VMRESUME failure handling
 
-**没有发现会导致裸机三重故障或崩溃的严重 VMX 架构问题。**
+**No critical VMX architectural issues that could cause bare-metal triple faults or crashes were found.**
 
-最可能导致裸机问题的因素排序:
-1. 某些 must-be-1 位强制开启了未预期的拦截（已有诊断日志）
-2. CR0 Fixed Bits 违规导致 VM-Entry 失败（低概率）
-3. Host Stack 溢出（极低概率）
+Ranking of factors most likely to cause bare-metal issues:
+1. Certain must-be-1 bits forcing unexpected intercepts (diagnostic logs already present)
+2. CR0 Fixed Bits violations causing VM-Entry failure (low probability)
+3. Host Stack overflow (extremely low probability)
 
-建议在裸机测试时重点关注日志中的:
-- `VM-Entry failure` 消息
-- `forced bits` 诊断消息
-- `HEARTBEAT` 消息是否正常递增
-- `TRIPLE FAULT` 诊断消息
+It is recommended to focus on the following in logs during bare-metal testing:
+- `VM-Entry failure` messages
+- `forced bits` diagnostic messages
+- Whether the `HEARTBEAT` messages increment normally
+- `TRIPLE FAULT` diagnostic messages

@@ -1,94 +1,97 @@
-# VMXHypervisorToolbox Bug 分析与修复报告
+[简体中文](bug_analysis_and_fixes_CN.md) | English
 
-> **日期**：2026-04-11  
-> **涉及模块**：EPT Hook Engine / VMX Exit Handler / Driver IOCTL Dispatch  
-> **状态**：待 Review
+# VMXHypervisorToolbox Bug Analysis and Fix Report
 
----
-
-## 目录
-
-- [Bug #1：Trampoline 指令截断导致 #UD → BSOD](#bug-1trampoline-指令截断导致-ud--bsod)
-- [Bug #3：HandleMtf 多核竞争条件导致无限 EPT Violation 循环](#bug-3handlemtf-多核竞争条件导致无限-ept-violation-循环)
-- [Bug #5：EptSplitLargePage 后缺少 INVEPT 导致 EPT Misconfiguration](#bug-5eptsplitlargepage-后缺少-invept-导致-ept-misconfiguration)
-- [Bug #6：IOCTL 分发中 IoStatus.Information 未初始化](#bug-6ioctl-分发中-iostatusinformation-未初始化)
-- [修改文件清单](#修改文件清单)
-- [编译兼容性说明](#编译兼容性说明)
+> **Date**: 2026-04-11  
+> **Affected Modules**: EPT Hook Engine / VMX Exit Handler / Driver IOCTL Dispatch  
+> **Status**: Pending Review
 
 ---
 
-## Bug #1：Trampoline 指令截断导致 #UD → BSOD
+## Table of Contents
 
-### 严重程度：🔴 Critical
+- [Bug #1: Trampoline Instruction Truncation Leading to #UD → BSOD](#bug-1-trampoline-instruction-truncation-leading-to-ud--bsod)
+- [Bug #3: HandleMtf Multi-core Race Condition Leading to Infinite EPT Violation Loop](#bug-3-handlemtf-multi-core-race-condition-leading-to-infinite-ept-violation-loop)
+- [Bug #5: Missing INVEPT after EptSplitLargePage Leading to EPT Misconfiguration](#bug-5-missing-invept-after-eptsplitlargepage-leading-to-ept-misconfiguration)
+- [Bug #6: Uninitialized IoStatus.Information in IOCTL Dispatch](#bug-6-uninitialized-iostatusinformation-in-ioctl-dispatch)
+- [Modified Files List](#modified-files-list)
+- [Compilation Compatibility Notes](#compilation-compatibility-notes)
+- [Pending Confirmations](#pending-confirmations)
 
-### 问题描述
+---
 
-`EptHookFunction()` 在构建 trampoline（跳板）时，需要从目标函数头部"偷"走至少 12 字节（`48 B8 [imm64] FF E0` = MOV RAX, addr; JMP RAX），然后将这些原始字节复制到 trampoline 中，trampoline 末尾再 JMP 回原始函数 +12 的位置。
+## Bug #1: Trampoline Instruction Truncation Leading to #UD → BSOD
 
-**原始代码**硬编码复制 14 字节：
+### Severity: 🔴 Critical
+
+### Problem Description
+
+When `EptHookFunction()` constructs a trampoline, it needs to "steal" at least 12 bytes from the head of the target function (`48 B8 [imm64] FF E0` = MOV RAX, addr; JMP RAX). It then copies these original bytes into the trampoline, and appends a JMP instruction at the end of the trampoline to jump back to the original function + 12 bytes.
+
+**Original Code** hardcoded copying 14 bytes:
 
 ```c
-// 原始代码（有bug）
-Hook->OriginalBytesSize = 14;  // 硬编码
+// Original code (buggy)
+Hook->OriginalBytesSize = 14;  // Hardcoded
 RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, 14);
 ```
 
-这存在一个致命问题：x86-64 指令是**变长的**（1~15 字节），14 字节很可能恰好切断某条指令的中间。例如：
+This presents a fatal issue: x86-64 instructions are **variable-length** (1 to 15 bytes), and 14 bytes could easily cut through the middle of an instruction. For example:
 
 ```
-目标函数前缀:
-  48 89 5C 24 08    MOV [RSP+8], RBX     (5 字节)
-  48 89 6C 24 10    MOV [RSP+10h], RBP   (5 字节)
-  48 89 74 24 18    MOV [RSP+18h], RSI   (5 字节)  ← 第14字节在这条指令中间!
+Target function prefix:
+  48 89 5C 24 08    MOV [RSP+8], RBX     (5 bytes)
+  48 89 6C 24 10    MOV [RSP+10h], RBP   (5 bytes)
+  48 89 74 24 18    MOV [RSP+18h], RSI   (5 bytes)  ← The 14th byte falls in the middle of this instruction!
 ```
 
-Trampoline 会执行截断的 `48 89 74` 然后跳到垃圾字节 → `#UD`（Undefined Opcode）异常 → 内核态 → **BSOD**。
+The trampoline would execute the truncated `48 89 74`, and then jump into garbage bytes, resulting in an `#UD` (Undefined Opcode) exception in kernel-mode, triggering a **BSOD**.
 
-### 修复方案
+### Fix
 
-1. **实现 `EptGetInstructionLength()` 函数**：一个最小化的 x64 指令长度解码器（~300 行），覆盖内核函数前缀中常见的所有指令：
-   - 前缀处理：Legacy prefixes（LOCK/REP/段覆盖）、66h/67h、REX（40h~4Fh）
-   - 单字节操作码：PUSH/POP reg、MOV reg,imm、JMP/CALL rel、ALU 操作（ADD/SUB/XOR/CMP/...）、Group 1/3/5、Shift/Rotate 等
-   - 双字节操作码（0Fh）：Jcc rel32、MOVZX/MOVSX、CMOVcc、SETcc、NOP(多字节)、SYSCALL 等
-   - 完整的 ModRM + SIB + Displacement 解码
+1. **Implement the `EptGetInstructionLength()` function**: A minimal x64 instruction length decoder (~300 lines of code) that covers all common instructions found in kernel function prefixes:
+   - Prefix parsing: Legacy prefixes (LOCK/REP/Segment override), 66h/67h, REX prefixes (40h to 4Fh).
+   - Single-byte opcodes: PUSH/POP reg, MOV reg, imm, JMP/CALL rel, ALU operations (ADD/SUB/XOR/CMP/etc.), Group 1/3/5, Shift/Rotate, etc.
+   - Double-byte opcodes (0Fh): Jcc rel32, MOVZX/MOVSX, CMOVcc, SETcc, NOP (multi-byte), SYSCALL, etc.
+   - Complete ModRM + SIB + Displacement decoding.
 
-2. **修改 `EptHookFunction()` 的 trampoline 构建逻辑**：
+2. **Modify the trampoline construction logic in `EptHookFunction()`**:
 
 ```c
-// 修复后代码
+// Fixed code
 {
     ULONG TotalLen = 0;
     PUCHAR Code = (PUCHAR)TargetVa;
-    while (TotalLen < 12) {                          // 至少覆盖 12 字节
+    while (TotalLen < 12) {                          // Cover at least 12 bytes
         ULONG InsnLen = EptGetInstructionLength(Code + TotalLen);
         if (InsnLen == 0) {
-            // 遇到无法解码的指令 → 安全退出，不安装 hook
+            // Cannot decode instruction → exit safely without installing hook
             LOG_ERROR("EPT Hook: Cannot decode instruction at VA 0x%llX + 0x%X",
                       TargetVa, TotalLen);
-            // ...释放资源...
+            // ...release resources...
             return STATUS_UNSUCCESSFUL;
         }
         TotalLen += InsnLen;
     }
-    Hook->OriginalBytesSize = TotalLen;              // 可能是 12, 13, 14, 15...
+    Hook->OriginalBytesSize = TotalLen;              // Can be 12, 13, 14, 15...
 }
 RtlCopyMemory(Hook->OriginalBytes, (PVOID)TargetVa, Hook->OriginalBytesSize);
 ```
 
-**关键改进**：
-- 逐条指令累积长度，直到总长度 ≥ 12 字节
-- 保证不会截断任何指令
-- 遇到无法解码的指令时安全退出（而非盲目复制导致崩溃）
+**Key Improvements**:
+- Accumulate the length instruction by instruction until the total length is ≥ 12 bytes.
+- Ensure that no instruction is truncated.
+- Safely exit if an instruction cannot be decoded, rather than copying blindly and causing a crash.
 
-### 追加修复：OriginalBytes 缓冲区溢出保护
+### Additional Fix: OriginalBytes Buffer Overflow Protection
 
-原始修复中 `TotalLen` 按指令边界对齐，值可变（12, 13, 14, 15...），但 `Hook->OriginalBytes` 仅为 `UCHAR[16]`。极端情况下（如函数前缀包含长指令），`TotalLen` 可能超过 16 字节，导致 `RtlCopyMemory` 写越界，破坏结构体后续字段（`HookFunction` 指针等）。
+In the original fix, `TotalLen` is aligned to instruction boundaries and is variable (12, 13, 14, 15...). However, `Hook->OriginalBytes` was only declared as `UCHAR[16]`. In extreme cases (e.g., if the function prefix contains long instructions), `TotalLen` could exceed 16 bytes. This would lead to an out-of-bounds write during `RtlCopyMemory`, corrupting subsequent fields of the structure (such as the `HookFunction` pointer, etc.).
 
-**追加修复内容**：
+**Additional Fix Details**:
 
-1. **增大缓冲区**：`OriginalBytes[16]` → `OriginalBytes[32]`（x64 最长指令 15 字节，理论最大 TotalLen = 11 + 15 = 26，32 字节提供对齐余量）
+1. **Increase Buffer Size**: Change `OriginalBytes[16]` to `OriginalBytes[32]`. (The maximum length of a single x64 instruction is 15 bytes. Theoretically, the maximum `TotalLen` = 11 + 15 = 26 bytes, so a 32-byte buffer provides plenty of headroom and alignment margin.)
 
-2. **添加越界检查**：循环中每次累加前检查是否会超出缓冲区：
+2. **Add Out-of-Bounds Check**: Check if adding the next instruction length will exceed the buffer size before accumulating it in the loop:
 
 ```c
 if (TotalLen + InsnLen > sizeof(((EPT_HOOK_ENTRY*)0)->OriginalBytes)) {
@@ -96,79 +99,79 @@ if (TotalLen + InsnLen > sizeof(((EPT_HOOK_ENTRY*)0)->OriginalBytes)) {
               "(TotalLen=%u + InsnLen=%u > %u)",
               TargetVa, TotalLen, InsnLen,
               (ULONG)sizeof(((EPT_HOOK_ENTRY*)0)->OriginalBytes));
-    // ...释放资源...
+    // ...release resources...
     return STATUS_BUFFER_TOO_SMALL;
 }
 ```
 
-3. **同步修复 AMD-V 侧 (`npt.c`)**：`NptHookFunction()` 原先硬编码 `OriginalBytesSize = 14`，存在相同的指令截断问题。已替换为与 `ept.c` 一致的指令边界对齐 + 越界保护逻辑。
+3. **Synchronize AMD-V Side (`npt.c`)**: `NptHookFunction()` originally hardcoded `OriginalBytesSize = 14`, suffering from the same instruction truncation issue. It has been replaced with the same instruction boundary alignment and out-of-bounds protection logic as in `ept.c`.
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/ept.c` | +`EptGetInstructionLength()` 函数实现（~300 行）；修改 trampoline 构建逻辑；+越界保护检查 |
-| `driver/ept.h` | +`EptGetInstructionLength` 函数声明；`OriginalBytes[16]` → `OriginalBytes[32]` |
-| `driver/npt.c` | 硬编码 14 字节 → 指令边界对齐 + 越界保护（与 ept.c 一致） |
+| `driver/ept.c` | Added `EptGetInstructionLength()` function implementation (~300 lines); modified trampoline construction logic; added out-of-bounds protection check. |
+| `driver/ept.h` | Added `EptGetInstructionLength` function prototype; changed `OriginalBytes[16]` to `OriginalBytes[32]`. |
+| `driver/npt.c` | Replaced hardcoded 14-byte copy with instruction boundary alignment and out-of-bounds protection (matching `ept.c`). |
 
 ---
 
-## Bug #3：HandleMtf 多核竞争条件导致无限 EPT Violation 循环
+## Bug #3: HandleMtf Multi-core Race Condition Leading to Infinite EPT Violation Loop
 
-### 严重程度：🔴 Critical
+### Severity: 🔴 Critical
 
-### 问题描述
+### Problem Description
 
-EPT Hook 引擎使用 **execute-only** 页面实现隐藏 hook：
-- 静息状态：hook 页面 `R=0, W=0, X=1`（只能执行，不能读写）
-- 数据访问（如 PatchGuard 扫描）：EPT Violation → 切换到原始页面 `R=1, W=1, X=0` → 启用 MTF（Monitor Trap Flag）→ 一条指令后 MTF 触发 → 恢复为 hook 页面 `R=0, W=0, X=1`
+The EPT Hook engine utilizes **execute-only** pages to implement hidden hooks:
+- Normal state: Hooked page `R=0, W=0, X=1` (execute-only, no read/write access).
+- Data access (e.g., PatchGuard scanning): EPT Violation → switch to the original page `R=1, W=1, X=0` → enable MTF (Monitor Trap Flag) → after executing one instruction, MTF fires → restore to the hooked page `R=0, W=0, X=1`.
 
-**原始 `HandleMtf` 代码**在 MTF 触发时**恢复所有 1024 个 hook**：
+**Original `HandleMtf` Code** restored **all 1024 hooks** when MTF fired:
 
 ```c
-// 原始代码（有bug）
+// Original code (buggy)
 static BOOLEAN HandleMtf(PGUEST_CONTEXT Ctx)
 {
     // ...disable MTF...
     
-    // 遍历所有 hook，全部恢复
+    // Iterate through all hooks and restore them all
     for (i = 0; i < MAX_EPT_HOOKS; i++) {
         if (g_EptHookState.Hooks[i].Active && g_EptHookState.Hooks[i].TargetPte) {
             PEPT_PTE Pte = g_EptHookState.Hooks[i].TargetPte;
             if (Pte->Read || Pte->Write) {
                 Pte->Read = 0;
                 Pte->Write = 0;
-                // ...恢复 hook 页面...
+                // ...restore hook page...
             }
         }
     }
 }
 ```
 
-**多核竞争场景**：
+**Multi-core Race Condition Scenario**:
 
 ```
-时间线：
-  T1: CPU 0 → Hook A 的 EPT Violation → 切换到 R=1,W=1 → 启用 MTF
-  T2: CPU 1 → Hook B 的 EPT Violation → 切换到 R=1,W=1 → 启用 MTF
-  T3: CPU 0 → MTF 触发 → 恢复 ALL hooks（包括 Hook B！）→ Hook B 变回 R=0,W=0
-  T4: CPU 1 → 还没执行完那条数据访问指令 → 再次 EPT Violation（Hook B）
-  T5: CPU 1 → 切换回 R=1,W=1 → 启用 MTF
-  T6: CPU 0 → 可能又有新的 MTF → 再次恢复 ALL hooks...
-  → 无限循环！CPU 1 永远无法完成那条指令
+Timeline:
+  T1: CPU 0 → EPT Violation on Hook A → switch to R=1, W=1 → enable MTF
+  T2: CPU 1 → EPT Violation on Hook B → switch to R=1, W=1 → enable MTF
+  T3: CPU 0 → MTF fires → restore ALL hooks (including Hook B!) → Hook B changes back to R=0, W=0
+  T4: CPU 1 → before finishing that single data access instruction → triggers another EPT Violation (Hook B)
+  T5: CPU 1 → switch back to R=1, W=1 → enable MTF
+  T6: CPU 0 → potentially another MTF → restore ALL hooks again...
+  → Infinite loop! CPU 1 can never finish executing that instruction.
 ```
 
-### 修复方案
+### Fix
 
-引入 **per-CPU 跟踪机制**，每个 CPU 只恢复**它自己松弛的那个页面**上的 hook：
+Introduce a **per-CPU tracking mechanism**, so that each CPU only restores the hook on the page **that it specifically relaxed (unprotected)**:
 
-**1. 在 `ept.c` 中添加 per-CPU 跟踪数组和辅助函数**：
+**1. Add per-CPU tracking arrays and helper functions in `ept.c`**:
 
 ```c
-// 每个 CPU 槽位记录它当前松弛了哪个物理页面
+// Record the physical page currently relaxed by each CPU slot
 static volatile ULONG64 g_MtfRelaxedPagePa[64] = { 0 };
 
-// HandleEptViolation 调用：记录当前 CPU 松弛的页面
+// Called by HandleEptViolation: record the page relaxed by the current CPU
 VOID EptMtfTrackRelaxedPage(ULONG64 PagePhysicalAddr)
 {
     ULONG CpuIndex = KeGetCurrentProcessorNumber();
@@ -177,7 +180,7 @@ VOID EptMtfTrackRelaxedPage(ULONG64 PagePhysicalAddr)
     }
 }
 
-// HandleMtf 调用：获取并清除当前 CPU 松弛的页面
+// Called by HandleMtf: retrieve and clear the page relaxed by the current CPU
 ULONG64 EptMtfGetAndClearRelaxedPage(VOID)
 {
     ULONG CpuIndex = KeGetCurrentProcessorNumber();
@@ -190,87 +193,87 @@ ULONG64 EptMtfGetAndClearRelaxedPage(VOID)
 }
 ```
 
-**2. 在 `HandleEptViolation` 中，每次松弛页面后记录**：
+**2. Record the relaxed page each time a page is relaxed in `HandleEptViolation`**:
 
 ```c
-// EPT Violation handler 中（Mode A 和 Mode B 两条路径都添加）
-EptMtfTrackRelaxedPage(Hook->TargetPhysicalAddr);  // ← 新增
+// Inside EPT Violation handler (added in both Mode A and Mode B execution paths)
+EptMtfTrackRelaxedPage(Hook->TargetPhysicalAddr);  // ← Added
 ProcBased |= PROC_BASED_MONITOR_TRAP_FLAG;
 VmxWrite(VMCS_CTRL_PROC_BASED_VM_EXEC, ProcBased);
 ```
 
-**3. `HandleMtf` 改为只恢复当前 CPU 的页面**：
+**3. Modify `HandleMtf` to only restore the page associated with the current CPU**:
 
 ```c
 static BOOLEAN HandleMtf(PGUEST_CONTEXT Ctx)
 {
     // ...disable MTF...
     
-    // 获取当前 CPU 松弛的页面
+    // Retrieve the page relaxed by the current CPU
     RelaxedPa = EptMtfGetAndClearRelaxedPage();
     
     for (i = 0; i < MAX_EPT_HOOKS; i++) {
         if (g_EptHookState.Hooks[i].Active && g_EptHookState.Hooks[i].TargetPte) {
-            // ★ 只恢复当前 CPU 松弛的页面，跳过其他
+            // ★ Only restore the page relaxed by the current CPU, skip others
             if (RelaxedPa != 0 &&
                 g_EptHookState.Hooks[i].TargetPhysicalAddr != RelaxedPa) {
                 continue;
             }
-            // ...恢复 hook...
+            // ...restore hook...
         }
     }
 }
 ```
 
-**安全兜底**：如果 `RelaxedPa == 0`（理论上不会发生），回退到恢复所有 hook，避免漏恢复。
+**Fallback Safety Net**: If `RelaxedPa == 0` (which theoretically should not happen), fall back to restoring all hooks to prevent any pages from remaining permanently relaxed.
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/ept.c` | +`g_MtfRelaxedPagePa[64]` 数组；+`EptMtfTrackRelaxedPage()`；+`EptMtfGetAndClearRelaxedPage()`；`HandleEptViolation` 两条路径各添加一处 `EptMtfTrackRelaxedPage` 调用 |
-| `driver/ept.h` | +`EptMtfTrackRelaxedPage` 和 `EptMtfGetAndClearRelaxedPage` 声明 |
-| `driver/vmx_exit.c` | `HandleMtf` 改为查询 per-CPU 跟踪数组，只恢复特定页面 |
+| `driver/ept.c` | Added `g_MtfRelaxedPagePa[64]` array; added `EptMtfTrackRelaxedPage()`; added `EptMtfGetAndClearRelaxedPage()`; added `EptMtfTrackRelaxedPage` call in both execution paths inside `HandleEptViolation`. |
+| `driver/ept.h` | Added declarations for `EptMtfTrackRelaxedPage` and `EptMtfGetAndClearRelaxedPage`. |
+| `driver/vmx_exit.c` | Modified `HandleMtf` to query the per-CPU tracking array and only restore the specified page. |
 
 ---
 
-## Bug #5：EptSplitLargePage 后缺少 INVEPT 导致 EPT Misconfiguration
+## Bug #5: Missing INVEPT after EptSplitLargePage Leading to EPT Misconfiguration
 
-### 严重程度：🔴 Critical
+### Severity: 🔴 Critical
 
-### 问题描述
+### Problem Description
 
-`EptHookFunction()` 在安装 hook 前需要将目标地址所在的 2MB 大页拆分为 512 个 4KB 页（因为 hook 需要细粒度的页级别权限控制）。拆分操作通过 `EptSplitLargePage()` 实现，它会修改 EPT 页目录条目（PDE），将其从一个 2MB 大页条目改为指向一个新的 4KB 页表。
+Before installing a hook, `EptHookFunction()` must split the 2MB large page containing the target address into 512 4KB pages (since hooks require fine-grained page-level permission control). The splitting operation is performed via `EptSplitLargePage()`, which modifies the EPT Page Directory Entry (PDE), changing it from a 2MB large page entry to point to a new 4KB page table.
 
-**原始代码**在拆分后没有刷新 EPT TLB：
+**Original Code** did not invalidate the EPT TLB after splitting:
 
 ```c
-// 原始代码（有bug）
+// Original code (buggy)
 EptSplitLargePage(TargetPa);
-// ← 缺少 INVEPT！
-Pte = EptGetPteForPhysicalAddress(TargetPa);  // 获取 4KB PTE
+// ← Missing INVEPT!
+Pte = EptGetPteForPhysicalAddress(TargetPa);  // Retrieve the 4KB PTE
 ```
 
-**问题**：
+**Issue**:
 
 ```
-CPU 0:  执行 EptSplitLargePage()
-        → 修改 PDE: 2MB 大页条目 → 指向新的 4KB 页表
+CPU 0:  Executes EptSplitLargePage()
+        → Modifies PDE: 2MB large page entry → points to new 4KB page table
         
-CPU 1-N: TLB 中仍然缓存着旧的 2MB PDE
-        → 下一次内存访问时，CPU 用旧的 2MB PDE 格式解释新数据
-        → PDE 格式不匹配新的 PT → EPT Misconfiguration
-        → VMX shutdown → BSOD (BSOD 代码通常是 UNEXPECTED_STORE_EXCEPTION 或类似)
+CPU 1-N: Still have the old 2MB PDE cached in their TLB
+        → On the next memory access, these CPUs interpret the new data using the old 2MB PDE format
+        → PDE format mismatch with the new Page Table → EPT Misconfiguration
+        → VMX shutdown → BSOD (BSOD code is typically UNEXPECTED_STORE_EXCEPTION or similar)
 ```
 
-EPT Misconfiguration 与 EPT Violation 不同：Violation 是权限问题（可恢复），而 Misconfiguration 是页表结构错误（通常不可恢复，导致 VMX 直接关闭）。
+Unlike EPT Violation (which is a permission issue and is recoverable), EPT Misconfiguration indicates an invalid page table structure (which is typically unrecoverable, causing the CPU to shut down VMX directly).
 
-### 修复方案
+### Fix
 
-在 `EptSplitLargePage()` 调用后**立即**执行 `EptInvalidateFromGuest()`，刷新所有 CPU 的 EPT TLB：
+Execute `EptInvalidateFromGuest()` **immediately** after calling `EptSplitLargePage()` to flush the EPT TLB on all CPUs:
 
 ```c
-// 修复后代码
+// Fixed code
 EptSplitLargePage(TargetPa);
 
 /*
@@ -283,36 +286,36 @@ EptSplitLargePage(TargetPa);
  * Fix: Invalidate EPT TLB immediately after page split so all CPUs
  * pick up the new page table structure before any further accesses.
  */
-EptInvalidateFromGuest();  // ← 新增
+EptInvalidateFromGuest();  // ← Added
 
 Pte = EptGetPteForPhysicalAddress(TargetPa);
 ```
 
-> **注意**：`EptInvalidateFromGuest()` 使用 generation counter 机制（`InterlockedIncrement`），每个 CPU 在下一次 VM-Exit 时检查并执行 INVEPT。这比 VMCALL 方式更兼容（避免 VMware 嵌套虚拟化下的拦截问题）。
+> **Note**: `EptInvalidateFromGuest()` uses a generation counter mechanism (`InterlockedIncrement`), where each CPU checks and executes `INVEPT` on its next VM-Exit. This approach is more compatible than invoking VMCALLs directly (avoiding interception issues under nested virtualization environments like VMware).
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/ept.c` | `EptHookFunction()` 中 `EptSplitLargePage()` 后添加 `EptInvalidateFromGuest()` |
+| `driver/ept.c` | Added `EptInvalidateFromGuest()` call immediately after `EptSplitLargePage()` inside `EptHookFunction()`. |
 
 ---
 
-## Bug #6：IOCTL 分发中 IoStatus.Information 未初始化
+## Bug #6: Uninitialized IoStatus.Information in IOCTL Dispatch
 
-### 严重程度：🟡 Medium
+### Severity: 🟡 Medium
 
-### 问题描述
+### Problem Description
 
-`DispatchDeviceControl` 函数处理用户态 IOCTL 请求，使用 `METHOD_BUFFERED` 方式。在此方式下，`Irp->IoStatus.Information` 字段告诉 I/O 管理器应该从系统缓冲区复制多少字节回用户态缓冲区。
+The `DispatchDeviceControl` function handles user-mode IOCTL requests using `METHOD_BUFFERED`. Under this method, the `Irp->IoStatus.Information` field informs the I/O manager of the number of bytes to copy back from the system buffer to the user-mode buffer.
 
-**原始代码**没有在分发前初始化这个字段：
+**Original Code** did not initialize this field prior to dispatching:
 
 ```c
-// 原始代码（有bug）
+// Original code (buggy)
 IoStack = IoGetCurrentIrpStackLocation(Irp);
 IoControlCode = IoStack->Parameters.DeviceIoControl.IoControlCode;
-// ← 没有初始化 Irp->IoStatus.Information
+// ← Irp->IoStatus.Information is not initialized
 
 switch (IoControlCode) {
     case IOCTL_VMX_INIT:
@@ -325,19 +328,19 @@ switch (IoControlCode) {
 }
 ```
 
-**问题**：
-- 成功路径：各 handler 通常会设置 `Information` → 无问题
-- **失败路径**：如果 handler 返回错误状态但忘记设置 `Information`，或者进入 `default` 分支：
-  - `Information` 保持未初始化的值（可能是上一次 IRP 复用留下的脏数据）
-  - I/O 管理器根据这个脏值复制数据到用户态 → **信息泄露**（内核内存内容泄露到用户态）
-  - 或者脏值很大 → 复制越界 → **蓝屏**
+**Issue**:
+- Success paths: Individual handlers typically set `Information` correctly → No issue.
+- **Failure paths**: If a handler returns an error status but forgets to set `Information`, or if the control flow hits the `default` branch:
+  - `Information` remains uninitialized (potentially holding stale/dirty data from a recycled IRP).
+  - The I/O manager copies data to user-mode based on this stale value → **Information Leak** (kernel memory leaked to user-mode).
+  - Alternatively, if the stale value is very large → Out-of-bounds copy → **BSOD**.
 
-### 修复方案
+### Fix
 
-在 switch 分发前统一初始化：
+Initialize the field in a unified manner before the `switch` dispatch:
 
 ```c
-// 修复后代码
+// Fixed code
 IoStack = IoGetCurrentIrpStackLocation(Irp);
 IoControlCode = IoStack->Parameters.DeviceIoControl.IoControlCode;
 
@@ -348,43 +351,43 @@ IoControlCode = IoStack->Parameters.DeviceIoControl.IoControlCode;
  * the I/O manager would copy garbage data back to the user-mode buffer
  * (METHOD_BUFFERED uses Information as the output byte count).
  */
-Irp->IoStatus.Information = 0;  // ← 新增
+Irp->IoStatus.Information = 0;  // ← Added
 
 switch (IoControlCode) {
 ```
 
-这样即使某个 handler 忘记设置 `Information`，也不会泄露数据或越界复制。
+This ensures that even if a handler fails to set `Information`, no data leakage or out-of-bounds copy occurs.
 
-### 涉及文件
+### Affected Files
 
-| 文件 | 变更 |
+| File | Changes |
 |------|------|
-| `driver/vmxdrv.c` | `DispatchDeviceControl` 中 switch 前添加 `Irp->IoStatus.Information = 0` |
+| `driver/vmxdrv.c` | Added `Irp->IoStatus.Information = 0` before the `switch` statement in `DispatchDeviceControl`. |
 
 ---
 
-## 修改文件清单
+## Modified Files List
 
-| 文件 | Bug # | 变更摘要 |
-|------|-------|----------|
-| `driver/ept.c` | #1 | 新增 `EptGetInstructionLength()` 函数（~300 行最小 x64 指令解码器） |
-| `driver/ept.c` | #1 | 修改 trampoline 构建逻辑：从硬编码 14 字节改为按指令边界累积 ≥12 字节 |
-| `driver/ept.c` | #3 | 新增 `g_MtfRelaxedPagePa[64]` per-CPU 跟踪数组 |
-| `driver/ept.c` | #3 | 新增 `EptMtfTrackRelaxedPage()` 和 `EptMtfGetAndClearRelaxedPage()` |
-| `driver/ept.c` | #3 | `HandleEptViolation` 两条路径（Mode A / Mode B）各添加 `EptMtfTrackRelaxedPage` 调用 |
-| `driver/ept.c` | #5 | `EptHookFunction()` 中 `EptSplitLargePage()` 后添加 `EptInvalidateFromGuest()` |
-| `driver/ept.h` | #1 | 新增 `EptGetInstructionLength` 声明 |
-| `driver/ept.h` | #3 | 新增 `EptMtfTrackRelaxedPage` 和 `EptMtfGetAndClearRelaxedPage` 声明 |
-| `driver/vmx_exit.c` | #3 | `HandleMtf` 改为调用 `EptMtfGetAndClearRelaxedPage()`，只恢复当前 CPU 松弛的页面 |
-| `driver/vmxdrv.c` | #6 | `DispatchDeviceControl` 中 switch 前添加 `Irp->IoStatus.Information = 0` |
+| File | Bug # | Change Summary |
+|------|-------|----------------|
+| `driver/ept.c` | #1 | Added `EptGetInstructionLength()` function (~300 lines minimal x64 instruction decoder). |
+| `driver/ept.c` | #1 | Modified trampoline construction logic: changed from a hardcoded 14-byte copy to accumulating ≥12 bytes aligned to instruction boundaries. |
+| `driver/ept.c` | #3 | Added `g_MtfRelaxedPagePa[64]` per-CPU tracking array. |
+| `driver/ept.c` | #3 | Added `EptMtfTrackRelaxedPage()` and `EptMtfGetAndClearRelaxedPage()`. |
+| `driver/ept.c` | #3 | Added `EptMtfTrackRelaxedPage` calls in both paths (Mode A / Mode B) of `HandleEptViolation`. |
+| `driver/ept.c` | #5 | Added `EptInvalidateFromGuest()` after `EptSplitLargePage()` in `EptHookFunction()`. |
+| `driver/ept.h` | #1 | Added declaration for `EptGetInstructionLength`. |
+| `driver/ept.h` | #3 | Added declarations for `EptMtfTrackRelaxedPage` and `EptMtfGetAndClearRelaxedPage`. |
+| `driver/vmx_exit.c` | #3 | Modified `HandleMtf` to call `EptMtfGetAndClearRelaxedPage()` and only restore the page relaxed by the current CPU. |
+| `driver/vmxdrv.c` | #6 | Added `Irp->IoStatus.Information = 0` before the `switch` statement in `DispatchDeviceControl`. |
 
 ---
 
-## 编译兼容性说明
+## Compilation Compatibility Notes
 
-本项目使用 **WDK 7600**（Windows 7 DDK），其 MSVC 编译器要求 **C89 风格**的变量声明（所有变量必须在代码块开头声明，不能在语句之间声明）。
+This project targets **WDK 7600** (Windows 7 DDK), whose MSVC compiler mandates **C89-style** variable declarations (all variables must be declared at the beginning of a block, rather than interspersed among statements).
 
-`EptGetInstructionLength()` 函数的所有局部变量已移至函数开头：
+All local variables inside the `EptGetInstructionLength()` function have been moved to the beginning of the function:
 
 ```c
 ULONG EptGetInstructionLength(PUCHAR Code)
@@ -399,29 +402,29 @@ ULONG EptGetInstructionLength(PUCHAR Code)
     UCHAR   Mod, RM;
     BOOLEAN HasModRM = FALSE;
     ULONG   ImmSize = 0;
-    UCHAR   b;        // 循环内使用
-    UCHAR   Op2;      // 两字节操作码
-    UCHAR   Group;    // ALU 分组
-    UCHAR   SubOp;    // ALU 子操作码
-    UCHAR   SIB;      // SIB 字节
-    UCHAR   SibBase;  // SIB.Base 字段
-    UCHAR   EffRM;    // 有效 RM（含 REX.B 扩展）
-    // ...函数体...
+    UCHAR   b;        // Used within loops
+    UCHAR   Op2;      // Two-byte opcode
+    UCHAR   Group;    // ALU grouping
+    UCHAR   SubOp;    // ALU sub-opcode
+    UCHAR   SIB;      // SIB byte
+    UCHAR   SibBase;  // SIB.Base field
+    UCHAR   EffRM;    // Effective RM (including REX.B extension)
+    // ...function body...
 }
 ```
 
-所有其他修改（per-CPU 数组、`Information` 初始化等）都不涉及 C89 兼容性问题。
+All other modifications (per-CPU arrays, `Information` initialization, etc.) do not introduce C89 compatibility issues.
 
 ---
 
-## 待确认事项
+## Pending Confirmations
 
-1. **Bug #1 - 指令解码器覆盖范围**：当前解码器覆盖了内核函数前缀的绝大多数常见指令。如果目标函数使用了极其罕见的前缀指令（如 SSE/AVX 等），解码器会返回 0 并安全地拒绝安装 hook。是否需要扩展覆盖范围？
+1. **Bug #1 - Instruction Decoder Coverage**: The current decoder covers the vast majority of common instructions found in kernel function prefixes. If a target function utilizes extremely rare instruction prefixes (such as SSE/AVX, etc.), the decoder will return 0 and safely reject the hook installation. Is there a need to expand the instruction coverage?
 
-2. **Bug #3 - per-CPU 数组大小**：当前硬编码为 64 个处理器槽位。如果系统有超过 64 个逻辑处理器（如大型服务器），超出范围的 CPU 将无法被跟踪（回退到恢复全部 hook）。是否需要动态分配或增大上限？
+2. **Bug #3 - per-CPU Array Size**: Currently hardcoded to 64 processor slots. If the system has more than 64 logical processors (such as on large servers), any CPU beyond this range cannot be tracked (falling back to restoring all hooks). Should we allocate this dynamically or increase the upper limit?
 
-3. **Bug #5 - INVEPT 时机**：当前使用 generation counter + lazy INVEPT 机制。理论上在 `EptSplitLargePage` 到下一次 VM-Exit 之间存在一个很小的时间窗口。是否需要更激进的同步机制（如 IPI）？
+3. **Bug #5 - INVEPT Timing**: Currently relies on a generation counter + lazy INVEPT mechanism. Theoretically, there is a small timing window between `EptSplitLargePage` and the next VM-Exit. Do we need a more aggressive synchronization mechanism (e.g., IPI)?
 
 ---
 
-*文档结束。请 review 以上分析和修复方案。*
+*End of document. Please review the above analysis and fixes.*

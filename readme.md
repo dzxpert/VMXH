@@ -1,126 +1,128 @@
+[简体中文](readme_CN.md) | English
+
 # VMX Hypervisor Toolbox
 
-基于 Intel VT-x (VMX) 和 AMD SVM 的 Windows x64 Hypervisor 工具箱。通过在操作系统下方插入一层轻量级 Type-2 Hypervisor，提供多种运行在 Ring -1 层面的底层能力，包括反反调试、绕过 PatchGuard 的内核 Hook 框架、基于物理内存直接访问的进程内存读写等，且后续将持续扩展更多基于 VMX 的高级功能。
+A Windows x64 hypervisor toolbox based on Intel VT-x (VMX) and AMD SVM. By inserting a lightweight Type-2 Hypervisor underneath the operating system, it provides various low-level capabilities running at the Ring -1 level. These include anti-anti-debugging, a kernel hook framework that bypasses PatchGuard, process memory reading/writing based on direct physical memory access, etc. More advanced VMX-based features will be continuously added in the future.
 
-**支持双平台**: 自动检测 CPU 厂商 (Intel/AMD)，选择对应的虚拟化后端。
+**Dual-Platform Support**: Automatically detects CPU vendor (Intel/AMD) and selects the corresponding virtualization backend.
 
 ---
 
-## 许可协议（License）
+## License
 
-> ⚠️ **重要：本项目采用自定义许可协议，非 MIT/BSD/GPL 等开源标准协议。**
+> ⚠️ **IMPORTANT: This project uses a custom license, not a standard open-source license like MIT, BSD, or GPL.**
 >
-> - ✅ **允许** 个人学习、研究、私人实验、安全研究、学术用途（非营利）。
-> - ❌ **禁止** 任何形式的商业使用（含公司内部使用、付费产品集成、SaaS 服务、外挂／反外挂产品、AI 训练数据等），**除非事先获得作者书面同意**。
-> - 🚫 **绝对禁止** 用于任何非法或恶意破坏目的，包括但不限于：未授权入侵、恶意软件／勒索软件／Rootkit、数据窃取、隐私侵犯、跟踪监控、欺诈与金融犯罪、DDoS／僵尸网络、侵害未成年人、非法商品服务平台，以及其他一切违反法律的行为。此项禁止 **对个人使用同样适用**，不可协商、不可豁免。违者自动失去一切使用权，并将依《刑法》《网络安全法》《数据安全法》《个人信息保护法》及同等境外法律承担民刑事责任；作者保留配合执法机关调查的权利。
-> - 🛡️ **合法安全研究例外**：仅针对自有系统或获得书面授权的系统，以善意、负责任披露、最小必要损害为前提开展研究——具体条件详见 [`LICENSE`](LICENSE) 第 4A.3 节。
-> - 📜 完整条款见根目录 [`LICENSE`](LICENSE) 文件（中英双语，英文为正式文本）。
-> - 📬 商业授权洽谈：请通过本仓库 Issues 或 README 末尾列出的联系渠道联络作者。
+> - ✅ **Allowed**: Personal learning, research, private experimentation, security research, and academic (non-profit) use.
+> - ❌ **Prohibited**: Any form of commercial use (including internal use within companies, paid product integration, SaaS services, game cheats / anti-cheat products, AI training data, etc.), **unless prior written consent is obtained from the author**.
+> - 🚫 **Strictly Prohibited**: Use for any illegal or malicious destructive purposes, including but not limited to: unauthorized intrusion, malware/ransomware/Rootkits, data theft, privacy invasion, tracking and monitoring, fraud and financial crimes, DDoS/botnets, harming minors, illegal goods/service platforms, and all other illegal behaviors. This prohibition **also applies to personal use** and is non-negotiable and non-exemptible. Violators will automatically lose all rights of use and will bear civil and criminal liabilities under the Criminal Law, Cybersecurity Law, Data Security Law, Personal Information Protection Law, and equivalent extraterritorial laws; the author reserves the right to cooperate with law enforcement investigations.
+> - 🛡️ **Exception for Lawful Security Research**: Conducting research solely on systems you own or have obtained written authorization for, under the premises of good faith, responsible disclosure, and minimal necessary harm—see Section 4A.3 of the [`LICENSE`](LICENSE) for specific conditions.
+> - 📜 See the [`LICENSE`](LICENSE) file in the root directory for the full terms (in bilingual Chinese and English, with English as the official text).
+> - 📬 Commercial Licensing Negotiations: Please contact the author via GitHub Issues in this repository or the contact channels listed at the end of this README.
 >
-> 使用、下载、编译、修改或分发本软件即视为您接受 [`LICENSE`](LICENSE) 全部条款。违反协议将自动终止您的使用权，并可能承担侵权法律责任。
+> Using, downloading, compiling, modifying, or distributing this software indicates your acceptance of all terms of the [`LICENSE`](LICENSE). Violating the agreement will automatically terminate your right to use it and may result in legal liability for infringement.
 
-> **2026-04 稳定性 Review（两轮）**: 完成了针对裸机运行的全面代码 Review + 一次更严格的二次 Review，合计修复 **36 项**跨级别问题（首轮 17 + 二次补救 19，含 SVM VMSAVE/VMLOAD host-state 缺失致 BSOD、AAD VMX 侧从未工作、nonce 认证不完备等致命 bug），详见 [docs/BAREMETAL_REVIEW_FIXES.md](docs/BAREMETAL_REVIEW_FIXES.md)。重要 API 变化：<br>• `AsmSvmLaunch` 签名为 `(VmcbPa, VmcbVa, HostVmcbPa)`，Host VMCB 用于 VMSAVE/VMLOAD 保护 host extra-state。<br>• Shutdown VMCALL/VMMCALL 现需要 `g_VmcallShutdownNonce` + long-mode + CS.L + kernel-RIP 完整认证。<br>• `VmxSetExceptionInterceptBp/Db` 新 API — VMX 侧 AAD_HIDE_EXCEPTIONS 现在真正工作。<br>• `ProcessRegisterExceptionHideToggle` 解耦 process 模块与 SVM/VMX 后端。<br>• VMCALL 内存操作路径已**注入 #UD 失败**；用户态必须使用 IOCTL。<br>• EPT/NPT 身份映射现动态扩展支持 > 512GB 物理内存（`g_EptPdptTotal / g_NptPdptTotal`）。
-
----
-
-## 目录
-
-- [项目概述](#项目概述)
-  - [核心能力](#核心能力)
-  - [设计理念](#设计理念)
-- [系统架构](#系统架构)
-- [项目结构](#项目结构)
-- [核心技术细节](#核心技术细节)
-  - [VMX 初始化流程](#vmx-初始化流程)
-  - [VMCS 配置](#vmcs-配置)
-  - [VM-Exit 处理框架](#vm-exit-处理框架)
-  - [EPT 引擎与 Hook 机制](#ept-引擎与-hook-机制)
-  - [进程跟踪与 EPROCESS 动态偏移发现](#进程跟踪与-eprocess-动态偏移发现)
-  - [反反调试引擎](#反反调试引擎)
-  - [MSR 拦截](#msr-拦截)
-  - [日志系统](#日志系统)
-- [AMD SVM 技术细节](#amd-svm-技术细节)
-- [虚拟化隐藏](#虚拟化隐藏)
-- [Per-CPU EPT/NPT Hook 页隔离](#per-cpu-eptnpt-hook-页隔离)
-- [Hypervisor 内存读写](#hypervisor-内存读写)
-- [后加载虚拟化与内存连续性](#后加载虚拟化与内存连续性)
-- [通用 EPT/NPT Hook 框架](#通用-eptnpt-hook-框架)
-- [SSDT 监控与 Hook 框架](#ssdt-监控与-hook-框架)
-- [Shadow SSDT (Win32k) 监控与 Hook 框架](#shadow-ssdt-win32k-监控与-hook-框架)
-- [反反调试能力清单](#反反调试能力清单)
-- [用户态控制程序](#用户态控制程序)
-  - [反反调试命令](#反反调试命令)
-  - [Hook 框架命令](#hook-框架命令)
-  - [内存读写命令](#内存读写命令)
-  - [SSDT 命令](#ssdt-命令)
-  - [Shadow SSDT 命令](#shadow-ssdt-命令)
-  - [典型使用场景](#典型使用场景)
-- [驱动与用户态通信协议](#驱动与用户态通信协议)
-- [数据流分析](#数据流分析)
-- [模块依赖关系](#模块依赖关系)
-- [编译与部署](#编译与部署)
-- [后续规划](#后续规划)
-- [关键风险与注意事项](#关键风险与注意事项)
+> **2026-04 Stability Review (Two Rounds)**: Completed a comprehensive code review targeting bare-metal execution followed by a stricter second round of review, fixing a total of **36 cross-level issues** (17 in the first round + 19 in the second cleanup round, including critical bugs like BSODs due to missing host-state in SVM VMSAVE/VMLOAD, AAD VMX side never actually working, and incomplete nonce authentication), see [docs/BAREMETAL_REVIEW_FIXES.md](docs/BAREMETAL_REVIEW_FIXES.md) for details. Important API changes:<br>• `AsmSvmLaunch` signature changed to `(VmcbPa, VmcbVa, HostVmcbPa)`, where Host VMCB is used for VMSAVE/VMLOAD to protect host extra-state.<br>• Shutdown VMCALL/VMMCALL now requires complete authentication using `g_VmcallShutdownNonce` + long-mode + CS.L + kernel-RIP.<br>• `VmxSetExceptionInterceptBp/Db` new API — VMX-side AAD_HIDE_EXCEPTIONS now actually works.<br>• `ProcessRegisterExceptionHideToggle` decouples the process module from the SVM/VMX backends.<br>• VMCALL memory operation path now **injects #UD failure**; user-mode must use IOCTL.<br>• EPT/NPT identity mapping now dynamically scales to support > 512GB of physical memory (`g_EptPdptTotal / g_NptPdptTotal`).
 
 ---
 
-## 项目概述
+## Table of Contents
 
-| 属性 | 说明 |
+- [Project Overview](#project-overview)
+  - [Core Capabilities](#core-capabilities)
+  - [Design Philosophy](#design-philosophy)
+- [System Architecture](#system-architecture)
+- [Project Structure](#project-structure)
+- [Core Technical Details](#core-technical-details)
+  - [VMX Initialization Flow](#vmx-initialization-flow)
+  - [VMCS Configuration](#vmcs-configuration)
+  - [VM-Exit Handling Framework](#vm-exit-handling-framework)
+  - [EPT Engine and Hook Mechanism](#ept-engine-and-hook-mechanism)
+  - [Process Tracking and EPROCESS Dynamic Offset Discovery](#process-tracking-and-eprocess-dynamic-offset-discovery)
+  - [Anti-Anti-Debugging Engine](#anti-anti-debugging-engine)
+  - [MSR Interception](#msr-interception)
+  - [Logging System](#logging-system)
+- [AMD SVM Technical Details](#amd-svm-technical-details)
+- [Virtualization Hiding](#virtualization-hiding)
+- [Per-CPU EPT/NPT Hook Page Isolation](#per-cpu-eptnpt-hook-page-isolation)
+- [Hypervisor Memory Read/Write](#hypervisor-memory-readwrite)
+- [Late-load Virtualization and Memory Continuity](#late-load-virtualization-and-memory-continuity)
+- [Universal EPT/NPT Hook Framework](#universal-eptnpt-hook-framework)
+- [SSDT Monitoring and Hook Framework](#ssdt-monitoring-and-hook-framework)
+- [Shadow SSDT (Win32k) Monitoring and Hook Framework](#shadow-ssdt-win32k-monitoring-and-hook-framework)
+- [Anti-Anti-Debugging Capability List](#anti-anti-debugging-capability-list)
+- [User-Mode Control Utility](#user-mode-control-utility)
+  - [Anti-Anti-Debugging Commands](#anti-anti-debugging-commands)
+  - [Hook Framework Commands](#hook-framework-commands)
+  - [Memory Read/Write Commands](#memory-readwrite-commands)
+  - [SSDT Commands](#ssdt-commands)
+  - [Shadow SSDT Commands](#shadow-ssdt-commands)
+  - [Typical Use Cases](#typical-use-cases)
+- [Driver to User-Mode Communication Protocol](#driver-to-user-mode-communication-protocol)
+- [Data Flow Analysis](#data-flow-analysis)
+- [Module Dependencies](#module-dependencies)
+- [Compilation and Deployment](#compilation-and-deployment)
+- [Future Roadmap](#future-roadmap)
+- [Critical Risks and Precautions](#critical-risks-and-precautions)
+
+---
+
+## Project Overview
+
+| Attribute | Description |
 |------|------|
-| 平台 | Windows 10/11 x64 |
-| CPU | Intel (VT-x/VMX/EPT) 和 AMD (SVM/NPT) |
-| 架构 | Type-2 Hypervisor (寄生式, Blue Pill) + hv_ops 抽象层 |
-| 运行环境 | 仅支持裸机 (bare metal) 运行 |
-| 语言 | C + x64 MASM |
-| 编译工具 | WDK 7600 (GRMWDK_EN_7600_1) |
-| 核心功能 | 反反调试 / 内核 Hook 框架 / 进程内存读写 / 更多扩展中 |
-| 工作原理 | 运行时加载到已运行的 OS 之下, 通过 VMX non-root 模式拦截敏感操作 |
+| Platform | Windows 10/11 x64 |
+| CPU | Intel (VT-x/VMX/EPT) and AMD (SVM/NPT) |
+| Architecture | Type-2 Hypervisor (Parasitic, Blue Pill) + `hv_ops` Abstraction Layer |
+| Environment | Bare metal execution only |
+| Language | C + x64 MASM |
+| Toolchain | WDK 7600 (GRMWDK_EN_7600_1) |
+| Core Features | Anti-Anti-Debugging / Kernel Hook Framework / Process Memory R/W / More under extension |
+| Work Principle | Loaded at runtime underneath the running OS, intercepting sensitive operations via VMX non-root mode |
 
-### 核心能力
+### Core Capabilities
 
-| 模块 | 能力 | 技术原理 |
+| Module | Capability | Technical Principle |
 |------|------|---------|
-| **反反调试** | 使调试器对目标进程完全不可见 | 拦截 PEB/NtQuery/DR/RDTSC/CPUID 等检测，返回伪造结果 |
-| **内核 Hook 框架** | 运行时 Hook 任意内核/用户态函数，绕过 PatchGuard | EPT/NPT Execute-Only 页分离 —— 读取看原始代码，执行走 Hook 代码 |
-| **进程内存读写** | 直接读写任意进程内存，绕过一切内核回调和反作弊 Hook | CR3 页表遍历 → 物理地址 → MmMapIoSpace 直接访问 |
-| **SSDT 监控与 Hook** | 发现、转储、按名称/索引 Hook 任意 SSDT 函数，支持全量/过滤监控 | 磁盘映射 ntoskrnl.exe (SEC_IMAGE) 获取无污染 SSDT 地址，复用 EPT Hook 框架 |
-| **Shadow SSDT (Win32k) Hook** | 发现、转储、Hook NtUser*/NtGdi* 函数，支持全量/过滤监控 | KTHREAD 偏移扫描定位 KeServiceDescriptorTableShadow，Session 上下文中解析 win32k |
-| **虚拟化隐藏** | 对 Guest 完全隐藏 Hypervisor 存在 | 拦截 CPUID/MSR/VMX/SVM 指令，伪装为裸机环境 |
-| **Per-CPU EPT/NPT 隔离** | 多核 Hook 零竞争条件 | 每 CPU 独立 EPT/NPT 页表链，PTE 权限切换互不干扰 |
-| **更多扩展** | 后续持续增加基于 VMX 的高级功能 | — |
+| **Anti-Anti-Debugging** | Makes debuggers completely invisible to the target process | Intercepts PEB/NtQuery/DR/RDTSC/CPUID detections and returns spoofed results |
+| **Kernel Hook Framework** | Hooks arbitrary kernel/user-mode functions at runtime, bypassing PatchGuard | EPT/NPT Execute-Only page isolation — reads see original code, execution runs hooked code |
+| **Process Memory R/W** | Directly reads/writes arbitrary process memory, bypassing all kernel callbacks and anti-cheat hooks | CR3 page table traversal → Physical Address → `MmMapIoSpace` direct access |
+| **SSDT Monitor & Hook** | Discovers, dumps, and hooks any SSDT function by name/index, supporting full/filtered monitoring | Maps `ntoskrnl.exe` from disk (via `SEC_IMAGE`) to obtain pristine SSDT addresses, reusing the EPT Hook framework |
+| **Shadow SSDT (Win32k) Hook** | Discovers, dumps, and hooks `NtUser*`/`NtGdi*` functions, supporting full/filtered monitoring | Scans `KTHREAD` offsets to locate `KeServiceDescriptorTableShadow`, parsing `win32k` within the Session context |
+| **Virtualization Hiding** | Hides the presence of the Hypervisor completely from the Guest | Intercepts CPUID/MSR/VMX/SVM instructions and masquerades as a bare-metal environment |
+| **Per-CPU EPT/NPT Isolation** | Multi-core hooks with zero race conditions | Independent EPT/NPT page table chain per CPU, ensuring PTE permission switches do not interfere with each other |
+| **More Extensions** | Continuously adding advanced VMX-based features in the future | — |
 
-### 设计理念
+### Design Philosophy
 
-本项目不是一个单一用途的工具，而是一个 **基于 VMX/SVM 的可扩展底层能力平台**：
+This project is not a single-purpose tool, but rather an **extensible low-level capability platform based on VMX/SVM**:
 
-- **Ring -1 执行**: 所有功能运行在 Hypervisor 层面，高于操作系统内核，不受 PatchGuard、反作弊驱动等内核保护机制约束
-- **双平台统一**: 通过 hv_ops 抽象层屏蔽 Intel/AMD 差异，所有上层功能对两个平台完全共用
-- **模块化扩展**: 每个功能模块（反反调试、Hook、内存读写）独立实现，后续可方便地继续扩展新能力（如 SSDT 监控、虚拟化保护、驱动通信隐藏等）
-- **CLI 统一入口**: 所有功能通过同一个 `VMXToolbox.exe` 命令行工具控制
+- **Ring -1 Execution**: All functions run at the Hypervisor level, above the OS kernel, and are not restricted by kernel protection mechanisms such as PatchGuard or anti-cheat drivers.
+- **Unified Dual Platforms**: The `hv_ops` abstraction layer shields Intel/AMD differences, allowing all upper-level functions to be completely shared between the two platforms.
+- **Modular Extension**: Each functional module (anti-anti-debugging, hooks, memory read/write) is implemented independently, making it easy to extend new capabilities in the future (such as SSDT monitoring, virtualization protection, driver communication hiding, etc.).
+- **Unified CLI Entry**: All features are controlled through the same `VMXToolbox.exe` command-line utility.
 
 ---
 
-## 系统架构
+## System Architecture
 
 ```
 +---------------------------------------------------+
-|                  用户态 (Ring 3)                    |
+|                  User Mode (Ring 3)               |
 |                                                     |
-|   VMXToolbox.exe (CLI)                                  |
-|   +-- 反反调试命令  (--pid --hide-*)                |
-|   +-- Hook 框架命令 (--install-hook --list-hooks)   |
-|   +-- 内存读写命令  (--read-mem --write-mem)        |
+|   VMXToolbox.exe (CLI)                              |
+|   +-- Anti-Anti-Debug Commands (--pid --hide-*)     |
+|   +-- Hook Framework Commands (--install-hook ...)  |
+|   +-- Memory R/W Commands     (--read-mem ...)      |
 |      |                                              |
 |      | DeviceIoControl                              |
 +------+----------------------------------------------+
-|      v              内核态 (Ring 0)                  |
+|      v              Kernel Mode (Ring 0)            |
 |                                                     |
-|   VMXToolboxDrv.sys (内核驱动)                              |
+|   VMXToolboxDrv.sys (Kernel Driver)                 |
 |   +-----------------------------------------------+ |
 |   | DriverEntry / CPU Detection / IOCTL Dispatch   | |
 |   +-----------------------------------------------+ |
-|   |            hv_ops 抽象层 (hv_ops.h)             | |
+|   |            hv_ops Abstraction Layer (hv_ops.h)  | |
 |   |     +------------------+-------------------+   | |
 |   |     |   Intel VMX      |    AMD SVM        |   | |
 |   |     |  (vmx_init.c)    |  (svm_init.c)     |   | |
@@ -134,10 +136,10 @@
 |   | (anti_*.c)| (hv_hook*)| (hv_mem*)| (process.c)| |
 |   +-----------------------------------------------+ |
 |   | SSDT Monitor & Hook  (ssdt.c)                  | |
-|   | (发现 / 解析 / 名称 / Hook / 监控)             | |
+|   | (Discovery / Parsing / Name / Hook / Monitor)  | |
 |   +-----------------------------------------------+ |
 |   | Shadow SSDT (Win32k) Monitor & Hook            | |
-|   | (shadow_ssdt.c - NtUser*/NtGdi* Hook/监控)     | |
+|   | (shadow_ssdt.c - NtUser*/NtGdi* Hook/Monitor)  | |
 |   +-----------------------------------------------+ |
 +-----------------------------------------------------+
 |              Hardware Virtualization                  |
@@ -146,15 +148,15 @@
 +-----------------------------------------------------+
 ```
 
-### 双平台抽象架构 (hv_ops)
+### Dual-Platform Abstraction Architecture (hv_ops)
 
 ```
-反反调试引擎 / VM-Exit 处理 / EPT/NPT Hook
+Anti-Anti-Debugging Engine / VM-Exit Handling / EPT/NPT Hook
          |
-    hv_ops 抽象接口 (g_HvOps)
+    hv_ops Abstraction Interface (g_HvOps)
     /                        \
 vmx_backend                 svm_backend
-(现有 VMX 代码)             (新增 SVM 代码)
+(Existing VMX Code)         (New SVM Code)
 - VMCS read/write           - VMCB field access
 - VMLAUNCH/VMRESUME         - VMRUN/VMLOAD/VMSAVE
 - EPT + Execute-Only        - NPT + Read+Execute
@@ -163,306 +165,306 @@ vmx_backend                 svm_backend
     |                           |
     |                           |
     v                           v
- VMREAD/VMWRITE              VMCB 直接
- (Intel 原生)               内存读写
+ VMREAD/VMWRITE              VMCB Direct
+ (Intel Native)              Memory R/W
 ```
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 VMXToolbox/
 +-- common/
-|   +-- shared.h              IOCTL 码, AAD_HIDE_* 标志, 共享数据结构
-+-- driver/                    内核驱动 (VMXToolboxDrv.sys)
-|   +-- hv_ops.h              [新增] Hypervisor 抽象层接口 (HV_OPS 结构体)
-|   +-- hv_detect.h           [新增] CPU 厂商检测接口
-|   +-- hv_detect.c           [新增] CPU 厂商检测 (Intel/AMD) + 能力探测
-|   +-- vmx.h                 VMX 核心定义 (VMCS 编码, Exit Reason, 控制位)
-|   +-- vmxdrv.c              驱动入口, CPU 检测, 后端选择, IOCTL 处理
-|   +-- vmx_init.c            VMX 初始化 + HV_OPS 后端注册
-|   +-- vmx_exit.c            VMX VM-Exit 主分发器
-|   +-- vmx_asm.asm           Intel x64 汇编 (VMLAUNCH/VMRESUME/INVEPT)
-|   +-- ept.h                 EPT 数据结构定义
-|   +-- ept.c                 EPT 恒等映射, Hook 引擎, Violation 处理
-|   +-- svm.h                 [新增] SVM 核心定义 (VMCB, Exit Codes, Intercepts)
-|   +-- svm_init.c            [新增] SVM 初始化 + HV_OPS 后端注册
-|   +-- svm_exit.c            [新增] SVM #VMEXIT 分发器
-|   +-- svm_asm.asm           [新增] AMD x64 汇编 (VMRUN/VMLOAD/VMSAVE/CLGI/STGI)
-|   +-- npt.h                 [新增] NPT 结构定义
-|   +-- npt.c                 [新增] NPT 恒等映射 + Hook 引擎 (AMD 版 EPT)
-|   +-- hv_mem.h              [新增] Hypervisor 内存读写接口 (页表遍历, VMCALL 定义)
-|   +-- hv_mem.c              [新增] Guest 页表遍历 + 物理内存直接读写引擎
-|   +-- hv_hook.h             [新增] 通用 Hook 框架接口 (动态 Thunk, 规则, 事件日志)
-|   +-- hv_hook.c             [新增] Hook 框架核心 (Install/Remove/Decide/PostCall)
-|   +-- hv_hook_asm.asm       [新增] Hook ASM dispatcher (参数保存/恢复/Trampoline 调用)
-|   +-- ssdt.h               [新增] SSDT 监控框架接口 (状态结构, API 声明)
-|   +-- ssdt.c               [新增] SSDT 发现/解析/名称解析/Hook/监控 全部实现
-|   +-- shadow_ssdt.h       [新增] Shadow SSDT (Win32k) 框架接口
-|   +-- shadow_ssdt.c       [新增] Shadow SSDT 发现/Win32k解析/NtUser*/NtGdi* Hook
-|   +-- process.h             进程跟踪接口
-|   +-- process.c             进程跟踪实现, EPROCESS 动态偏移发现
-|   +-- anti_anti_debug.h     反反调试引擎接口
-|   +-- anti_anti_debug.c     反反调试核心 (通过 hv_ops 抽象, 双平台共用)
-|   +-- msr.c                 MSR 拦截 (通过 hv_ops 抽象)
-|   +-- log.h                 日志接口
-|   +-- log.c                 日志实现
-+-- client/                    用户态控制程序 (VMXToolbox.exe)
-|   +-- main.c                CLI 入口, 参数解析, 命令分发
-|   +-- driver_comm.h         驱动通信接口
-|   +-- driver_comm.c         DeviceIoControl 封装
+|   +-- shared.h              IOCTL codes, AAD_HIDE_* flags, shared data structures
++-- driver/                    Kernel driver (VMXToolboxDrv.sys)
+|   +-- hv_ops.h              [New] Hypervisor abstraction layer interface (HV_OPS struct)
+|   +-- hv_detect.h           [New] CPU vendor detection interface
+|   +-- hv_detect.c           [New] CPU vendor detection (Intel/AMD) + capability probing
+|   +-- vmx.h                 VMX core definitions (VMCS encoding, Exit Reason, control bits)
+|   +-- vmxdrv.c              Driver entry, CPU detection, backend selection, IOCTL handling
+|   +-- vmx_init.c            VMX initialization + HV_OPS backend registration
+|   +-- vmx_exit.c            VMX VM-Exit main dispatcher
+|   +-- vmx_asm.asm           Intel x64 assembly (VMLAUNCH/VMRESUME/INVEPT)
+|   +-- ept.h                 EPT data structure definitions
+|   +-- ept.c                 EPT identity mapping, hook engine, violation handling
+|   +-- svm.h                 [New] SVM core definitions (VMCB, Exit Codes, Intercepts)
+|   +-- svm_init.c            [New] SVM initialization + HV_OPS backend registration
+|   +-- svm_exit.c            [New] SVM #VMEXIT dispatcher
+|   +-- svm_asm.asm           [New] AMD x64 assembly (VMRUN/VMLOAD/VMSAVE/CLGI/STGI)
+|   +-- npt.h                 [New] NPT structure definitions
+|   +-- npt.c                 [New] NPT identity mapping + Hook engine (AMD version of EPT)
+|   +-- hv_mem.h              [New] Hypervisor memory R/W interface (page table traversal, VMCALL definition)
+|   +-- hv_mem.c              [New] Guest page table traversal + direct physical memory R/W engine
+|   +-- hv_hook.h             [New] Universal Hook framework interface (dynamic Thunk, rules, event logs)
+|   +-- hv_hook.c             [New] Hook framework core (Install/Remove/Decide/PostCall)
+|   +-- hv_hook_asm.asm       [New] Hook ASM dispatcher (save/restore parameters, Trampoline invocation)
+|   +-- ssdt.h               [New] SSDT monitoring framework interface (status struct, API declarations)
+|   +-- ssdt.c               [New] SSDT discovery/parsing/name resolution/Hook/monitoring complete implementation
+|   +-- shadow_ssdt.h       [New] Shadow SSDT (Win32k) framework interface
+|   +-- shadow_ssdt.c       [New] Shadow SSDT discovery/Win32k parsing/NtUser*/NtGdi* Hook
+|   +-- process.h             Process tracking interface
+|   +-- process.c             Process tracking implementation, EPROCESS dynamic offset discovery
+|   +-- anti_anti_debug.h     Anti-anti-debugging engine interface
+|   +-- anti_anti_debug.c     Anti-anti-debugging core (abstracted via hv_ops, shared by dual platforms)
+|   +-- msr.c                 MSR interception (abstracted via hv_ops)
+|   +-- log.h                 Logging interface
+|   +-- log.c                 Logging implementation
++-- client/                    User-mode control utility (VMXToolbox.exe)
+|   +-- main.c                CLI entry point, argument parsing, command dispatching
+|   +-- driver_comm.h         Driver communication interface
+|   +-- driver_comm.c         DeviceIoControl encapsulation
 +-- scripts/
-|   +-- do_build.bat          一键编译脚本
-|   +-- build.bat             编译说明脚本
-|   +-- sign_test.bat         测试签名脚本
-+-- readme.md                  本文档
+|   +-- do_build.bat          One-click compilation script
+|   +-- build.bat             Compilation instruction script
+|   +-- sign_test.bat         Test signing script
++-- readme.md                  This document
 ```
 
 ---
 
-## 核心技术细节
+## Core Technical Details
 
-### VMX 初始化流程
+### VMX Initialization Flow
 
-**文件**: `vmx_init.c`
+**File**: `vmx_init.c`
 
-初始化分为全局准备和每核心虚拟化两个阶段:
+Initialization is divided into two phases: global preparation and per-core virtualization:
 
-#### 1. 全局准备
+#### 1. Global Preparation
 
 ```
 VmxInitialize()
-  +-- VmxCheckCapabilities()      读取能力 MSR, 确认 EPT/VPID 支持
-  |     +-- IA32_VMX_BASIC        获取 VMCS Revision ID, True Controls 支持
-  |     +-- IA32_VMX_PROCBASED_CTLS   主处理器控制能力
-  |     +-- IA32_VMX_PROCBASED_CTLS2  二级处理器控制能力 (EPT, VPID)
-  |     +-- IA32_VMX_EPT_VPID_CAP    EPT/VPID 能力
-  +-- VmxAllocateCpuContext() x N  为每个逻辑核分配:
-  |     +-- VMXON Region (4KB, 物理连续, 页对齐)
-  |     +-- VMCS Region  (4KB, 物理连续, 页对齐)
-  |     +-- MSR Bitmap   (4KB, 物理连续)
+  +-- VmxCheckCapabilities()      Read capability MSRs, confirm EPT/VPID support
+  |     +-- IA32_VMX_BASIC        Get VMCS Revision ID, True Controls support
+  |     +-- IA32_VMX_PROCBASED_CTLS   Primary processor controls capabilities
+  |     +-- IA32_VMX_PROCBASED_CTLS2  Secondary processor controls capabilities (EPT, VPID)
+  |     +-- IA32_VMX_EPT_VPID_CAP    EPT/VPID capabilities
+  +-- VmxAllocateCpuContext() x N  Allocate for each logical core:
+  |     +-- VMXON Region (4KB, physically contiguous, page-aligned)
+  |     +-- VMCS Region  (4KB, physically contiguous, page-aligned)
+  |     +-- MSR Bitmap   (4KB, physically contiguous)
   |     +-- Host Stack    (32KB, NonPagedPool)
-  +-- EptInitialize()             构建 EPT 恒等映射
+  +-- EptInitialize()             Build EPT identity mapping
 ```
 
-#### 2. VMX 支持检测
+#### 2. VMX Support Detection
 
 ```c
 VmxIsSupported():
-  1. CPUID.1:ECX[5] == 1     // VMX 位
+  1. CPUID.1:ECX[5] == 1     // VMX bit
   2. IA32_FEATURE_CONTROL.Lock == 1 && VMXON_ENABLED == 1
 ```
 
-#### 3. 控制字段调整
+#### 3. Control Field Adjustment
 
-遵循 Intel SDM Vol. 3C, Section 31.5.1:
+Follows Intel SDM Vol. 3C, Section 31.5.1:
 
 ```c
 VmxAdjustControls(Requested, Capability):
-  Low32  = Capability & 0xFFFFFFFF   // 必须为 1 的位
-  High32 = Capability >> 32          // 允许为 1 的位
+  Low32  = Capability & 0xFFFFFFFF   // Bits that must be 1
+  High32 = Capability >> 32          // Bits that are allowed to be 1
   Result = (Requested | Low32) & High32
 ```
 
-#### 4. 每核心启用
+#### 4. Per-Core Enablement
 
 ```
 VmxEnableOnCpu():
-  1. 保存原始 CR4
+  1. Save original CR4
   2. CR4 |= VMXE (bit 13)
-  3. 调整 CR0 满足 VMX fixed bits
-  4. VMXON (使用 VMXON Region 物理地址)
+  3. Adjust CR0 to satisfy VMX fixed bits
+  4. VMXON (using VMXON Region physical address)
 ```
 
-### VMCS 配置
+### VMCS Configuration
 
-**文件**: `vmx_init.c` - `VmxSetupVmcs()`
+**File**: `vmx_init.c` - `VmxSetupVmcs()`
 
-VMCS 配置是整个 Hypervisor 的核心, 决定了哪些事件会触发 VM-Exit:
+VMCS configuration is the core of the entire Hypervisor, deciding which events trigger a VM-Exit:
 
 #### VM-Execution Controls
 
-| 控制类别 | 启用的位 | 用途 |
+| Control Category | Enabled Bits | Purpose |
 |---------|---------|------|
-| **Pin-Based** | NMI Exiting | 拦截 NMI |
-| **Primary Proc** | Use MSR Bitmaps | 选择性拦截 MSR 访问 |
-| | Use I/O Bitmaps | I/O 端口拦截控制 (全零=无 I/O 退出) |
-| | Secondary Controls | 启用二级控制 |
-| | CR3 Load Exiting | 监控进程切换 (CR3 写入) |
-| | MOV-DR Exiting | 拦截调试寄存器访问 |
-| | Use TSC Offsetting | 硬件 TSC 偏移 (反时间检测) |
-| **Secondary Proc** | Enable EPT | 启用扩展页表 |
-| | Enable RDTSCP | 允许 RDTSCP 指令 (拦截处理) |
-| | Enable VPID | 虚拟处理器标识 (TLB 优化) |
-| | Enable INVPCID | 允许 INVPCID 指令 |
-| | Enable XSAVES | 允许 XSAVES/XRSTORS 指令 |
-| **Exception Bitmap** | #DB (bit 1) | 拦截调试异常 |
-| | #BP (bit 3) | 拦截断点异常 |
+| **Pin-Based** | NMI Exiting | Intercepts NMI |
+| **Primary Proc** | Use MSR Bitmaps | Selectively intercepts MSR accesses |
+| | Use I/O Bitmaps | I/O port interception control (all zeros = no I/O exit) |
+| | Secondary Controls | Enables secondary controls |
+| | CR3 Load Exiting | Monitors process switches (CR3 writes) |
+| | MOV-DR Exiting | Intercepts debug register accesses |
+| | Use TSC Offsetting | Hardware TSC offsetting (anti-timing detection) |
+| **Secondary Proc** | Enable EPT | Enables Extended Page Tables |
+| | Enable RDTSCP | Allows RDTSCP instruction (intercept and handle) |
+| | Enable VPID | Virtual Processor Identifier (TLB optimization) |
+| | Enable INVPCID | Allows INVPCID instruction |
+| | Enable XSAVES | Allows XSAVES/XRSTORS instructions |
+| **Exception Bitmap** | #DB (bit 1) | Intercepts debug exceptions |
+| | #BP (bit 3) | Intercepts breakpoint exceptions |
 
-#### Guest State (镜像当前 CPU)
+#### Guest State (Mirroring Current CPU)
 
-- 段寄存器: CS/SS/DS/ES/FS/GS/TR/LDTR (Selector, Base, Limit, AccessRights)
-- 控制寄存器: CR0, CR3, CR4
-- 描述符表: GDTR, IDTR (Base + Limit)
-- MSR: IA32_DEBUGCTL, IA32_EFER, SYSENTER_CS/ESP/EIP
+- Segment registers: CS/SS/DS/ES/FS/GS/TR/LDTR (Selector, Base, Limit, AccessRights)
+- Control registers: CR0, CR3, CR4
+- Descriptor tables: GDTR, IDTR (Base + Limit)
+- MSRs: IA32_DEBUGCTL, IA32_EFER, SYSENTER_CS/ESP/EIP
 - RFLAGS, DR7, VMCS Link Pointer (0xFFFFFFFFFFFFFFFF)
 
-#### Host State (VM-Exit 恢复目标)
+#### Host State (VM-Exit Recovery Target)
 
-- Host RSP: 指向 Host Stack 顶部 (32KB, 16 字节对齐 - 8)
-- Host RIP: 指向 `AsmVmxExitHandler` (汇编入口)
-- 段选择子: RPL 清零 (& 0xFFF8)
-- CR4.VMXE: 保持置位
-- IA32_EFER: VM-Exit 时自动保存/加载
+- Host RSP: Points to the top of the Host Stack (32KB, 16-byte aligned - 8)
+- Host RIP: Points to `AsmVmxExitHandler` (assembly entry point)
+- Segment selectors: RPL cleared to zero (& 0xFFF8)
+- CR4.VMXE: Kept set
+- IA32_EFER: Automatically saved/loaded on VM-Exit
 
-#### CR0/CR4 Guest-Host Mask 与 Read Shadow
+#### CR0/CR4 Guest-Host Mask and Read Shadow
 
 ```c
-// CR0: 拦截 VMX Fixed Bits (PE, NE, PG 等必须为 1 的位)
-// Guest 修改这些位时触发 VM-Exit → HandleCrAccess 应用 Fixed0/Fixed1 调整
-// 防止 Guest 写入违反 VMX 约束的 CR0 值导致 VM-Entry 失败
+// CR0: Intercept VMX Fixed Bits (PE, NE, PG, etc., bits that must be 1)
+// Guest modifications to these bits trigger a VM-Exit -> HandleCrAccess applies Fixed0/Fixed1 adjustment
+// Prevents Guest from writing CR0 values that violate VMX constraints, which would cause VM-Entry failure
 ULONG64 Cr0Fixed0 = __readmsr(MSR_IA32_VMX_CR0_FIXED0);
 VmxWrite(VMCS_CTRL_CR0_GUEST_HOST_MASK, Cr0Fixed0);
 VmxWrite(VMCS_CTRL_CR0_READ_SHADOW, Cr0 & Cr0Fixed0);
 
-// CR4: 仅拦截 VMXE 位, 对 Guest 隐藏 VMX 操作
+// CR4: Only intercept VMXE bit, hiding VMX operations from Guest
 VmxWrite(VMCS_CTRL_CR4_GUEST_HOST_MASK, CR4_VMXE);
 VmxWrite(VMCS_CTRL_CR4_READ_SHADOW, Cr4 & ~CR4_VMXE);
 ```
 
-### VM-Exit 处理框架
+### VM-Exit Handling Framework
 
-**文件**: `vmx_asm.asm` (汇编入口) + `vmx_exit.c` (C 分发器)
+**File**: `vmx_asm.asm` (assembly entry point) + `vmx_exit.c` (C dispatcher)
 
-#### 汇编入口 (`AsmVmxExitHandler`)
+#### Assembly Entry Point (`AsmVmxExitHandler`)
 
-VM-Exit 发生时 CPU 自动跳转到 Host RIP, 即此函数:
+When a VM-Exit occurs, the CPU automatically jumps to Host RIP, which is this function:
 
 ```
-1. sub rsp, 128          // 分配 GUEST_CONTEXT (16 个寄存器 x 8 字节)
-2. 保存 RAX~R15 到栈     // 按 GUEST_CONTEXT 结构布局
-3. mov rcx, rsp          // 第一参数 = PGUEST_CONTEXT
+1. sub rsp, 128          // Allocate GUEST_CONTEXT (16 registers x 8 bytes)
+2. Save RAX~R15 to stack // According to GUEST_CONTEXT structure layout
+3. mov rcx, rsp          // First parameter = PGUEST_CONTEXT
 4. sub rsp, 28h          // x64 Shadow Space
-5. call VmxExitHandler   // 调用 C 分发器
+5. call VmxExitHandler   // Call C dispatcher
 6. add rsp, 28h
-7. if AL != 0:           // 继续 Guest
-     恢复 RAX~R15
+7. if AL != 0:           // Continue Guest
+     Restore RAX~R15
      add rsp, 128
-     vmresume            // 恢复 Guest 执行
-   else:                 // 关闭 VMX (IRETQ 方式)
-     vmread Guest RSP/RIP/RFLAGS/CS/SS  // vmxoff 前读取
-     vmxoff                              // 退出 VMX 操作
-     在 Guest 栈上构建 IRETQ 帧         // [RIP, CS, RFLAGS, RSP, SS]
-     恢复 RAX~R15
-     mov rsp, Guest 栈
-     iretq               // 原子恢复 CS:RIP + SS:RSP + RFLAGS
+     vmresume            // Resume Guest execution
+   else:                 // Shut down VMX (IRETQ method)
+     vmread Guest RSP/RIP/RFLAGS/CS/SS  // Read before vmxoff
+     vmxoff                              // Exit VMX operation
+     Build IRETQ frame on Guest stack    // [RIP, CS, RFLAGS, RSP, SS]
+     Restore RAX~R15
+     mov rsp, Guest Stack
+     iretq               // Atomically restore CS:RIP + SS:RSP + RFLAGS
 ```
 
-#### C 分发器 (`VmxExitHandler`)
+#### C Dispatcher (`VmxExitHandler`)
 
 ```c
 BOOLEAN VmxExitHandler(PGUEST_CONTEXT GuestContext) {
-    GuestContext->Rsp = VmxRead(VMCS_GUEST_RSP);  // 同步 Guest RSP
+    GuestContext->Rsp = VmxRead(VMCS_GUEST_RSP);  // Synchronize Guest RSP
     ExitReason = VmxRead(VMCS_EXIT_REASON) & 0xFFFF;
     InterlockedIncrement64(&CpuContext->ExitCount);
 
     switch (ExitReason) {
-        case EXIT_REASON_CPUID:          -> AadHandleCpuid() (含 0x4CAFE000 后门)
+        case EXIT_REASON_CPUID:          -> AadHandleCpuid() (including 0x4CAFE000 backdoor)
         case EXIT_REASON_RDMSR:          -> HandleRdmsrImpl()
         case EXIT_REASON_WRMSR:          -> HandleWrmsrImpl()
-        case EXIT_REASON_CR_ACCESS:      -> HandleCrAccess() (CR0 Fixed Bits 保护)
+        case EXIT_REASON_CR_ACCESS:      -> HandleCrAccess() (CR0 Fixed Bits protection)
         case EXIT_REASON_DR_ACCESS:      -> AadHandleDrAccess()
-        case EXIT_REASON_EXCEPTION_NMI:  -> HandleException() (NMI 重注入)
+        case EXIT_REASON_EXCEPTION_NMI:  -> HandleException() (NMI re-injection)
         case EXIT_REASON_EPT_VIOLATION:  -> HandleEptViolation()
-        case EXIT_REASON_MTF:            -> HandleMtf() (per-CPU hook 恢复)
-        case EXIT_REASON_VMCALL:         -> HandleVmcall() (关闭/内存读写)
-        case EXIT_REASON_XSETBV:         -> HandleXsetbv() (XCR0 验证)
+        case EXIT_REASON_MTF:            -> HandleMtf() (per-CPU hook restoration)
+        case EXIT_REASON_VMCALL:         -> HandleVmcall() (shutdown/memory read/write)
+        case EXIT_REASON_XSETBV:         -> HandleXsetbv() (XCR0 validation)
         case EXIT_REASON_HLT:           -> Activity State = HLT
-        case EXIT_REASON_IO:            -> I/O 直通模拟
+        case EXIT_REASON_IO:            -> I/O passthrough emulation
         ...
     }
 
-    // IDT-Vectoring 事件重注入 (防止 Guest 丢失异常)
+    // IDT-Vectoring event re-injection (prevents Guest from losing exceptions)
     if (IDT_VECTORING_INFO.Valid && !VMENTRY_INT_INFO.Valid)
-        重注入原始 IDT 事件;
+        Re-inject original IDT event;
 
-    VmxWrite(VMCS_GUEST_RSP, GuestContext->Rsp);  // 写回 Guest RSP
+    VmxWrite(VMCS_GUEST_RSP, GuestContext->Rsp);  // Write back Guest RSP
     return TRUE;  // VMRESUME
-    return FALSE; // VMXOFF (IRETQ 恢复)
+    return FALSE; // VMXOFF (IRETQ recovery)
 }
 ```
 
-#### Exit Reason 处理策略
+#### Exit Reason Handling Strategy
 
-| Exit Reason | 策略 | 说明 |
+| Exit Reason | Strategy | Description |
 |-------------|------|------|
-| CPUID | 后门 + 修改返回值 | 0x4CAFE000 后门, 清除 VMX/Hypervisor 位 |
-| RDMSR/WRMSR | 代理执行 + 伪造 | 修改 IA32_DEBUGCTL 返回值 |
-| CR3 Load | 透传 + 记录 | 监控进程切换 |
-| CR0 Write | Fixed Bits 调整 | 应用 VMX CR0 Fixed0/Fixed1 约束 |
-| DR Access | 伪造读取 / 允许写入 | DR0-3=0, DR7=0x400 |
-| Exception/NMI | 重注入 / NMI-window | NMI 始终重注入, 异常传递给 Guest |
-| EPT Violation | 页面切换 + MTF | Execute-Only Hook 核心 |
-| MTF | 恢复 EPT 权限 | Hook 读写后恢复 Execute-Only |
-| VMCALL | 控制通道 | 0xDEADCAFE = 关闭, 内存读写 |
-| HLT | Activity State = HLT | Guest 安全休眠 |
-| XSETBV | 验证 + 执行 | XCR0 合法性检查 |
-| I/O | 直通执行 | 模拟 IN/OUT (must-be-1 位强制) |
-| IDT-Vectoring | 自动重注入 | 防止 VM-Exit 丢失 Guest 异常 |
+| CPUID | Backdoor + Modify Return Value | 0x4CAFE000 backdoor, clear VMX/Hypervisor bits |
+| RDMSR/WRMSR | Proxy Execution + Spoofing | Modify `IA32_DEBUGCTL` return values |
+| CR3 Load | Passthrough + Record | Monitor process switches |
+| CR0 Write | Fixed Bits Adjustment | Apply VMX CR0 Fixed0/Fixed1 constraints |
+| DR Access | Spoofed Read / Allowed Write | DR0-3 = 0, DR7 = 0x400 |
+| Exception/NMI| Re-injection / NMI-window | NMI always re-injected, exceptions passed to Guest |
+| EPT Violation| Page Switching + MTF | Execute-Only Hook core |
+| MTF | Restore EPT Permissions | Restore Execute-Only after hook reads/writes |
+| VMCALL | Control Channel | 0xDEADCAFE = Shutdown, memory read/write |
+| HLT | Activity State = HLT | Guest safe sleep |
+| XSETBV | Validate + Execute | XCR0 validity check |
+| I/O | Passthrough Execution | Emulate IN/OUT (must-be-1 bits enforced) |
+| IDT-Vectoring| Automatic Re-injection | Prevent VM-Exit from losing Guest exceptions |
 
-### EPT 引擎与 Hook 机制
+### EPT Engine and Hook Mechanism
 
-**文件**: `ept.h` + `ept.c`
+**File**: `ept.h` + `ept.c`
 
-EPT (Extended Page Tables) 是本项目最核心的技术, 实现了透明的函数 Hook。
+EPT (Extended Page Tables) is the core technology of this project, implementing transparent function hooking.
 
-#### EPT 页表层级
+#### EPT Page Table Hierarchy
 
 ```
-EPT 4 级页表 (恒等映射 512GB 物理地址空间):
+EPT 4-level page tables (identity mapping 512GB physical address space):
 
 PML4[0] ──> PDPT[512] ──> PD[512][512] ──> 2MB Large Pages
                                 |
                          EptSplitLargePage()
                                 |
                                 v
-                          PT[512] ──> 4KB Pages (用于 Hook)
+                          PT[512] ──> 4KB Pages (used for hooks)
 ```
 
-#### 恒等映射构建
+#### Identity Mapping Construction
 
 ```c
 EptInitialize():
-  1. 分配 512 个 PD 页 (每个覆盖 1GB)
-  2. 每个 PD 页含 512 个 2MB Large Page 条目
-  3. 总覆盖: 512 PD x 512 条目 x 2MB = 512GB
+  1. Allocate 512 PD pages (each covering 1GB)
+  2. Each PD page contains 512 2MB Large Page entries
+  3. Total coverage: 512 PD x 512 entries x 2MB = 512GB
   4. PML4[0] -> PDPT -> PD (Read+Write+Execute)
-  5. EPTP = WB 内存类型 + 4 级页走 + PML4 物理地址
+  5. EPTP = WB memory type + 4-level page walk + PML4 physical address
 ```
 
-#### 2MB -> 4KB 分裂
+#### 2MB -> 4KB Splitting
 
-当需要对某个 4KB 页面设置不同权限时, 必须先将包含它的 2MB 大页拆分:
+When different permissions need to be set for a specific 4KB page, the 2MB large page containing it must be split first:
 
 ```c
 EptSplitLargePage(PhysicalAddress):
-  1. 计算 2MB 对齐基址
-  2. 从预分配的 Split Page 池中取一个空闲页
-  3. 填充 512 个 PTE, 每个映射 4KB (R+W+X, WB)
-  4. 更新 PDE: LargePage=0, 指向新 PT 页
+  1. Calculate the 2MB-aligned base address
+  2. Take a free page from the pre-allocated Split Page pool
+  3. Fill 512 PTEs, each mapping 4KB (R+W+X, WB)
+  4. Update PDE: LargePage=0, pointing to the new PT page
 ```
 
-预分配的 Split Page 池大小: `MAX_SPLIT_PAGES = 32`
+Pre-allocated Split Page pool size: `MAX_SPLIT_PAGES = 32`
 
-#### Execute-Only Hook 机制
+#### Execute-Only Hook Mechanism
 
-这是整个项目最精妙的设计 -- 利用 EPT 的 R/W/X 权限分离实现**不可检测**的函数 Hook:
+This is the most ingenious design of the entire project — utilizing the R/W/X permission separation of EPT to achieve **undetectable** function hooks:
 
 ```
                     +------------------+
-                    |   目标函数页面    |
-                    |   (原始代码)      |
+                    |   Target Function Page    |
+                    |   (Original Code)      |
                     +--------+---------+
                              |
                     EptHookFunction()
@@ -470,153 +472,153 @@ EptSplitLargePage(PhysicalAddress):
               +--------------+--------------+
               |                             |
      +--------v--------+         +---------v--------+
-     |   原始页 (备份)   |         |   Hook 页 (修改)  |
-     |   原始字节内容    |         |   JMP HookFunc    |
-     |                  |         |   (14 字节 abs)   |
+     | Original Page (Backup)   |         |   Hook Page (Modified)  |
+     | Original Byte Content    |         |   JMP HookFunc    |
+     |                  |         |   (14-byte abs)   |
      +--------+---------+         +---------+--------+
               |                             |
-              |    EPT PTE 配置:             |
-              |    Execute-Only -> Hook 页   |
-              |    Read/Write  -> 原始页     |
+              |    EPT PTE Configuration:             |
+              |    Execute-Only -> Hook Page   |
+              |    Read/Write   -> Original Page     |
               |                             |
      +--------v---------+        +---------v--------+
-     | 反调试代码读取时:  |        | CPU 执行时:       |
-     | 看到未修改的原始   |        | 执行 JMP 到       |
-     | 字节 (完整性检查   |        | Hook 函数         |
-     | 通过)             |        |                   |
+     | When Anti-debugging Code Reads:  |        | When CPU Executes:       |
+     | Sees Unmodified Original   |        | Executes JMP to       |
+     | Bytes (Integrity Check   |        | Hook Function         |
+     | Passes)             |        |                   |
      +------------------+        +-------------------+
 ```
 
-#### Hook 安装流程
+#### Hook Installation Flow
 
 ```c
 EptHookFunction(TargetVa, HookFunction, &OriginalFunction):
-  1. 翻译 VA -> PA (MmGetPhysicalAddress)
-  2. 拆分 2MB 大页 (EptSplitLargePage)
-  3. 获取目标 4KB 页的 PTE
-  4. 分配并拷贝原始页内容
-  5. 分配 Hook 页, 写入 14 字节绝对跳转:
+  1. Translate VA -> PA (MmGetPhysicalAddress)
+  2. Split 2MB large page (EptSplitLargePage)
+  3. Get PTE of the target 4KB page
+  4. Allocate and copy original page content
+  5. Allocate Hook page, write 14-byte absolute jump:
        FF 25 00000000           // JMP QWORD PTR [RIP+0]
-       <8 字节 HookFunction 地址>
-  6. 构建 Trampoline (调用原函数):
-       <原始字节 (14 bytes)>
+       <8-byte HookFunction address>
+  6. Build Trampoline (call original function):
+       <Original bytes (14 bytes)>
        FF 25 00000000
-       <8 字节 TargetVa+14 地址>
-  7. 设置 PTE:
+       <8-byte TargetVa+14 address>
+  7. Set PTE:
        Read=0, Write=0, Execute=1
-       PhysAddr = Hook 页物理地址
-  8. INVEPT 刷新 TLB
+       PhysAddr = Hook Page Physical Address
+  8. INVEPT Flush TLB
 ```
 
-#### EPT Violation 处理
+#### EPT Violation Handling
 
 ```c
 HandleEptViolation():
-  读取: GuestPhysAddr, ExitQualification
+  Read: GuestPhysAddr, ExitQualification
 
-  if 读/写访问:
-    // 反调试代码在读取函数字节 (完整性检查)
-    PTE -> Read=1, Write=1, Execute=0, PhysAddr=原始页
-    启用 MTF (Monitor Trap Flag)
-    // 执行一条读/写指令后触发 MTF VM-Exit
+  if Read/Write Access:
+    // Anti-debugging code is reading function bytes (integrity check)
+    PTE -> Read=1, Write=1, Execute=0, PhysAddr=Original Page
+    Enable MTF (Monitor Trap Flag)
+    // Trigger MTF VM-Exit after executing one read/write instruction
 
-  if 执行访问:
-    // 恢复为执行 Hook 页
-    PTE -> Read=0, Write=0, Execute=1, PhysAddr=Hook页
+  if Execution Access:
+    // Restore to execute Hook page
+    PTE -> Read=0, Write=0, Execute=1, PhysAddr=Hook Page
 
 HandleMtf():
-  // 读/写指令执行完毕, 恢复 Execute-Only
-  关闭 MTF
-  遍历所有 Hook:
-    PTE -> Read=0, Write=0, Execute=1, PhysAddr=Hook页
+  // Read/write instruction executed, restore Execute-Only
+  Disable MTF
+  Iterate over all hooks:
+    PTE -> Read=0, Write=0, Execute=1, PhysAddr=Hook Page
   INVEPT
 ```
 
-### 进程跟踪与 EPROCESS 动态偏移发现
+### Process Tracking and EPROCESS Dynamic Offset Discovery
 
-**文件**: `process.h` + `process.c`
+**File**: `process.h` + `process.c`
 
-#### EPROCESS 偏移动态发现
+#### EPROCESS Dynamic Offset Discovery
 
-`EPROCESS.DirectoryTableBase` 的偏移因 Windows 版本而异。本项目通过**运行时扫描**自动确定:
+The offset of `EPROCESS.DirectoryTableBase` varies across Windows versions. This project automatically determines it via **runtime scanning**:
 
 ```c
 ProcessResolveOffsets():
-  // 方法 1: CR3 扫描 (最可靠)
+  // Method 1: CR3 scan (most reliable)
   CurrentProcess = PsGetCurrentProcess()
   CurrentCr3 = __readcr3()
   for offset = 0 to 0x700 step 8:
     value = *(ULONG64*)(EPROCESS + offset)
     if (value & ~0xFFF) == (CurrentCr3 & ~0xFFF):
       if ValidateDtbOffset(offset):
-        -> 找到! offset 就是 DirectoryTableBase 偏移
+        -> Found! offset is the DirectoryTableBase offset
 
-  // 方法 2: 已知偏移表 (回退)
-  尝试: 0x028 (Win10/11), 0x018 (Win7/8), 0x02C (Insider)
-  对每个偏移用 ValidateDtbOffset() 验证
+  // Method 2: Known offset table (fallback)
+  Try: 0x028 (Win10/11), 0x018 (Win7/8), 0x02C (Insider)
+  Validate each offset using ValidateDtbOffset()
 ```
 
-验证逻辑:
+Validation logic:
 
 ```c
 ValidateDtbOffset(offset):
-  1. 读取 System 进程 EPROCESS 在该偏移处的值
-  2. 与当前 CR3 比较 (mask 掉 PCID 低 12 位)
-  3. 检查值非零且在有效物理地址范围内 (< 2^48)
+  1. Read the value at this offset in the System process EPROCESS
+  2. Compare with the current CR3 (mask out the lower 12 bits of PCID)
+  3. Check that the value is non-zero and within the valid physical address range (< 2^48)
 ```
 
-#### CR3 进程识别
+#### CR3 Process Identification
 
-在 VM-Exit handler 中通过 CR3 快速识别目标进程:
+Quickly identify the target process via CR3 in the VM-Exit handler:
 
 ```c
 ProcessFindByCr3(Cr3):
-  Cr3Masked = Cr3 & ~0xFFF    // 去掉 PCID 位
+  Cr3Masked = Cr3 & ~0xFFF    // Strip PCID bits
   for i = 0 to MAX_TARGET_PROCESSES:
     if Targets[i].Active && (Targets[i].Cr3 & ~0xFFF) == Cr3Masked:
       return &Targets[i]
   return NULL
 ```
 
-**设计考量**:
-- 线性扫描 (MAX_TARGET_PROCESSES=16), 无锁读取
-- 在 VM-Exit handler 的高 IRQL 下安全执行
-- PCID (Process Context Identifier) 位 mask 保证兼容性
+**Design Considerations**:
+- Linear scan (MAX_TARGET_PROCESSES=16), lock-free read
+- Safe execution under high IRQL in the VM-Exit handler
+- PCID (Process Context Identifier) bit masking guarantees compatibility
 
-### 反反调试引擎
+### Anti-Anti-Debugging Engine
 
-**文件**: `anti_anti_debug.h` + `anti_anti_debug.c`
+**File**: `anti_anti_debug.h` + `anti_anti_debug.c`
 
-#### 功能概览
+#### Feature Overview
 
-反反调试引擎分两层工作:
+The anti-anti-debugging engine operates at two levels:
 
-1. **VM-Exit Handler 层**: 拦截 CPUID / DR / RDTSC / 异常
-2. **EPT Hook 层**: 拦截 Nt* 内核 API 调用
+1. **VM-Exit Handler Level**: Intercepts CPUID / DR / RDTSC / exceptions
+2. **EPT Hook Level**: Intercepts Nt* kernel API calls
 
-#### EPT Hook 的四个 Nt API
+#### The Four Hooked Nt APIs via EPT
 
-**1. NtQueryInformationProcess** (最重要)
+**1. NtQueryInformationProcess** (Most Important)
 
 ```c
 HookNtQueryInformationProcess():
-  调用原函数获取真实结果
-  if 是目标进程 && AAD_HIDE_DEBUGGER:
+  Call original function to obtain real results
+  if target process && AAD_HIDE_DEBUGGER:
     switch (InformationClass):
       ProcessDebugPort (0x07):
-        -> 改为 0 (无调试端口)
+        -> Changed to 0 (no debug port)
       ProcessDebugObjectHandle (0x1E):
-        -> 返回 STATUS_PORT_NOT_SET
+        -> Returns STATUS_PORT_NOT_SET
       ProcessDebugFlags (0x1F):
-        -> 改为 1 (未被调试)
+        -> Changed to 1 (not being debugged)
 ```
 
 **2. NtQuerySystemInformation**
 
 ```c
 HookNtQuerySystemInformation():
-  调用原函数
-  if 是目标进程 && AAD_HIDE_SYSINFO:
+  Call original function
+  if target process && AAD_HIDE_SYSINFO:
     if class == SystemKernelDebuggerInformation (0x23):
       KernelDebuggerEnabled = FALSE
       KernelDebuggerNotPresent = TRUE
@@ -626,90 +628,90 @@ HookNtQuerySystemInformation():
 
 ```c
 HookNtSetInformationThread():
-  if 是目标进程 && class == ThreadHideFromDebugger (0x11):
-    return STATUS_SUCCESS   // 假装成功, 实际不执行
+  if target process && class == ThreadHideFromDebugger (0x11):
+    return STATUS_SUCCESS   // Pretend success, do not actually execute
   else:
-    调用原函数
+    Call original function
 ```
 
 **4. NtClose**
 
 ```c
 HookNtClose():
-  if 是目标进程:
-    __try { 调用原函数 }
-    __except { 吞掉异常 }   // 防止 INVALID_HANDLE 异常泄露调试状态
+  if target process:
+    __try { Call original function }
+    __except { Swallow exception }   // Prevent INVALID_HANDLE exception from leaking debug status
 ```
 
-#### 调试寄存器伪造 (DR0-DR7)
+#### Debug Register Spoofing (DR0-DR7)
 
 ```c
 AadHandleDrAccess():
-  Exit Qualification 解析:
-    DrNumber  = bits[2:0]    // DR 编号
-    Direction = bit[4]       // 0=写入DR, 1=读取DR
-    GpReg     = bits[11:8]   // 通用寄存器编号
+  Exit Qualification parsing:
+    DrNumber  = bits[2:0]    // DR index
+    Direction = bit[4]       // 0=write DR, 1=read DR
+    GpReg     = bits[11:8]   // General-purpose register index
 
-  if 是目标进程 && AAD_HIDE_HWBP:
-    if 读取 DR:
-      DR0-DR3 -> 返回 0           (隐藏硬件断点地址)
-      DR6     -> 返回 0xFFFF0FF0  (清除断点命中标志)
-      DR7     -> 返回 0x400       (默认值, 无断点启用)
-    if 写入 DR:
-      正常写入 (断点仍然工作, 只是读取时隐藏)
+  if target process && AAD_HIDE_HWBP:
+    if Read DR:
+      DR0-DR3 -> Returns 0           (hide hardware breakpoint addresses)
+      DR6     -> Returns 0xFFFF0FF0  (clear breakpoint hit flags)
+      DR7     -> Returns 0x400       (default value, no breakpoints enabled)
+    if Write DR:
+      Normal write (breakpoints still work, just hidden during reads)
   else:
-    正常执行 DR 操作
+    Normal execution of DR operations
 ```
 
-#### RDTSC/RDTSCP 时间补偿
+#### RDTSC/RDTSCP Timing Compensation
 
 ```c
 AadHandleRdtsc():
   RealTsc = __rdtsc()
-  if 是目标进程 && AAD_HIDE_TIMING:
-    RealTsc -= CpuContext->TscOffset   // 减去累计调试暂停时间
-  GuestContext->RAX = RealTsc 低32位
-  GuestContext->RDX = RealTsc 高32位
+  if target process && AAD_HIDE_TIMING:
+    RealTsc -= CpuContext->TscOffset   // Subtract cumulative debug pause time
+  GuestContext->RAX = lower 32 bits of RealTsc
+  GuestContext->RDX = upper 32 bits of RealTsc
 
-// TSC 偏移管理:
-AadNotifyDebugPause():  记录暂停开始时的 TSC
-AadNotifyDebugResume(): TscOffset += (当前TSC - 暂停开始TSC)
+// TSC offset management:
+AadNotifyDebugPause():  Record TSC at pause start
+AadNotifyDebugResume(): TscOffset += (Current TSC - Pause Start TSC)
 ```
 
-#### CPUID 隐藏
+#### CPUID Hiding
 
 ```c
 AadHandleCpuid():
-  // CPUID 后门：快速检测 Hypervisor 是否活跃
+  // CPUID backdoor: Fast check if hypervisor is active
   if Leaf == 0x4CAFE000:
     EAX = 0x564D5854 ("VMXT"), EBX=ECX=EDX=0
-    return   // 不执行真实 CPUID
+    return   // Do not execute real CPUID
 
-  执行真实 CPUID
-  if 是目标进程 && AAD_HIDE_CPUID:
+  Execute real CPUID
+  if target process && AAD_HIDE_CPUID:
     Leaf 1:
-      ECX &= ~(1 << 31)       // 清除 Hypervisor Present 位
+      ECX &= ~(1 << 31)       // Clear Hypervisor Present bit
     Leaf 0x40000000~0x400000FF:
-      EAX=EBX=ECX=EDX = 0     // 伪装为裸机
+      EAX=EBX=ECX=EDX = 0     // Masquerade as bare metal
 ```
 
-#### 异常行为标准化
+#### Exception Behavior Standardization
 
 ```c
 AadHandleException():
-  读取中断信息: Vector, Type, ErrorCode
-  // 无论是否目标进程, 都重新注入异常到 Guest
-  // 让 Guest 的 SEH/VEH 正常处理
-  // 这确保了 INT 2D, INT 3 等的行为与非调试环境一致
+  Read interruption info: Vector, Type, ErrorCode
+  // Regardless of whether it is the target process, re-inject the exception into the Guest
+  // Allow the Guest's SEH/VEH to handle it normally
+  // This ensures that the behavior of INT 2D, INT 3, etc. is consistent with non-debugged environments
 
   VmxWrite(VMCS_CTRL_VMENTRY_INT_INFO, InjectInfo)
 ```
 
-### MSR 拦截
+### MSR Interception
 
-**文件**: `msr.c`
+**File**: `msr.c`
 
-#### MSR Bitmap 布局
+#### MSR Bitmap Layout
 
 ```
 4KB Bitmap:
@@ -718,45 +720,45 @@ AadHandleException():
   [0x800..0xBFF]  Write bitmap for MSR 0x00000000 - 0x00001FFF
   [0xC00..0xFFF]  Write bitmap for MSR 0xC0000000 - 0xC0001FFF
 
-bit = 1 -> 该 MSR 访问触发 VM-Exit
-bit = 0 -> 直接透传 (不 VM-Exit)
+bit = 1 -> This MSR access triggers a VM-Exit
+bit = 0 -> Passed through directly (no VM-Exit)
 ```
 
-默认全部透传, 仅拦截 `IA32_DEBUGCTL` (0x01D9):
+By default, all are passed through, only intercepting `IA32_DEBUGCTL` (0x01D9):
 
 ```c
 MsrBitmapInitialize():
-  RtlZeroMemory(bitmap, 4096)     // 全部透传
-  SetBit(IA32_DEBUGCTL, Read+Write)  // 拦截调试控制 MSR
+  RtlZeroMemory(bitmap, 4096)     // Pass through all
+  SetBit(IA32_DEBUGCTL, Read+Write)  // Intercept debug control MSR
 ```
 
-#### IA32_DEBUGCTL 伪造
+#### IA32_DEBUGCTL Spoofing
 
 ```c
 HandleRdmsrImpl():
-  if MSR == IA32_DEBUGCTL && 是目标进程:
-    Value &= ~0x43    // 清除:
+  if MSR == IA32_DEBUGCTL && target process:
+    Value &= ~0x43    // Clear:
                       //   Bit 0 (LBR): Last Branch Record
                       //   Bit 1 (BTF): Single-Step on Branches
                       //   Bit 6 (TR):  Trace Messages
 ```
 
-### 日志系统
+### Logging System
 
-**文件**: `log.h` + `log.c`
+**File**: `log.h` + `log.c`
 
-#### 设计原则
+#### Design Principles
 
-Hypervisor 日志面临一个核心挑战：**VMX root 模式下不能调用 `DbgPrintEx`**。原因是 `DbgPrintEx` 内部使用自旋锁和 `INT 3` 触发调试器中断，而 VMX root 模式运行在 Host 栈（32KB `ExAllocatePool` 分配的内存）上，不是 Windows 线程内核栈——SEH 异常链无效，`INT 3` 导致递归 VM-Exit 或死锁。
+Hypervisor logging faces a core challenge: **`DbgPrintEx` cannot be called under VMX root mode**. The reason is that `DbgPrintEx` internally uses spinlocks and `INT 3` to trigger debugger interrupts, whereas VMX root mode executes on the Host stack (32KB of memory allocated via `ExAllocatePool`), which is not a Windows thread kernel stack — making SEH exception chains invalid, and causing an `INT 3` to lead to recursive VM-Exits or deadlocks.
 
-解决方案：**统一的 Lock-free Ring Buffer + Flush Thread 架构**。
+Solution: **A unified Lock-free Ring Buffer + Flush Thread architecture**.
 
 #### Lock-free Ring Buffer
 
 ```
-8192 entries, 每条 256 字节
+8192 entries, 256 bytes per entry
 
-                   Lock-free 写入 (InterlockedIncrement)
+                   Lock-free write (InterlockedIncrement)
                             |
 +---+---+---+---+---+---+---+---+
 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | ... [8192 entries]
@@ -765,103 +767,103 @@ Hypervisor 日志面临一个核心挑战：**VMX root 模式下不能调用 `Db
           |                   |                |
       FlushIndex         ReadIndex        WriteIndex
 
-Ready[i] = 0: 空槽位或正在写入
-Ready[i] = 1: 数据已完整写入, 可安全读取
+Ready[i] = 0: empty slot or writing in progress
+Ready[i] = 1: data fully written, safe to read
 ```
 
-**无锁发布协议** (Multi-writer safe)：
+**Lock-free Publication Protocol** (Multi-writer safe):
 ```
-写入者 (LogWrite, 任意 IRQL / VMX root 均安全):
-  1. InterlockedIncrement(&WriteIndex)    — 原子占位
-  2. 填写 Entry (Level, Pid, Timestamp, Message)
-  3. InterlockedExchange(&Ready[Idx], 1)  — RELEASE 屏障, 发布
+Writer (LogWrite, safe at any IRQL / VMX root):
+  1. InterlockedIncrement(&WriteIndex)    — Atomic slot allocation
+  2. Fill Entry (Level, Pid, Timestamp, Message)
+  3. InterlockedExchange(&Ready[Idx], 1)  — RELEASE barrier, publish
 
-读取者 (Flush Thread / LogRead):
-  1. 检查 Ready[Idx] == 1                 — ACQUIRE 屏障
-  2. 读取 Entry 全部字段 (保证完整)
-  3. InterlockedExchange(&Ready[Idx], 0)  — 释放槽位
+Reader (Flush Thread / LogRead):
+  1. Check Ready[Idx] == 1                 — ACQUIRE barrier
+  2. Read all fields of the Entry (integrity guaranteed)
+  3. InterlockedExchange(&Ready[Idx], 0)  — Release slot
 ```
 
-全程零自旋锁、零 IRQL 操作、纯 `Interlocked*` 原子操作。
+Zero spinlocks, zero IRQL modifications, and pure `Interlocked*` atomic operations throughout.
 
 #### Flush Thread (System Thread)
 
 ```
 LogFlushThreadRoutine():
-  运行级别: PASSIVE_LEVEL (普通内核线程栈)
-  轮询间隔: 5ms
+  Execution level: PASSIVE_LEVEL (ordinary kernel thread stack)
+  Polling interval: 5ms
   
   loop:
     KeWaitForSingleObject(StopEvent, 5ms timeout)
     while (FlushIndex < WriteIndex):
       if Ready[Idx] == 1:
-        DbgPrintEx(...)    ← 在 PASSIVE_LEVEL 安全调用
+        DbgPrintEx(...)    ← Safely called at PASSIVE_LEVEL
         Ready[Idx] = 0
         FlushIndex++
       else:
-        break              ← 写入者尚未完成, 下次再来
+        break              ← Writer hasn't finished, try again next time
 ```
 
-日志从写入到显示在 WinDbg 的延迟约 **5ms**（Flush Thread 轮询间隔）。
+The latency from logging write to WinDbg display is about **5ms** (Flush Thread polling interval).
 
-#### 统一宏接口
+#### Unified Macro Interface
 
 ```c
-/* 普通上下文 (DriverEntry, IOCTL handler 等) */
+/* Normal Context (DriverEntry, IOCTL handler, etc.) */
 LOG_ERROR(fmt, ...)     // → LogWrite → Ring Buffer
 LOG_WARN(fmt, ...)
 LOG_INFO(fmt, ...)
 LOG_DEBUG(fmt, ...)
 
-/* VMX root 模式 (VM-Exit handler 内部) — 与上面完全相同 */
+/* VMX Root Mode (within VM-Exit handler) — identical to above */
 VMXROOT_LOG_ERROR(fmt, ...)  // → LogWrite → Ring Buffer
 VMXROOT_LOG_WARN(fmt, ...)
 VMXROOT_LOG_INFO(fmt, ...)
 VMXROOT_LOG_DEBUG(fmt, ...)
 ```
 
-两组宏最终都调用同一个 `LogWrite()`，统一走 Ring Buffer 路径。Flush Thread 负责所有 `DbgPrintEx` 输出。
+Both macro sets ultimately call the same `LogWrite()`, unifying the path through the Ring Buffer. The Flush Thread is responsible for all `DbgPrintEx` outputs.
 
-#### 输出过滤
+#### Output Filtering
 
-| 级别 | 值 | WinDbg 输出 | Ring Buffer | 用途 |
+| Level | Value | WinDbg Output | Ring Buffer | Purpose |
 |------|---|------------|-------------|------|
-| ERROR | 0 | ✅ (Flush Thread) | ✅ | 致命错误 |
-| WARN  | 1 | ✅ (Flush Thread) | ✅ | 警告信息 |
-| INFO  | 2 | ✅ (Flush Thread) | ✅ | 常规信息 (驱动加载, Hook 安装等) |
-| DEBUG | 3 | ❌ (仅 Ring Buffer) | ✅ | 调试信息 (高频, 通过 IOCTL 读取) |
+| ERROR | 0 | ✅ (Flush Thread) | ✅ | Fatal errors |
+| WARN  | 1 | ✅ (Flush Thread) | ✅ | Warning messages |
+| INFO  | 2 | ✅ (Flush Thread) | ✅ | General information (driver load, hook install, etc.) |
+| DEBUG | 3 | ❌ (Ring Buffer only) | ✅ | Debug information (high frequency, read via IOCTL) |
 
-#### 用户态读取
+#### User-Mode Reading
 
-通过 `IOCTL_VMX_GET_LOG` 读取 Ring Buffer 中的条目，使用独立的 `ReadIndex`（与 Flush Thread 的 `FlushIndex` 互不干扰）。
+Entries in the Ring Buffer are read via `IOCTL_VMX_GET_LOG` using an independent `ReadIndex` (not interfering with the Flush Thread's `FlushIndex`).
 
 ---
 
-## AMD SVM 技术细节
+## AMD SVM Technical Details
 
-### SVM 概述
+### SVM Overview
 
-AMD SVM (Secure Virtual Machine) 是 AMD 的硬件虚拟化技术，等价于 Intel VT-x。核心差异：
+AMD SVM (Secure Virtual Machine) is AMD's hardware virtualization technology, equivalent to Intel VT-x. Core differences:
 
-| 概念 | Intel VMX | AMD SVM |
+| Concept | Intel VMX | AMD SVM |
 |------|-----------|---------|
-| 控制结构 | VMCS (通过 vmread/vmwrite) | VMCB (直接内存访问) |
-| 进入 Guest | VMLAUNCH / VMRESUME | VMRUN |
-| 状态保存 | 自动 (VMCS fields) | VMSAVE / VMLOAD |
-| 二级页表 | EPT (Extended Page Tables) | NPT (Nested Page Tables) |
-| TLB 管理 | INVEPT / INVVPID | ASID + TLB Control |
-| 中断控制 | External-Interrupt Exiting | GIF (Global Interrupt Flag) |
-| 单步调试 | MTF (Monitor Trap Flag) | RFLAGS.TF + #DB 拦截 |
-| Execute-Only 页 | 支持 | **不支持** |
-| 指令长度 | Exit Instruction Length | NRIP Save (Next RIP) |
+| Control Structure | VMCS (via vmread/vmwrite) | VMCB (direct memory access) |
+| Guest Entry | VMLAUNCH / VMRESUME | VMRUN |
+| State Saving | Automatic (VMCS fields) | VMSAVE / VMLOAD |
+| Nested Page Tables | EPT (Extended Page Tables) | NPT (Nested Page Tables) |
+| TLB Management | INVEPT / INVVPID | ASID + TLB Control |
+| Interrupt Control | External-Interrupt Exiting | GIF (Global Interrupt Flag) |
+| Single-step Debugging | MTF (Monitor Trap Flag) | RFLAGS.TF + #DB intercept |
+| Execute-Only Pages | Supported | **Not Supported** |
+| Instruction Length | Exit Instruction Length | NRIP Save (Next RIP) |
 
 ### VMCB (Virtual Machine Control Block)
 
-VMCB 是 4KB 页面，包含两个区域：
+VMCB is a 4KB page containing two regions:
 
 ```
 +---------------------------+
-| Control Area (0x000-0x3FF)|  拦截配置、退出信息、NPT 设置
+| Control Area (0x000-0x3FF)|  Intercept configuration, exit information, NPT settings
 |   intercept_cr/dr/excps   |
 |   intercept (64-bit)      |
 |   iopm_base_pa            |
@@ -873,8 +875,8 @@ VMCB 是 4KB 页面，包含两个区域：
 |   event_inj               |
 |   next_rip                |
 +---------------------------+
-| Save Area (0x400-0xFFF)   |  Guest CPU 状态
-|   段寄存器 (ES~TR)         |
+| Save Area (0x400-0xFFF)   |  Guest CPU state
+|   Segment registers (ES~TR) |
 |   CR0/CR2/CR3/CR4         |
 |   DR6/DR7                 |
 |   RFLAGS/RIP/RSP/RAX      |
@@ -884,115 +886,111 @@ VMCB 是 4KB 页面，包含两个区域：
 +---------------------------+
 ```
 
-### SVM VMRUN 循环
+### SVM VMRUN Loop
 
 ```
 SvmEnableOnCpu():
-  1. EFER |= SVME (bit 12)        启用 SVM
-  2. MSR_VM_HSAVE_PA = host_save   设置 host 状态保存区
+  1. EFER |= SVME (bit 12)        Enable SVM
+  2. MSR_VM_HSAVE_PA = host_save   Set host state save area
 
-VMRUN 循环 (svm_asm.asm):
-  保存 host callee-saved 寄存器
-  加载 guest GP 寄存器
-  RAX = VMCB 物理地址
-  VMLOAD                           加载 guest 段寄存器等
-  VMRUN                            进入 guest, #VMEXIT 时返回
-  VMSAVE                           保存 guest 段寄存器等
-  保存 guest GP 寄存器
-  恢复 host callee-saved 寄存器
-  调用 SvmExitHandler()            C 分发器
+VMRUN Loop (svm_asm.asm):
+  Save host callee-saved registers
+  Load guest GP registers
+  RAX = VMCB physical address
+  VMLOAD                           Load guest segment registers, etc.
+  VMRUN                            Enter guest, returns on #VMEXIT
+  VMSAVE                           Save guest segment registers, etc.
+  Save guest GP registers
+  Restore host callee-saved registers
+  Call SvmExitHandler()            C dispatcher
 ```
 
-### NPT vs EPT Hook 策略
+### NPT vs EPT Hook Strategy
 
-| 特性 | Intel EPT | AMD NPT |
+| Feature | Intel EPT | AMD NPT |
 |------|-----------|---------|
-| Execute-Only | 支持 (R=0, W=0, X=1) | **不支持** |
-| Hook 默认映射 | Execute-Only → Hook 页 | Read+Execute → Hook 页 |
-| 读取时 | EPT Violation → 原始页 | 直接看到 Hook 页 |
-| 写入时 | EPT Violation → 原始页 + MTF | NPF → 原始页 + TF |
-| 完整性检查抗性 | 极高 (读取看原始) | 中等 (读取看 Hook) |
-| 单步恢复 | MTF VM-Exit | #DB Exception |
+| Execute-Only | Supported (R=0, W=0, X=1) | **Not Supported** |
+| Hook Default Mapping | Execute-Only -> Hook Page | Read+Execute -> Hook Page |
+| On Read | EPT Violation -> Original Page | Sees Hook Page directly |
+| On Write | EPT Violation -> Original Page + MTF | NPF -> Original Page + TF |
+| Integrity Check Resistance | Extremely high (reads see original) | Medium (reads see Hook) |
+| Single-step Restoration | MTF VM-Exit | #DB Exception |
 
-NPT Hook 具体策略：
+Specific NPT Hook Strategy:
 
 ```
-Hook 安装:
-  PTE -> Read=1, Write=0, Execute=1, PhysAddr=Hook页
-  (执行和读取走 Hook 页，写入触发 NPF)
+Hook Installation:
+  PTE -> Read=1, Write=0, Execute=1, PhysAddr=Hook Page
+  (Execution and reads go to Hook page, writes trigger NPF)
 
-写入触发 NPF:
-  PTE -> Read=1, Write=1, Execute=1, PhysAddr=原始页
-  RFLAGS.TF = 1 (设置 Trap Flag)
-  重新执行写入指令
+Write Triggers NPF:
+  PTE -> Read=1, Write=1, Execute=1, PhysAddr=Original Page
+  RFLAGS.TF = 1 (Set Trap Flag)
+  Re-execute write instruction
 
-#DB Exception (单步完成):
-  PTE -> Read=1, Write=0, Execute=1, PhysAddr=Hook页
+#DB Exception (Single-step completed):
+  PTE -> Read=1, Write=0, Execute=1, PhysAddr=Hook Page
   RFLAGS.TF = 0
-  TLB Flush (ASID 切换)
+  TLB Flush (ASID switch)
 ```
 
-### SVM 反反调试能力
+### SVM Anti-Anti-Debugging Capabilities
 
-SVM 后端提供与 VMX 完全相同的反反调试能力：
+The SVM backend provides the exact same anti-anti-debugging capabilities as VMX:
 
-| 功能 | VMX 实现 | SVM 实现 |
+| Feature | VMX Implementation | SVM Implementation |
 |------|---------|---------|
-| DR 寄存器伪造 | MOV-DR Exiting | DR Read/Write Intercept |
-| CPUID 隐藏 | CPUID 无条件 Exit | CPUID Intercept |
-| RDTSC 补偿 | RDTSC Exiting | RDTSC Intercept |
-| 异常标准化 | Exception Bitmap | Exception Intercept |
+| DR Register Spoofing | MOV-DR Exiting | DR Read/Write Intercept |
+| CPUID Hiding | CPUID unconditional Exit | CPUID Intercept |
+| RDTSC Compensation | RDTSC Exiting | RDTSC Intercept |
+| Exception Standardization | Exception Bitmap | Exception Intercept |
 | API Hook | EPT Execute-Only | NPT Read+Execute |
-| MSR 伪造 | MSR Bitmap (4KB) | MSRPM (8KB) |
+| MSR Spoofing | MSR Bitmap (4KB) | MSRPM (8KB) |
 
 ---
 
-```
+## Virtualization Hiding
 
----
+### Background
 
-## 虚拟化隐藏
+To prevent software inside the Guest (including virtualization detection by anti-cheat drivers and Hypervisor probing by anti-debugging code), we comprehensively intercept **CPUID / MSR / VMX instructions / SVM instructions** in the VM-Exit handler, making the Guest believe it is running on bare metal without virtualization capabilities.
 
-### 背景
-
-为了阻止 Guest 内软件（包括反作弊驱动的虚拟化检测、以及反调试代码的 Hypervisor 探测），我们在 VM-Exit handler 中对 **CPUID / MSR / VMX 指令 / SVM 指令** 进行全面拦截，使 Guest 认为自己运行在无虚拟化能力的裸机上。
-
-### 修改影响方向
+### Direction of Modification Effects
 
 ```
-VMXToolbox Hypervisor                  ← 修改发生在这里
-        ↓ VM-Exit handler 修改返回给 Guest 的值
-Guest OS + 应用                        ← 看到伪造的裸机环境
+VMXToolbox Hypervisor                  ← Modifications happen here
+        ↓ VM-Exit handler modifies values returned to Guest
+Guest OS + Application                 ← Sees spoofed bare-metal environment
 ```
 
-**所有修改只影响 Hypervisor→Guest 方向**。
+**All modifications only affect the Hypervisor -> Guest direction**.
 
-### CPUID 隐藏
+### CPUID Hiding
 
-**文件**: `anti_anti_debug.c` — `AadHandleCpuid()`
+**File**: `anti_anti_debug.c` — `AadHandleCpuid()`
 
-**CPUID 后门** (对所有进程无条件生效)：
+**CPUID Backdoor** (unconditionally active for all processes):
 
-| Leaf | 返回值 | 目的 |
+| Leaf | Return Value | Purpose |
 |------|--------|------|
-| `CPUID(0x4CAFE000)` | `EAX=0x564D5854` ("VMXT") | 快速检测 Hypervisor 是否活跃 |
+| `CPUID(0x4CAFE000)` | `EAX=0x564D5854` ("VMXT") | Fast check if Hypervisor is active |
 
 ```c
-// 用户态/内核态检测代码示例:
+// User-mode/kernel-mode detection code example:
 int info[4];
 __cpuid(info, 0x4CAFE000);
 if (info[0] == 0x564D5854) printf("Hypervisor active!\n");
 ```
 
-**虚拟化隐藏** (对所有进程无条件生效)：
+**Virtualization Hiding** (unconditionally active for all processes):
 
-| Leaf | 修改 | 目的 |
+| Leaf | Modification | Purpose |
 |------|------|------|
-| `CPUID.1:ECX` | 清除 bit 31 (Hypervisor Present) | 隐藏 Hypervisor 存在 |
-| `CPUID.1:ECX` | 清除 bit 5 (VMX) | 隐藏 Intel VT-x 支持 |
-| `CPUID.0x80000001:ECX` | 清除 bit 2 (SVM) | 隐藏 AMD-V 支持 |
-| `CPUID.0x8000000A` | 返回全零 | 隐藏 SVM 特性叶（NASID/NPT 支持等） |
-| `CPUID.0x40000000~0x40000006` | 返回全零 | 隐藏 Hypervisor 厂商字符串和接口叶 |
+| `CPUID.1:ECX` | Clear bit 31 (Hypervisor Present) | Hide Hypervisor presence |
+| `CPUID.1:ECX` | Clear bit 5 (VMX) | Hide Intel VT-x support |
+| `CPUID.0x80000001:ECX` | Clear bit 2 (SVM) | Hide AMD-V support |
+| `CPUID.0x8000000A` | Return all zeros | Hide SVM feature leaves (NASID/NPT support, etc.) |
+| `CPUID.0x40000000~0x40000006` | Return all zeros | Hide Hypervisor vendor string and interface leaves |
 
 ```c
 if (Leaf == 1) {
@@ -1010,41 +1008,41 @@ else if (Leaf >= 0x40000000 && Leaf <= 0x40000006) {
 }
 ```
 
-**安全性说明**：`__cpuidex()` 先执行真实 CPUID（由 L0 返回），修改发生在 VM-Exit handler 中，仅改变返回给 L2 Guest 的结果。L0 完全不知道我们修改了什么。
+**Security Note**: `__cpuidex()` executes the real CPUID first (returned by L0). The modification occurs in the VM-Exit handler, altering only the result returned to the L2 Guest. L0 is completely unaware of what we modified.
 
-### MSR 拦截 — 虚拟化能力隐藏
+### MSR Interception — Hiding Virtualization Capabilities
 
-**文件**: `msr.c`
+**File**: `msr.c`
 
-#### MSR Bitmap 配置
+#### MSR Bitmap Configuration
 
-在 `MsrBitmapInitialize()` 中拦截以下 MSR：
+Intercept the following MSRs in `MsrBitmapInitialize()`:
 
-| MSR 范围 | 名称 | 拦截模式 |
+| MSR Range | Name | Intercept Mode |
 |----------|------|---------|
-| `0x003A` | IA32_FEATURE_CONTROL | 读+写 |
-| `0x0480~0x0491` | IA32_VMX_BASIC ~ IA32_VMX_VMFUNC | 读+写 |
-| `0xC0010114` | MSR_VM_CR (AMD) | 读+写 (SVM MSRPM) |
-| `0xC0010117` | MSR_VM_HSAVE_PA (AMD) | 读+写 (SVM MSRPM) |
+| `0x003A` | IA32_FEATURE_CONTROL | Read+Write |
+| `0x0480~0x0491` | IA32_VMX_BASIC ~ IA32_VMX_VMFUNC | Read+Write |
+| `0xC0010114` | MSR_VM_CR (AMD) | Read+Write (SVM MSRPM) |
+| `0xC0010117` | MSR_VM_HSAVE_PA (AMD) | Read+Write (SVM MSRPM) |
 
-#### RDMSR 伪造策略
+#### RDMSR Spoofing Strategy
 
-| MSR | 返回值 | 含义 |
+| MSR | Return Value | Meaning |
 |-----|--------|------|
-| `0x0480~0x0491` (VMX MSRs) | 全零 | VMX 不可用 |
-| `0x003A` (IA32_FEATURE_CONTROL) | `1` (Lock=1, VMXON=0) | VMX 被 BIOS 锁定禁用 |
-| `0xC0010114` (MSR_VM_CR) | 真实值 \| SVMDIS \| LOCK | SVM 被禁用并锁定 |
-| `0xC0010117` (MSR_VM_HSAVE_PA) | `0` | SVM Host Save Area 未配置 |
+| `0x0480~0x0491` (VMX MSRs) | All zeros | VMX unavailable |
+| `0x003A` (IA32_FEATURE_CONTROL) | `1` (Lock=1, VMXON=0) | VMX locked and disabled in BIOS |
+| `0xC0010114` (MSR_VM_CR) | Real Value \| SVMDIS \| LOCK | SVM disabled and locked |
+| `0xC0010117` (MSR_VM_HSAVE_PA) | `0` | SVM Host Save Area unconfigured |
 
-#### WRMSR 阻止策略
+#### WRMSR Blocking Strategy
 
-所有虚拟化相关 MSR 的写入操作均注入 `#GP(0)`，模拟裸机行为（VMX MSR 只读；IA32_FEATURE_CONTROL 写入锁定后 #GP；VM_CR 锁定后 #GP）。
+All write operations to virtualization-related MSRs inject a `#GP(0)` to emulate bare-metal behavior (VMX MSRs are read-only; writing to `IA32_FEATURE_CONTROL` after locking causes a `#GP`; writing to `VM_CR` after locking causes a `#GP`).
 
-### VMX 指令拦截
+### VMX Instruction Interception
 
-**文件**: `vmx_exit.c`
+**File**: `vmx_exit.c`
 
-Guest 尝试执行任何 VMX 指令时（即使 CPUID 已隐藏 VMX 位），CPU 会无条件触发 VM-Exit。我们对所有 VMX 指令注入 `#UD`（Undefined Opcode），与 VMX 被禁用时的 CPU 行为一致：
+When the Guest attempts to execute any VMX instruction (even if CPUID has hidden the VMX bit), the CPU unconditionally triggers a VM-Exit. We inject a `#UD` (Undefined Opcode) for all VMX instructions, consistent with CPU behavior when VMX is disabled:
 
 ```c
 case EXIT_REASON_VMCLEAR:
@@ -1064,133 +1062,129 @@ case EXIT_REASON_INVVPID:
     break;
 ```
 
-### SVM 指令拦截
+### SVM Instruction Interception
 
-**文件**: `svm_exit.c`
+**File**: `svm_exit.c`
 
-AMD SVM 后端同样拦截所有 SVM 管理指令并注入 `#UD`：
+The AMD SVM backend likewise intercepts all SVM management instructions and injects a `#UD`:
 
 - `VMRUN` / `VMLOAD` / `VMSAVE`
 - `STGI` / `CLGI`
 - `SKINIT` / `INVLPGA`
 
-### 安全性总结
+### Security Summary
 
-| 修改点 | 影响方向 | 对外层 HV 影响 | 说明 |
+| Modification Point | Direction of Effect | Effect on Outer HV | Description |
 |--------|---------|--------------|------|
-| CPUID 隐藏 VMX/SVM 位 | L1→L2 | ❌ 无 | 只修改给 Guest 的返回值 |
-| MSR bitmap 拦截 | L1→L2 | ❌ 无 | 只控制 Guest 的 MSR 访问 |
-| RDMSR 伪造 | L1→L2 | ❌ 无 | 只在 Exit handler 中修改 |
-| WRMSR 阻止 (#GP) | L1→L2 | ❌ 无 | 只对 Guest 注入 #GP |
-| VMX 指令 → #UD | L1→L2 | ❌ 无 | 只拦截 Guest 的 VMX 指令 |
-| SVM 指令 → #UD | L1→L2 | ❌ 无 | 只拦截 Guest 的 SVM 指令 |
+| CPUID hide VMX/SVM bits | L1→L2 | ❌ None | Only modifies values returned to Guest |
+| MSR bitmap interception | L1→L2 | ❌ None | Only controls Guest MSR access |
+| RDMSR spoofing | L1→L2 | ❌ None | Only modified inside Exit handler |
+| WRMSR blocking (#GP) | L1→L2 | ❌ None | Only injects #GP into Guest |
+| VMX instructions -> #UD | L1→L2 | ❌ None | Only intercepts Guest VMX instructions |
+| SVM instructions -> #UD | L1→L2 | ❌ None | Only intercepts Guest SVM instructions |
 
-**初始化安全**：`VmxCheckCapabilities()` 和 `SvmCheckCapabilities()` 中的 `__readmsr(MSR_IA32_VMX_BASIC)` 等调用在 `DriverEntry` 中执行，此时 VMX/SVM 还未启动，MSR Bitmap 还未生效，不受影响。
-
----
+**Initialization Safety**: `VmxCheckCapabilities()` and `SvmCheckCapabilities()` calls like `__readmsr(MSR_IA32_VMX_BASIC)` are executed in `DriverEntry` before VMX/SVM is started and before MSR Bitmaps are active, so they are unaffected.
 
 ---
 
-## Per-CPU EPT/NPT Hook 页隔离
+## Per-CPU EPT/NPT Hook Page Isolation
 
-### 背景问题
-
-在多核系统上，EPT/NPT Hook 的 **违规 → 单步 → 恢复** 三阶段存在竞争条件：
+On multi-core systems, the three phases of EPT/NPT Hooks (**Violation -> Single-step -> Restoration**) suffer from race conditions:
 
 ```
-CPU 0: EPT Violation → 放宽 PTE (R+W) → 启用 MTF
-CPU 1: EPT Violation → 放宽 PTE (R+W) → 启用 MTF    ← 同一个 PTE!
-CPU 0: MTF 触发 → 恢复 PTE (X-Only)                  ← 也恢复了 CPU 1 正在使用的 PTE!
-CPU 1: 还在执行放宽后的指令 → PTE 已被 CPU 0 恢复 → 再次 EPT Violation → 死循环/卡死
+CPU 0: EPT Violation -> Relax PTE (R+W) -> Enable MTF
+CPU 1: EPT Violation -> Relax PTE (R+W) -> Enable MTF    ← Same PTE!
+CPU 0: MTF Triggered -> Restore PTE (X-Only)                  ← Also restores the PTE currently in use by CPU 1!
+CPU 1: Still executing the relaxed instruction -> PTE has been restored by CPU 0 -> EPT Violation again -> Infinite loop / Lockup
 ```
 
-### 解决方案
+### Solution
 
-每个 CPU 拥有独立的 EPT/NPT 页表链（PML4 → PDPT → PD → PT），使得 PTE 权限切换仅影响当前 CPU 的地址翻译。
+Each CPU owns an independent EPT/NPT page table chain (PML4 -> PDPT -> PD -> PT), so that PTE permission changes only affect the address translation of the current CPU.
 
-**关键约束**：只在 PT 级别做隔离，非 Hook 区域所有 CPU 仍共享相同的 PD/PT pages。
+**Key Constraint**: Isolation is only done at the PT level. For non-hooked regions, all CPUs still share the same PD/PT pages.
 
-### 整体架构
+### Overall Architecture
 
 ```
         ┌──────────────────────────────────────────────┐
-        │  共享模板 (EPT_STATE / NPT_STATE)             │
+        │  Shared Template (EPT_STATE / NPT_STATE)     │
         │  PML4 → PDPT → PD Pages → Split PT Pages     │
-        │  (非 Hook 区域所有 CPU 共享)                    │
+        │  (Shared by all CPUs in non-hooked regions)  │
         └──────────────────────────────────────────────┘
 
-Per-CPU 层 (仅 Hook 区域):
+Per-CPU Level (Hooked regions only):
 
   CPU 0:  PML4[0] → PDPT[0]                CPU 1:  PML4[1] → PDPT[1]
             │                                        │
-            ├─ PDPT[x] → 共享 PD (未 hook)           ├─ PDPT[x] → 共享 PD
+            ├─ PDPT[x] → Shared PD (not hooked)      ├─ PDPT[x] → Shared PD
             │                                        │
             └─ PDPT[y] → per-CPU PD[0][y]           └─ PDPT[y] → per-CPU PD[1][y]
                            │                                       │
                            ├─ PD[z] → per-CPU PT[0]              ├─ PD[z] → per-CPU PT[1]
-                           │   (hook 的 2MB 区域)                 │   (hook 的 2MB 区域)
+                           │   (Hooked 2MB region)                 │   (Hooked 2MB region)
                            │                                      │
-                           └─ PD[其他] → 共享 PT                  └─ PD[其他] → 共享 PT
+                           └─ PD[other] → Shared PT               └─ PD[other] → Shared PT
 ```
 
-**分层隔离策略**：
-- **PML4 + PDPT**: 每 CPU 独立副本（初始化时从模板 clone），用于让 PDPT entry 指向不同的 PD
-- **PD pages**: **按需 clone** — 只有包含 Hook 的 GB 区域才创建 per-CPU 副本
-- **PT (split) pages**: **按需 clone** — 只有包含 Hook 的 2MB 区域才创建 per-CPU 副本
-- **非 Hook 区域**: 所有 CPU 共享相同的 PD/PT pages
+**Layered Isolation Strategy**:
+- **PML4 + PDPT**: Independent per-CPU replicas (cloned from the template during initialization), used to make PDPT entries point to different PDs.
+- **PD pages**: **Cloned on-demand** — a per-CPU replica is created only for 1GB regions containing hooks.
+- **PT (split) pages**: **Cloned on-demand** — a per-CPU replica is created only for 2MB regions containing hooks.
+- **Non-hooked regions**: All CPUs share the same PD/PT pages.
 
-### 数据结构
+### Data Structures
 
 ```c
-// Per-CPU EPT 根结构 (ept.h)
+// Per-CPU EPT root structure (ept.h)
 typedef struct _EPT_CPU_STATE {
-    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[512];  // 独立 PML4
-    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[512];  // 独立 PDPT
-    EPT_POINTER Eptp;     // 该 CPU 的 EPTP 值 (写入 VMCS)
-    ULONG64     Pml4Pa;   // PML4 的物理地址
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PML4E Pml4[512];  // Independent PML4
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PDPTE Pdpt[512];  // Independent PDPT
+    EPT_POINTER Eptp;     // This CPU's EPTP value (written to VMCS)
+    ULONG64     Pml4Pa;   // Physical address of PML4
 } EPT_CPU_STATE;
 
-// Per-CPU split PT page 副本 (ept.c)
+// Per-CPU split PT page replica (ept.c)
 typedef struct _EPT_PER_CPU_SPLIT {
-    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PTE Pte[512];  // 512 个 4KB PTE
-    ULONG64     PhysicalAddress;    // 该页表页的物理地址
-    BOOLEAN     Allocated;          // 是否已分配
+    DECLSPEC_ALIGN(PAGE_SIZE) EPT_PTE Pte[512];  // 512 4KB PTEs
+    ULONG64     PhysicalAddress;    // Physical address of this page table page
+    BOOLEAN     Allocated;          // Whether allocated
 } EPT_PER_CPU_SPLIT;
 
-// 全局数组
+// Global arrays
 PEPT_CPU_STATE   g_EptCpuStates;                // [g_MaxProcessors] per-CPU EPT root
-PEPT_PER_CPU_SPLIT  *g_PerCpuSplitPages;        // [g_MaxProcessors] → [MAX_SPLIT_PAGES]
-EPT_PER_CPU_PD_PAGE **g_PerCpuPdPages;          // [g_MaxProcessors] → [MAX_PD_PAGES]
+PEPT_PER_CPU_SPLIT  *g_PerCpuSplitPages;        // [g_MaxProcessors] -> [MAX_SPLIT_PAGES]
+EPT_PER_CPU_PD_PAGE **g_PerCpuPdPages;          // [g_MaxProcessors] -> [MAX_PD_PAGES]
 ```
 
-AMD NPT 侧 (`npt.h`/`npt.c`) 结构与 Intel EPT 完全镜像。
+The AMD NPT side (`npt.h`/`npt.c`) structures are completely mirrored with Intel EPT.
 
-### 初始化流程
+### Initialization Flow
 
 ```
 DriverEntry
   └─ VmxInitialize / SvmInitialize
-       ├─ EptInitialize / NptInitialize        ← 创建共享模板页表
-       ├─ EptInitPerCpu / NptInitPerCpu        ← 创建 per-CPU PML4+PDPT
-       └─ 对每个 CPU:
+       ├─ EptInitialize / NptInitialize        ← Create shared template page tables
+       ├─ EptInitPerCpu / NptInitPerCpu        ← Create per-CPU PML4+PDPT
+       └─ For each CPU:
             └─ EptSetupIdentityMap / SvmInitVmcb
-                 └─ 写 per-CPU EPTP / nested_cr3 到 VMCS / VMCB
+                 └─ Write per-CPU EPTP / nested_cr3 to VMCS / VMCB
 ```
 
-`EptInitPerCpu()` 为每个 CPU clone PML4 和 PDPT，并将 PML4[0] 指向各自的 PDPT。此时所有 CPU 的 PDPT entry 仍指向共享 PD pages，只有 Hook 安装时才按需创建 per-CPU PD 和 PT pages。
+`EptInitPerCpu()` clones the PML4 and PDPT for each CPU, and points PML4[0] to their respective PDPTs. At this point, the PDPT entries for all CPUs still point to the shared PD pages. Per-CPU PD and PT pages are created on-demand only when a hook is installed.
 
-### Hook 安装时的 Per-CPU 设置
+### Per-CPU Setup During Hook Installation
 
 ```c
-// EptHookFunction() 中的 per-CPU 块 (ept.c)
+// Per-CPU block in EptHookFunction() (ept.c)
 if (g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages) {
-    // 1. 确保该 GB 区域的 PD page 已 per-CPU 化
+    // 1. Ensure the PD page for this 1GB region is per-CPU isolated
     EptEnsurePerCpuPdForRegion(PdptIdx);
 
-    // 2. 确保该 2MB 区域的 split PT page 已 per-CPU 化
+    // 2. Ensure the split PT page for this 2MB region is per-CPU isolated
     EptEnsurePerCpuSplitPage(splitIdx, PdptIdx, PdIdx);
 
-    // 3. 将 hook PTE 权限复制到所有 CPU 的私有副本
+    // 3. Copy hook PTE permissions to the private replicas of all CPUs
     for (cpu = 0; cpu < g_MaxProcessors; cpu++) {
         PEPT_PTE CpuPte = EptGetPerCpuPte(cpu, TargetPa);
         if (CpuPte) {
@@ -1203,9 +1197,9 @@ if (g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages) {
 }
 ```
 
-### 运行时：EPT Violation / NPF 处理
+### Runtime: EPT Violation / NPF Handling
 
-核心变化：使用 **per-CPU PTE** 替代共享 PTE，消除多核竞争。
+Core change: Use **per-CPU PTEs** instead of shared PTEs to eliminate multi-core race conditions.
 
 **Intel EPT (ept.c — HandleEptViolation)**:
 
@@ -1213,32 +1207,32 @@ if (g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages) {
 CpuIndex = KeGetCurrentProcessorNumber();
 Hook = EptFindHookByPhysicalAddress(GuestPhysAddr);
 
-// ★ 核心: 使用 per-CPU PTE
+// ★ Core: Use per-CPU PTE
 Pte = EptGetPerCpuPte(CpuIndex, Hook->TargetPhysicalAddr);
-if (!Pte) Pte = Hook->TargetPte;  // fallback 到共享
+if (!Pte) Pte = Hook->TargetPte;  // fallback to shared
 
-// 后续的 Pte->Read/Write/Execute 修改只影响当前 CPU 的翻译
-// 启用 MTF 单步, 通过 EptMtfTrackRelaxedPage() 记录当前 CPU 放宽了哪个页
+// Subsequent Pte->Read/Write/Execute modifications only affect the translation of the current CPU
+// Enable MTF single-step, record which page is relaxed for the current CPU via EptMtfTrackRelaxedPage()
 ```
 
-**Intel MTF 恢复 (vmx_exit.c — HandleMtf)**:
+**Intel MTF Restoration (vmx_exit.c — HandleMtf)**:
 
 ```c
 CpuIndex = KeGetCurrentProcessorNumber();
-RelaxedPa = EptMtfGetAndClearRelaxedPage();  // 获取当前 CPU 放宽的页面
+RelaxedPa = EptMtfGetAndClearRelaxedPage();  // Get the relaxed page for the current CPU
 
-// ★ 使用 per-CPU PTE 恢复 (只恢复当前 CPU)
+// ★ Restore using per-CPU PTE (restores current CPU only)
 PEPT_PTE Pte = EptGetPerCpuPte(CpuIndex, Hook->TargetPhysicalAddr);
-Pte->Read = 0; Pte->Write = 0; Pte->Execute = 1;  // 恢复到 hook 状态
+Pte->Read = 0; Pte->Write = 0; Pte->Execute = 1;  // Restore to hook state
 Pte->PhysAddr = Hook->HookPagePa >> 12;
-EptInvalidateSingleContext(CpuEptp);  // 仅刷新当前 CPU 的 TLB
+EptInvalidateSingleContext(CpuEptp);  // Only flush TLB for the current CPU
 ```
 
-**AMD NPT** 侧的 `NptHandlePageFault` 和 `SvmHandleDbException` 采用相同策略。
+The AMD NPT side `NptHandlePageFault` and `SvmHandleDbException` adopt the same strategy.
 
-### INVEPT 优化
+### INVEPT Optimization
 
-Per-CPU 隔离后，PTE 修改只影响当前 CPU，因此使用 **INVEPT SINGLE_CONTEXT** 替代 ALL_CONTEXTS，避免不必要的跨 CPU TLB 刷新：
+After per-CPU isolation, PTE modifications only affect the current CPU. Therefore, **INVEPT SINGLE_CONTEXT** is used instead of ALL_CONTEXTS to avoid unnecessary cross-CPU TLB flushes:
 
 ```c
 ULONG64 CpuEptp = EptGetPerCpuEptp(CpuIndex);
@@ -1248,122 +1242,121 @@ else
     EptInvalidateAllContexts();  // fallback
 ```
 
-### 内存分配汇总
+### Memory Allocation Summary
 
-| Pool Tag | 用途 | 分配时机 | 大小 |
+| Pool Tag | Purpose | Allocation Timing | Size |
 |----------|------|---------|------|
 | `'tpEC'` | per-CPU EPT root (PML4+PDPT+EPTP) | `EptInitPerCpu` | `CPUs × sizeof(EPT_CPU_STATE)` |
-| `'tpES'` | per-CPU split PT pages | 按需: `EptEnsurePerCpuSplitPage` | `MAX_SPLIT_PAGES × sizeof(EPT_PER_CPU_SPLIT)` per CPU |
-| `'tpEP'` | per-CPU PD pages | 按需: `EptEnsurePerCpuPdForRegion` | `MAX_PD_PAGES × sizeof(EPT_PER_CPU_PD_PAGE)` per CPU |
-| `'tpNC'` / `'tpNS'` / `'tpNP'` | AMD NPT 侧 (镜像) | 同 EPT | 同 EPT |
+| `'tpES'` | per-CPU split PT pages | On-demand: `EptEnsurePerCpuSplitPage` | `MAX_SPLIT_PAGES × sizeof(EPT_PER_CPU_SPLIT)` per CPU |
+| `'tpEP'` | per-CPU PD pages | On-demand: `EptEnsurePerCpuPdForRegion` | `MAX_PD_PAGES × sizeof(EPT_PER_CPU_PD_PAGE)` per CPU |
+| `'tpNC'` / `'tpNS'` / `'tpNP'` | AMD NPT Side (Mirrored) | Same as EPT | Same as EPT |
 
-> **按需分配**: split PT 和 PD pages 仅在 Hook 安装到对应区域时分配，不装 Hook 就不分配。
+> **On-Demand Allocation**: Split PT and PD pages are allocated only when hooks are installed in the corresponding regions. If no hooks are installed, no allocation occurs.
 
-### 容错设计
+### Fault-Tolerance Design
 
-1. **初始化失败非致命**: `EptInitPerCpu`/`NptInitPerCpu` 返回失败时仅 `LOG_WARN` 并继续，Hook 回退到共享 PTE（无隔离）
-2. **Fallback 到共享 PTE**: 所有使用 per-CPU PTE 的地方都有 fallback: `if (!Pte) Pte = Hook->TargetPte;`
-3. **NULL 检查**: 所有 per-CPU 路径检查 `g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages` 非 NULL
+1. **Initialization failure is non-fatal**: When `EptInitPerCpu`/`NptInitPerCpu` returns a failure, it only logs a warning (`LOG_WARN`) and continues, falling back hooks to shared PTEs (no isolation).
+2. **Fallback to shared PTE**: Anywhere per-CPU PTEs are used, there is a fallback: `if (!Pte) Pte = Hook->TargetPte;`
+3. **NULL Check**: All per-CPU paths check that `g_EptCpuStates && g_PerCpuSplitPages && g_PerCpuPdPages` are non-NULL.
 
 ---
 
-## Hypervisor 内存读写
+## Hypervisor Memory Read/Write
 
-### 概述
+### Overview
 
-**文件**: `hv_mem.h` + `hv_mem.c` + `vmxdrv.c` (IOCTL handlers)
+**File**: `hv_mem.h` + `hv_mem.c` + `vmxdrv.c` (IOCTL handlers)
 
-利用 Hypervisor 运行在 Ring -1 的特权，直接通过物理内存访问读写任意 Guest 进程的虚拟地址空间。**完全绕过 Guest 内所有软件层面的保护**，包括反作弊驱动的内存保护机制。
+Leveraging the privilege of the Hypervisor running at Ring -1, it directly reads and writes the virtual address space of any Guest process via physical memory access. **This completely bypasses all software-level protections inside the Guest**, including memory protection mechanisms of anti-cheat drivers.
 
-### 为什么能绕过反作弊驱动
+### Why It Bypasses Anti-Cheat Drivers
 
 ```
-Ring -1  ┃  VMXToolbox (Hypervisor)        ← 内存读写在这里执行
+Ring -1  ┃  VMXToolbox (Hypervisor)        ← Memory read/write is executed here
 ━━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Ring 0   ┃  反作弊驱动 (EAC/BE/VGK)          ← 它的保护全在这里
-         ┃  Windows 内核
+Ring 0   ┃  Anti-cheat drivers (EAC/BE/VGK)  ← Its protections are all here
+         ┃  Windows Kernel
 ━━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Ring 3   ┃  游戏进程
+Ring 3   ┃  Game Process
 ```
 
-反作弊驱动能监控的所有操作都在 Guest 内部:
+All operations that anti-cheat drivers can monitor reside inside the Guest:
 
-| 反作弊手段 | 为什么失效 |
+| Anti-Cheat Method | Why It Fails |
 |-----------|-----------|
-| `ObRegisterCallbacks` 剥离句柄权限 | 不用 `OpenProcess`，不走句柄 |
-| Hook `NtReadVirtualMemory` | 不调任何内存读写 API |
-| 监控 `KeStackAttachProcess` | 不需要 Attach 到目标进程 |
-| 扫描可疑驱动调用栈 | 读写在 Ring -1 完成，Guest 看不到 |
-| 检测 `MmCopyVirtualMemory` | 不调用此函数 |
+| `ObRegisterCallbacks` stripping handle permissions | No `OpenProcess` used, bypasses handles |
+| Hooking NtReadVirtualMemory | Does not call any memory R/W APIs |
+| Monitoring `KeStackAttachProcess` | No need to Attach to target process |
+| Scanning suspicious driver call stacks | R/W completed in Ring -1, invisible to Guest |
+| Detecting `MmCopyVirtualMemory` | Does not call this function |
 
-### 工作原理
+### Work Principle
 
 ```
-用户态请求: 读取游戏进程 PID=1234 地址 0x7FF612340000 的 4096 字节
+User-mode request: Read 4096 bytes from game process PID=1234 at address 0x7FF612340000
 
 IOCTL_VMX_READ_MEMORY
   |
   v
-[内核驱动] HandleIoctlReadMemory()
+[Kernel Driver] HandleIoctlReadMemory()
   |
-  +-- 1. PID → CR3: PsLookupProcessByProcessId(1234)
-  |       读取 EPROCESS + DirectoryTableBase 偏移
-  |       得到目标进程 CR3 = 0x1A3000
+  +-- 1. PID -> CR3: PsLookupProcessByProcessId(1234)
+  |       Read EPROCESS + DirectoryTableBase offset
+  |       Obtain target process CR3 = 0x1A3000
   |
-  +-- 2. 遍历 Guest 4 级页表 (VA → PA 翻译):
-  |       CR3(0x1A3000) → PML4[index] → PDPT → PD → PT
-  |       0x7FF612340000 → 物理地址 0x3F8A5000
+  +-- 2. Traverse Guest 4-level page table (VA -> PA translation):
+  |       CR3(0x1A3000) -> PML4[index] -> PDPT -> PD -> PT
+  |       0x7FF612340000 -> Physical Address 0x3F8A5000
   |
-  +-- 3. 映射物理内存并复制:
+  +-- 3. Map physical memory and copy:
   |       MmMapIoSpace(0x3F8A5000, PAGE_SIZE)
-  |       RtlCopyMemory(输出缓冲区, 映射地址, 4096)
+  |       RtlCopyMemory(Output Buffer, Mapped Address, 4096)
   |       MmUnmapIoSpace()
   |
-  +-- 4. 返回数据给用户态
+  +-- 4. Return data to user-mode
 ```
 
-### Guest 页表遍历 (4 级)
+### Guest Page Table Traversal (4-Level)
 
 ```
 CR3 (DirectoryTableBase)
- |
- +--[PML4 Index = VA[47:39]]--> PML4E
-                                  |
-                  +--[PDPT Index = VA[38:30]]--> PDPTE
-                                                   |
-                                                   +-- 如果 PS=1: 1GB 大页, PA = PDPTE[51:30] | VA[29:0]
-                                                   |
-                                   +--[PD Index = VA[29:21]]--> PDE
-                                                                  |
-                                                                  +-- 如果 PS=1: 2MB 大页, PA = PDE[51:21] | VA[20:0]
-                                                                  |
-                                                  +--[PT Index = VA[20:12]]--> PTE
-                                                                                 |
-                                                                                 +--> PA = PTE[51:12] | VA[11:0]
+ ──[PML4 Index = VA[47:39]]──> PML4E
+                                  │
+                  ──[PDPT Index = VA[38:30]]──> PDPTE
+                                                   │
+                                                   ├─ If PS=1: 1GB Large Page, PA = PDPTE[51:30] | VA[29:0]
+                                                   │
+                                    ──[PD Index = VA[29:21]]──> PDE
+                                                                   │
+                                                                   ├─ If PS=1: 2MB Large Page, PA = PDE[51:21] | VA[20:0]
+                                                                   │
+                                                   ──[PT Index = VA[20:12]]──> PTE
+                                                                                  │
+                                                                                  ──> PA = PTE[51:12] | VA[11:0]
 ```
 
-关键实现 (`KernelGuestVaToPa`):
-- 每一级通过 `MmMapIoSpace` 映射物理页表页
-- 读取对应 index 的页表项
-- 检查 Present 位和 Large Page 位
-- 处理 4KB / 2MB / 1GB 三种页面大小
-- 跨页读写时自动拆分为多次单页操作
+Critical implementation (`KernelGuestVaToPa`):
+- Each level maps the physical page table page via `MmMapIoSpace`.
+- Read the page table entry of the corresponding index.
+- Check the Present bit and the Large Page bit.
+- Handle three page sizes: 4KB / 2MB / 1GB.
+- Automatically split cross-page reads/writes into multiple single-page operations.
 
-### IOCTL 接口
+### IOCTL Interface
 
 #### `IOCTL_VMX_READ_MEMORY` (0x807)
 
-从目标进程读取内存。
+Reads memory from the target process.
 
 ```c
-// 请求结构
+// Request structure
 typedef struct _VMX_MEMORY_REQUEST {
-    ULONG       Pid;                /* 目标进程 ID */
-    ULONG       Size;               /* 字节数 (最大 64KB) */
-    ULONG64     VirtualAddress;     /* 目标进程中的虚拟地址 */
+    ULONG       Pid;                /* Target Process ID */
+    ULONG       Size;               /* Bytes count (max 64KB) */
+    ULONG64     VirtualAddress;     /* Virtual address in target process */
 } VMX_MEMORY_REQUEST;
 
-// 用法
+// Usage
 VMX_MEMORY_REQUEST req;
 req.Pid = 1234;
 req.Size = 4096;
@@ -1371,330 +1364,331 @@ req.VirtualAddress = 0x7FF612340000;
 
 BYTE buffer[4096];
 DeviceIoControl(hDevice, IOCTL_VMX_READ_MEMORY,
-    &req, sizeof(req),          // 输入: 请求头
-    buffer, sizeof(buffer),     // 输出: 读取到的数据
+    &req, sizeof(req),          // Input: Request header
+    buffer, sizeof(buffer),     // Output: Read data
     &bytesReturned, NULL);
 ```
 
 #### `IOCTL_VMX_WRITE_MEMORY` (0x808)
 
-向目标进程写入内存。
+Writes memory to the target process.
 
 ```c
-// 输入布局: [VMX_MEMORY_REQUEST 头部][要写入的数据...]
-// 总 InputBufferLength = sizeof(VMX_MEMORY_REQUEST) + Size
+// Input layout: [VMX_MEMORY_REQUEST header][Data to write...]
+// Total InputBufferLength = sizeof(VMX_MEMORY_REQUEST) + Size
 
-// 示例: 向目标地址写入一个 int 值
+// Example: Write an int value to target address
 BYTE packet[sizeof(VMX_MEMORY_REQUEST) + sizeof(int)];
 VMX_MEMORY_REQUEST *hdr = (VMX_MEMORY_REQUEST *)packet;
 hdr->Pid = 1234;
 hdr->Size = sizeof(int);
 hdr->VirtualAddress = 0x7FF612340000;
-*(int *)(packet + sizeof(VMX_MEMORY_REQUEST)) = 99999;  // 要写入的值
+*(int *)(packet + sizeof(VMX_MEMORY_REQUEST)) = 99999;  // Value to write
 
 DeviceIoControl(hDevice, IOCTL_VMX_WRITE_MEMORY,
-    packet, sizeof(packet),     // 输入: 头部 + 数据
-    NULL, 0,                    // 无输出
+    packet, sizeof(packet),     // Input: Header + Data
+    NULL, 0,                    // No output
     &bytesReturned, NULL);
 ```
 
-### VMCALL 内存操作接口 (备用路径)
+### VMCALL Memory Operation Interface (Fallback Path)
 
-除了 IOCTL → 内核直接物理内存访问的路径外，还实现了 VMCALL 路径，可从 Guest 内核触发 Hypervisor 在 Ring -1 中执行读写：
+In addition to the IOCTL -> direct physical memory access route in the kernel, a VMCALL path is also implemented, which can trigger the Hypervisor from Guest kernel to perform reads and writes in Ring -1:
 
 ```
-VMCALL 约定:
+VMCALL Convention:
   RAX = 0xCAFE0001  (VMCALL_MAGIC | READ_MEMORY)
   RAX = 0xCAFE0002  (VMCALL_MAGIC | WRITE_MEMORY)
-  RDX = VMCALL_MEM_PARAMS 结构体的 Guest 虚拟地址
+  RDX = Guest virtual address of VMCALL_MEM_PARAMS struct
 
 typedef struct _VMCALL_MEM_PARAMS {
-    ULONG64     TargetCr3;      /* 目标进程 CR3 */
-    ULONG64     TargetVa;       /* 目标虚拟地址 */
-    ULONG64     BufferVa;       /* 调用者缓冲区地址 */
-    ULONG       Size;           /* 字节数 */
-    NTSTATUS    Status;         /* [out] 返回状态 */
+    ULONG64     TargetCr3;      /* Target Process CR3 */
+    ULONG64     TargetVa;       /* Target Virtual Address */
+    ULONG64     BufferVa;       /* Caller Buffer Address */
+    ULONG       Size;           /* Bytes count */
+    NTSTATUS    Status;         /* [out] Return status */
 } VMCALL_MEM_PARAMS;
 ```
 
-VMCALL 路径中，Hypervisor 利用 EPT/NPT 恒等映射 (Guest PA == Host VA) 直接以指针方式访问物理内存，连 `MmMapIoSpace` 都不需要。
+In the VMCALL path, the Hypervisor leverages the EPT/NPT identity mapping (Guest PA == Host VA) to access physical memory directly via pointers, completely bypassing the need for `MmMapIoSpace`.
 
-### 使用场景
+### Use Cases
 
 ```bash
-# 场景 1: 读取目标进程的 PE 头 (MZ header)
+# Scenario 1: Read the PE header (MZ header) of the target process
 VMXToolbox.exe --read-mem 1234 7FF600000000 64
 
-# 场景 2: 读取指定大小的内存区域
+# Scenario 2: Read memory region of specified size
 VMXToolbox.exe --read-mem 1234 7FF612345678 128
 
-# 场景 3: 写入 NOP sled (4 字节), 自动读回验证
+# Scenario 3: Write NOP sled (4 bytes), automatically read back to verify
 VMXToolbox.exe --write-mem 1234 7FF600001000 90909090
 
-# 场景 4: 写入 INT3 断点
+# Scenario 4: Write INT3 breakpoint
 VMXToolbox.exe --write-mem 1234 7FF600001000 CC
 
-# 场景 5: 大块内存转储 (Hex+ASCII 格式)
+# Scenario 5: Large block memory dump (Hex+ASCII format)
 VMXToolbox.exe --dump-mem 1234 7FF600000000 4096
 
-# 场景 6: 配合反反调试一起使用
-VMXToolbox.exe --pid 1234 --hide-all              # 先隐藏调试器
-VMXToolbox.exe --read-mem 1234 7FF600000000 256   # 再读内存
+# Scenario 6: Use in conjunction with anti-anti-debugging
+VMXToolbox.exe --pid 1234 --hide-all              # Hide debugger first
+VMXToolbox.exe --read-mem 1234 7FF600000000 256   # Then read memory
 
-# 场景 7: 读取内核内存 (System 进程, PID=4)
+# Scenario 7: Read kernel memory (System process, PID=4)
 VMXToolbox.exe --read-mem 4 FFFFF78000000000 64
 ```
 
-### 安全限制
+### Security Restrictions
 
-| 限制 | 说明 |
+| Restriction | Description |
 |------|------|
-| 单次最大 64KB | `VMX_MEM_MAX_SIZE = 64 * 1024`，更大的读写需拆分多次 IOCTL |
-| 页面必须 Present | 未映射 (换出到磁盘) 的页面无法读取，返回 `STATUS_INVALID_ADDRESS` |
-| 跨页自动处理 | 读写跨越 4KB 页面边界时自动拆分为多次物理页访问 |
-| 不触发缺页 | 与 `ReadProcessMemory` 不同，不会触发 Guest 的 Page Fault |
+| Max 64KB per call | `VMX_MEM_MAX_SIZE = 64 * 1024`, larger R/W requests must be split into multiple IOCTLs |
+| Page must be Present | Unmapped pages (swapped out to disk) cannot be read, returning STATUS_INVALID_ADDRESS |
+| Cross-page automatic handling | Automatically split into multiple physical page accesses when reads/writes cross 4KB page boundaries |
+| No page fault triggered | Unlike ReadProcessMemory, this does not trigger a Page Fault in the Guest |
 
 ---
 
-## 后加载虚拟化与内存连续性
+## Late-load Virtualization and Memory Continuity
 
-### 核心问题
+### Core Question
 
-VMXToolbox 是**寄生式 Hypervisor** (Blue Pill / late-launch)，在操作系统和目标进程都已经运行之后才加载。一个自然的疑问是：
+VMXToolbox is a **parasitic hypervisor** (Blue Pill / late-launch), loaded only after both the operating system and target processes are already running. A natural question arises:
 
-> 进程已经运行了，大量内存已经分配在物理 DRAM 上，此时才启用虚拟化（EPT/NPT），这些已存在的内存怎么办？需要搬移吗？
+> Since processes are already running and a large amount of memory has already been allocated in physical DRAM, what happens to this existing memory when virtualization (EPT/NPT) is enabled at this point? Does it need to be moved?
 
-**答案：不需要搬移任何一个字节。物理内存原封不动，只是在 CPU 的地址翻译管线上加了一层透明的映射。**
+**Answer: Not a single byte needs to be moved. The physical memory remains untouched; we simply insert a transparent mapping layer in the CPU's address translation pipeline.**
 
-### 虚拟化前后的地址翻译对比
+### Address Translation Comparison Before and After Virtualization
 
-**启用前** — 正常运行，CPU 做一次翻译：
-
-```
-进程虚拟地址              [Guest CR3 页表]              物理 DRAM
-0x7FF612340000  ─────────────────────────>  PA 0x3F8A5000  ────>  实际内存芯片
-                                                                  (数据在这里)
-                   唯一的翻译层
-                   由 Windows 内存管理器维护
-```
-
-**启用后** — CPU 做两次翻译，但第二次是透明的：
+Before enablement — running normally, CPU performs one translation:
 
 ```
-进程虚拟地址          [Guest CR3 页表]        [EPT/NPT]            物理 DRAM
+Process Virtual Address              [Guest CR3 Page Table]              Physical DRAM
+0x7FF612340000  ─────────────────────────>  PA 0x3F8A5000  ────>  Actual Memory Chip
+                                                                  (Data resides here)
+
+                   Sole translation layer
+                   Maintained by Windows memory manager
+```
+
+After enablement — CPU performs two translations, but the second one is transparent:
+
+```
+Process Virtual Address          [Guest CR3 Page Table]        [EPT/NPT]            Physical DRAM
 0x7FF612340000  ───────────────>  GPA 0x3F8A5000  ──────────>  HPA 0x3F8A5000
-                                                                    |
-                  这层完全没变         这层是新加的                     |
-                  Windows 不知道       恒等映射: GPA == HPA            v
-                  页表内容一模一样     输出 = 输入                 同一块 DRAM
-                                                                数据原封不动
+                                                                     │
+                  This layer is unchanged         This layer is new  │
+                  Windows is unaware              Identity mapping   ▼
+                  Page table content identical    Output = Input    Same DRAM
+                                                                    Data untouched
 ```
 
-**关键点**：EPT/NPT 的恒等映射使得 `GPA == HPA`，第二层翻译等于没翻译。CPU 最终访问的仍然是同一块物理内存。
+**Key Point**: The identity mapping of EPT/NPT ensures that `GPA == HPA`, which makes the second level of translation equivalent to no translation. The CPU ultimately accesses the exact same physical memory.
 
-### 恒等映射如何保证无缝衔接
+### How Identity Mapping Guarantees Seamless Transition
 
-看 `ept.c` / `npt.c` 的初始化代码：
+Check the initialization code in `ept.c` / `npt.c`:
 
 ```c
-// 覆盖 512GB 物理地址空间, 每个 2MB 区域映射到自身
-for (i = 0; i < 512; i++) {            // 512 个 PDPT entry, 每个 1GB
-    for (j = 0; j < 512; j++) {        // 512 个 PD entry, 每个 2MB
+// Cover 512GB physical address space, each 2MB region maps to itself
+for (i = 0; i < 512; i++) {            // 512 PDPT entries, each covering 1GB
+    for (j = 0; j < 512; j++) {        // 512 PD entries, each covering 2MB
         PhysAddr = (i * 512 + j) * 2MB;
 
-        PD[i][j].Read    = 1;          // 允许读
-        PD[i][j].Write   = 1;          // 允许写
-        PD[i][j].Execute = 1;          // 允许执行
-        PD[i][j].LargePage = 1;        // 2MB 大页
-        PD[i][j].PhysAddr = PhysAddr;  // ★ 指向自己! GPA == HPA
+        PD[i][j].Read    = 1;          // Allow reads
+        PD[i][j].Write   = 1;          // Allow writes
+        PD[i][j].Execute = 1;          // Allow execution
+        PD[i][j].LargePage = 1;        // 2MB large page
+        PD[i][j].PhysAddr = PhysAddr;  // ★ Point to itself! GPA == HPA
     }
 }
 ```
 
-| GPA 范围 | HPA 范围 | 效果 |
+| GPA Range | HPA Range | Effect |
 |----------|----------|------|
-| 0x00000000 ~ 0x001FFFFF | 0x00000000 ~ 0x001FFFFF | 前 2MB，原样映射 |
-| 0x00200000 ~ 0x003FFFFF | 0x00200000 ~ 0x003FFFFF | 第 2 个 2MB |
+| 0x00000000 ~ 0x001FFFFF | 0x00000000 ~ 0x001FFFFF | First 2MB, mapped as-is |
+| 0x00200000 ~ 0x003FFFFF | 0x00200000 ~ 0x003FFFFF | Second 2MB |
 | ... | ... | ... |
-| 0x3F800000 ~ 0x3F9FFFFF | 0x3F800000 ~ 0x3F9FFFFF | 包含游戏数据的某个 2MB 块 |
+| 0x3F800000 ~ 0x3F9FFFFF | 0x3F800000 ~ 0x3F9FFFFF | A 2MB block containing game data |
 | ... | ... | ... |
-| 到 512GB | 相同 | 全覆盖 |
+| Up to 512GB | Same | Full coverage |
 
-**每一个物理地址都映射到它自己**，所以任何已经存在的内存——不管是进程代码段、数据段、堆、栈、内核代码——在虚拟化启用前后访问到的都是同一块 DRAM，内容完全不变。
+**Every physical address maps to itself**, so any existing memory — whether process code, data, heap, stack, or kernel code — accesses the exact same DRAM before and after virtualization is enabled, with content completely unaltered.
 
-### 完整的启用时间线
+### Complete Enablement Timeline
 
 ```
-时间线
+Timeline
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-T0: 系统正常运行, 游戏进程已经在跑
+T0: System runs normally, game process is already running
     ──────────────────────────────────────────────────────
-    物理 DRAM 布局 (简化):
-    [0x00000000] OS 内核代码/数据
-    [0x10000000] 其他进程
-    [0x3F8A5000] ← 游戏代码页 (VA 0x7FF612340000 通过 CR3 映射到这里)
-    [0x52100000] ← 游戏数据页 (血量/金币在这里)
-    [0x8A200000] ← 游戏堆内存
+    Physical DRAM Layout (simplified):
+    [0x00000000] OS Kernel code/data
+    [0x10000000] Other processes
+    [0x3F8A5000] ← Game code page (VA 0x7FF612340000 mapped here via CR3)
+    [0x52100000] ← Game data page (HP/Gold resides here)
+    [0x8A200000] ← Game heap memory
     ...
 
-    地址翻译: VA ──[CR3 页表]──> PA  (一层)
+    Address translation: VA ──[CR3 Page Table]──> PA  (Single-layer)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-T1: 用户执行 IOCTL_VMX_INIT, 驱动开始初始化
+T1: User executes IOCTL_VMX_INIT, driver begins initialization
     ──────────────────────────────────────────────────────
     1. EptInitialize() / NptInitialize()
-       在内核内存中构建 EPT/NPT 页表
-       这些页表本身占用约 10MB 物理内存 (PD pages + split pool)
-       ★ 但页表内容是恒等映射, 不影响任何现有数据
+       Build EPT/NPT page tables in kernel memory
+       These page tables themselves occupy ~10MB physical memory (PD pages + split pool)
+       ★ But page table contents are identity-mapped, not affecting any existing data
 
-    2. 每个 CPU 核心:
+    2. For each CPU core:
        VmxEnableOnCpu():
-         CR4 |= VMXE          // 启用 VMX 操作
-         VMXON                 // 进入 VMX root 模式
+         CR4 |= VMXE          // Enable VMX operation
+         VMXON                 // Enter VMX root mode
        VmxSetupVmcs():
-         Guest CR3 = 当前 CR3  // ★ Guest 页表就是现有页表, 不变
-         Guest RIP = 下一条指令 // ★ 从当前位置继续执行
-         Guest RSP = 当前 RSP
-         EPTP = EPT 页表地址   // 插入 EPT 翻译层
-         VMLAUNCH               // 当前 CPU 进入 Guest 模式
+         Guest CR3 = Current CR3  // ★ Guest page table is the existing page table, unchanged
+         Guest RIP = Next Instruction // ★ Continue execution from current position
+         Guest RSP = Current RSP
+         EPTP = EPT page table address   // Insert EPT translation layer
+         VMLAUNCH               // Current CPU enters Guest mode
 
-    ★ VMLAUNCH 之后, 这个 CPU 上所有代码 (包括 OS 内核和所有进程)
-      都在 VMX non-root (Guest) 模式下运行, 但它们完全不知道!
+    ★ After VMLAUNCH, all code on this CPU (including OS kernel and all processes)
+      runs in VMX non-root (Guest) mode, but they are completely unaware!
 
-    物理 DRAM 布局: 完全没变!
-    [0x3F8A5000] ← 仍然是游戏代码页, 内容一模一样
-    [0x52100000] ← 仍然是游戏数据页, 血量/金币一模一样
+    Physical DRAM layout: Completely unchanged!
+    [0x3F8A5000] ← Still game code page, content identical
+    [0x52100000] ← Still game data page, HP/Gold identical
 
-    地址翻译: VA ──[CR3 页表]──> GPA ──[EPT 恒等映射]──> HPA=GPA  (两层, 但等效一层)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-T2: 虚拟化已启用, 游戏继续运行
-    ──────────────────────────────────────────────────────
-    游戏代码: MOV EAX, [血量地址]
-      VA → CR3 页表 → GPA 0x52100XXX → EPT → HPA 0x52100XXX → 读到真实血量
-                                         ↑
-                                    恒等映射, 完全透明
-
-    Windows 内存管理: 正常工作, 完全不知道 Hypervisor 存在
-      - 分配新页: 照常操作 (EPT 恒等映射覆盖了所有物理地址)
-      - 页面换出: 照常操作 (修改 Guest CR3 页表, EPT 不受影响)
-      - 进程创建: 照常操作
+    Address translation: VA ──[CR3 Page Table]──> GPA ──[EPT Identity Mapping]──> HPA=GPA  (Two layers, but equivalent to one)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-T3: 用户通过 IOCTL_VMX_READ_MEMORY 读取游戏内存
+T2: Virtualization enabled, game continues running
     ──────────────────────────────────────────────────────
-    驱动拿到游戏 CR3, 自己遍历页表:
-      游戏 VA → 遍历游戏 CR3 → GPA 0x52100XXX
-      MmMapIoSpace(0x52100XXX) → 直接读到真实数据
+    Game code: MOV EAX, [HP Address]
+      VA → CR3 Page Table → GPA 0x52100XXX → EPT → HPA 0x52100XXX → Read real HP
+                                         │
+                                    Identity mapping, completely transparent
 
-    ★ 这个过程中:
-      - 游戏不知道 (没有调用任何游戏地址空间的 API)
-      - 反作弊驱动不知道 (没有 OpenProcess / ReadProcessMemory)
-      - Windows 不知道 (只是映射了一下物理地址)
+    Windows memory management: Works normally, completely unaware of Hypervisor presence
+      - Allocate new pages: Normal operation (EPT identity mapping covers all physical addresses)
+      - Page swap out: Normal operation (modifies Guest CR3 page table, EPT unaffected)
+      - Process creation: Normal operation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+T3: User reads game memory via IOCTL_VMX_READ_MEMORY
+    ──────────────────────────────────────────────────────
+    Driver obtains game CR3, traverses the page table itself:
+      Game VA → Traverse game CR3 → GPA 0x52100XXX
+      MmMapIoSpace(0x52100XXX) → Directly read real data
+
+    ★ During this process:
+      - The game is unaware (no APIs in game address space called)
+      - Anti-cheat drivers are unaware (no OpenProcess / ReadProcessMemory)
+      - Windows is unaware (merely mapped the physical address)
 ```
 
-### 为什么 Windows 和所有 Guest 软件毫无感知
+### Why Windows and All Guest Software Are Completely Unaware
 
-| 方面 | 为什么无感 |
+| Aspect | Why Unaware |
 |------|-----------|
-| **Guest 页表未修改** | VMCS/VMCB 的 Guest CR3 = 真实 CR3，Windows 内存管理继续用它自己的页表 |
-| **物理内存未搬移** | EPT/NPT 恒等映射，GPA==HPA，物理数据纹丝不动 |
-| **指令执行无中断** | VMLAUNCH 时 Guest RIP = 当前 RIP，从下一条指令无缝继续 |
-| **时间无跳变** | TSC 连续递增，VMLAUNCH 本身只花几百个时钟周期 |
-| **性能影响极小** | EPT/NPT 有硬件 TLB 缓存 (EPTP-tagged)，大部分访问不需要二次遍历 |
-| **新分配的内存** | 也自动覆盖，因为恒等映射覆盖了整个 512GB 物理空间 |
+| **Guest page tables unmodified** | Guest CR3 in VMCS/VMCB = Real CR3; Windows memory management continues using its own page tables |
+| **Physical memory unmoved** | EPT/NPT identity mapped, GPA==HPA, physical data remains untouched |
+| **Instruction execution uninterrupted** | Guest RIP = Current RIP at VMLAUNCH, seamlessly continuing from the next instruction |
+| **No time jumps** | TSC increments continuously; VMLAUNCH itself only takes a few hundred clock cycles |
+| **Minimal performance impact** | EPT/NPT has hardware TLB caching (EPTP-tagged), so most accesses do not require a second-level traversal |
+| **Newly allocated memory** | Automatically covered since identity mapping spans the entire 512GB physical space |
 
-### EPT/NPT 性能开销
-
-```
-无虚拟化:    VA → CR3 (4级遍历, 约 4 次内存访问, TLB 命中则 0 次)
-有虚拟化:    VA → CR3 (4级) × EPT (4级) = 最坏 24 次内存访问
-             但 EPT TLB (VPID-tagged) 缓存后, 实际开销约 1-5%
-
-实测: Hypervisor 启用后, 游戏帧率下降通常 < 3%
-     (VM-Exit 处理是主要开销, 不是 EPT 遍历)
-```
-
-### 与传统虚拟机的根本区别
+### EPT/NPT Performance Overhead
 
 ```
-传统虚拟机 (VirtualBox / VMware / Hyper-V):
-  先创建空虚拟机 → 安装 OS → 分配虚拟硬盘 → 物理内存是从主机"借"的
-  Guest 物理地址空间是虚构的, EPT 映射到主机分配的真实页面
-  GPA ≠ HPA (Guest 认为自己的 PA 0x0 实际可能在 HPA 0x7000000000)
+No Virtualization: VA -> CR3 (4-level traversal, ~4 memory accesses, 0 if TLB hits)
+With Virtualization: VA -> CR3 (4 levels) × EPT (4 levels) = 24 memory accesses worst case
+             However, with EPT TLB (VPID-tagged) cached, actual overhead is ~1-5%
+
+Measured: After hypervisor is enabled, game frame rate drops are typically < 3%
+     (VM-Exit handling is the primary overhead, not EPT traversal)
+```
+
+### Fundamental Difference from Traditional Virtual Machines
+
+```
+Traditional Virtual Machines (VirtualBox / VMware / Hyper-V):
+  Create empty VM first -> Install OS -> Allocate virtual disk -> Physical memory is "borrowed" from the host
+  Guest physical address space is fabricated, and EPT maps to real pages allocated by the host
+  GPA ≠ HPA (Guest believes its PA is 0x0, which might actually reside at HPA 0x7000000000)
 
 VMXToolbox (Blue Pill):
-  OS 已经在跑 → 在它下面塞一层 → 恒等映射
-  Guest 物理地址空间就是真实物理地址空间
-  GPA == HPA (整个 512GB 一一对应)
-  Guest 从来没有"搬进虚拟机", 它一直在原地, 只是脚下多了一层透明地板
+  OS is already running -> Insert a layer underneath it -> Identity mapping
+  Guest physical address space IS the real physical address space
+  GPA == HPA (one-to-one mapping across the entire 512GB)
+  Guest never "moved into a VM"; it remains in place, simply with a transparent floor underneath
 ```
 
-一句话总结：**VMXToolbox 不创建虚拟环境，而是把现实变成虚拟环境——所有东西都在原地，只是 CPU 多了一层你看不见的翻译。**
+In summary: **VMXToolbox does not create a virtual environment, but rather turns reality into one — everything remains in place, while the CPU gains a layer of translation invisible to you.**
 
 ---
 
-## 通用 EPT/NPT Hook 框架
+## Generic EPT/NPT Hook Framework
 
-**文件**: `hv_hook.h` + `hv_hook.c` + `hv_hook_asm.asm`
+**File**: `hv_hook.h` + `hv_hook.c` + `hv_hook_asm.asm`
 
-利用 EPT/NPT 页表权限分离，实现对任意内核/用户态函数的无感知 Hook。PatchGuard 无法检测，因为内核代码页的物理内存从未被修改。
+Leveraging the EPT/NPT page table permission splitting, it implements transparent hooking of any kernel or user-mode function. PatchGuard cannot detect this because the physical memory of kernel code pages is never modified.
 
-### 核心特性
+### Core Features
 
-| 特性 | 说明 |
+| Feature | Description |
 |------|------|
-| 动态安装/卸载 | 通过 IOCTL 在运行时安装和移除 Hook |
-| 无数量上限 | 动态分配 Thunk 页，每页 170 个 Hook，按需增长 |
-| 按名称 Hook | 传入函数名（如 `NtCreateFile`），自动解析地址 |
-| 按地址 Hook | 直接指定内核或用户态虚拟地址 |
-| PID 过滤 | Hook 可设为全局或仅对指定进程生效 |
-| 4 种动作 | PASSTHROUGH（计数）、LOG（日志）、BLOCK（拦截）、MODIFY_RETVAL（改返回值） |
-| 事件日志 | 512 条环形缓冲区，记录每次 Hook 触发的详细信息 |
-| PatchGuard 安全 | EPT Execute-Only 机制，读取看原始代码，执行走 Hook 代码 |
+| Dynamic install/uninstall | Install and remove hooks at runtime via IOCTL |
+| No quantity limit | Dynamically allocate Thunk pages, 170 hooks per page, growing on-demand |
+| Hook by name | Pass in function name (e.g., `NtCreateFile`) to automatically resolve its address |
+| Hook by address | Directly specify kernel or user-mode virtual addresses |
+| PID filtering | Hooks can be global or only effective for specified processes |
+| 4 actions | PASSTHROUGH (count), LOG (logging), BLOCK (interception), MODIFY_RETVAL (modify return value) |
+| Event logs | 512-entry ring buffer, logging detailed info of each hook trigger |
+| PatchGuard safe | EPT Execute-Only mechanism: reads see original code, executions run hook code |
 
-### IOCTL 接口
+### IOCTL Interface
 
-| IOCTL | 功能 |
+| IOCTL | Function |
 |-------|------|
-| `IOCTL_VMX_INSTALL_HOOK` (0x809) | 安装 Hook（输入函数名/地址+规则，返回 HookId） |
-| `IOCTL_VMX_REMOVE_HOOK` (0x80A) | 移除 Hook（输入 HookId） |
-| `IOCTL_VMX_LIST_HOOKS` (0x80B) | 查询所有活跃 Hook 及命中次数 |
-| `IOCTL_VMX_GET_HOOK_EVENTS` (0x80C) | 读取 Hook 事件日志 |
+| `IOCTL_VMX_INSTALL_HOOK` (0x809) | Install hook (input function name/address + rule, returns HookId) |
+| `IOCTL_VMX_REMOVE_HOOK` (0x80A) | Remove hook (input HookId) |
+| `IOCTL_VMX_LIST_HOOKS` (0x80B) | Query all active hooks and their hit counts |
+| `IOCTL_VMX_GET_HOOK_EVENTS` (0x80C) | Read hook event logs |
 
-### 用法示例
+### Usage Examples
 
-**CLI 命令行方式** (通过 VMXToolbox.exe):
+**CLI Command Mode** (via VMXToolbox.exe):
 
 ```bash
-# Hook NtCreateFile, 记录所有调用
+# Hook NtCreateFile, log all calls
 VMXToolbox.exe --install-hook NtCreateFile --action 1 --hook-log
 
 # Block ObRegisterCallbacks for PID 1234, return ACCESS_DENIED
 VMXToolbox.exe --install-hook ObRegisterCallbacks --action 2 --block-retval C0000022 --hook-pid 1234
 
-# 修改 NtClose 返回值为 STATUS_SUCCESS
+# Modify NtClose return value to STATUS_SUCCESS
 VMXToolbox.exe --install-hook NtClose --action 3 --new-retval 0
 
-# 按地址 Hook 非导出函数
+# Hook non-exported function by address
 VMXToolbox.exe --install-hook-addr FFFFF80012345678 --action 1 --hook-log
 
-# 查看 Hook 列表和事件
+# View hook list and events
 VMXToolbox.exe --list-hooks
 VMXToolbox.exe --hook-events
 
-# 移除 Hook
+# Remove hook
 VMXToolbox.exe --remove-hook 1
 ```
 
-**C 代码方式** (直接调用 IOCTL):
+**C Code Mode** (directly calling IOCTL):
 
 ```c
-// Hook NtCreateFile, 记录所有调用
+// Hook NtCreateFile, log all calls
 VMX_HOOK_REQUEST req = {0};
 VMX_HOOK_RESPONSE resp = {0};
 req.ByName = TRUE;
@@ -1712,143 +1706,143 @@ req.Rule.TargetPid = 1234;
 DeviceIoControl(hDev, IOCTL_VMX_INSTALL_HOOK, &req, sizeof(req), &resp, sizeof(resp), &ret, NULL);
 ```
 
-> **详细技术文档**: 完整的架构设计、ASM dispatcher 流程、Thunk 机制、HOOK_DECISION 结构布局等，请参阅 **[hook_framework.md](hook_framework.md)**
+> **Detailed Technical Document**: For the complete architectural design, ASM dispatcher flow, Thunk mechanism, `HOOK_DECISION` structure layout, etc., please refer to **[hook_framework.md](hook_framework.md)**
 
 ---
 
-## SSDT 监控与 Hook 框架
+## SSDT Monitoring and Hook Framework
 
-**文件**: `ssdt.h` + `ssdt.c`
+**File**: `ssdt.h` + `ssdt.c`
 
-提供对 Windows x64 SSDT (System Service Descriptor Table) 的完整发现、解析、名称解析、按索引/名称 Hook、以及全量/过滤监控能力。所有实际 Hook 操作完全复用现有 `GenericHookInstall()` EPT/NPT 框架。
+Provides complete discovery, parsing, name resolution, hooking by index/name, and full/filtered monitoring capabilities for Windows x64 SSDT (System Service Descriptor Table). All actual hooking operations completely reuse the existing `GenericHookInstall()` EPT/NPT framework.
 
-### 设计定位
+### Design Rationale
 
-SSDT 模块是一个**薄协调层**：
+The SSDT module acts as a **thin coordination layer**:
 
-- **发现与解析**: 负责 KiServiceTable 定位、SSDT 条目解码、Nt* 函数名称解析
-- **syscall index ↔ hookId 映射**: 维护 `SSDT_HOOK_MAPPING` 链表，跟踪哪些 syscall 被 Hook 了
-- **实际 Hook**: 完全委托给 `GenericHookInstall()` / `GenericHookRemove()`（Thunk 生成、EPT 分页、决策逻辑、事件日志等均已就绪）
+- **Discovery & Parsing**: Responsible for KiServiceTable localization, SSDT entry decoding, and Nt* function name resolution.
+- **syscall index ↔ hookId Mapping**: Maintained via `SSDT_HOOK_MAPPING` linked list, tracking which syscalls are hooked.
+- **Actual Hooking**: Fully delegated to `GenericHookInstall()` / `GenericHookRemove()` (with Thunk generation, EPT paging, decision logic, and event logging already in place).
 
-### 两级 SSDT 发现与地址解析
+### Two-Tier SSDT Discovery and Address Resolution
 
-SSDT 地址的可信度直接决定了 Hook 目标的正确性。框架采用**两级策略**，优先从磁盘获取无污染数据：
+The trustworthiness of SSDT addresses directly determines the correctness of hooking targets. The framework employs a **two-tier strategy**, prioritizing unpolluted data from the disk:
 
-#### Tier 1: 从磁盘映射 ntoskrnl.exe 解析（首选）
+#### Tier 1: Parsing from Disk-Mapped ntoskrnl.exe (Preferred)
 
 ```
 SsdtGetNtoskrnlBase()
   → ZwQuerySystemInformation(SystemModuleInformation)
-  → 获取 ntoskrnl 加载基址 + 磁盘路径
+  → Obtain ntoskrnl load base address + disk path
 
 SsdtMapNtoskrnlFromDisk()
   → ZwOpenFile(ntoskrnl.exe)
-  → ZwCreateSection(SEC_IMAGE)    ← 关键：按 PE 节对齐展开
-  → ZwMapViewOfSection()          ← 映射到内核地址空间
+  → ZwCreateSection(SEC_IMAGE)    ← Critical: alignment-expanded as a PE section
+  → ZwMapViewOfSection()          ← Map to kernel address space
 
 SsdtDiscoverAndResolveFromDisk()
-  → 遍历映射 PE 导出表，找到 KeServiceDescriptorTable
-  → 读取 .Base (未重定位值 = PreferredBase + TableRva)
+  → Traverse mapped PE export table, locate KeServiceDescriptorTable
+  → Read .Base (unrelocated value = PreferredBase + TableRva)
   → TableRva = .Base - PreferredBase
-  → 读取 .Limit → ServiceCount
-  → 直接从 MapBase + TableRva 读取 LONG 数组
-  → 重定位: FuncVA = NtoskrnlBase + TableRva + (entry >> 4)
+  → Read .Limit → ServiceCount
+  → Directly read LONG array from MapBase + TableRva
+  → Relocate: FuncVA = NtoskrnlBase + TableRva + (entry >> 4)
 ```
 
-**为什么用 SEC_IMAGE?**
+**Why use SEC_IMAGE?**
 
-| 对比项 | ZwReadFile (原始文件) | ZwCreateSection(SEC_IMAGE) |
+| Comparison | ZwReadFile (Raw File) | ZwCreateSection(SEC_IMAGE) |
 |--------|----------------------|----------------------------|
-| 内存布局 | 文件原始字节 (raw) | 按 PE 节对齐展开 (virtual) |
-| RVA 使用 | 需手动 RVA→文件偏移转换 | **RVA 直接当偏移用** |
-| 内存消耗 | 需分配整个文件大小的 NonPagedPool (~10MB) | 按需分页 |
-| 辅助函数 | 需要 Section Header 遍历 | **不需要** |
+| Memory Layout | Raw file bytes (raw) | PE section-aligned expansion (virtual) |
+| RVA Usage | Requires manual RVA -> file offset conversion | **RVA directly used as offset** |
+| Memory Consumption | Requires allocating NonPagedPool matching full file size (~10MB) | On-demand paging |
+| Helper Functions | Requires Section Header traversal | **Not required** |
 
-**为什么从磁盘获取比从内存获取更安全?**
+**Why is obtaining from disk safer than from memory?**
 
-- 磁盘上的 ntoskrnl.exe 受 Windows 文件保护 (WFP/WRP) 守护，且具有微软数字签名
-- 即使某个 rootkit 在 PatchGuard 激活前的极短窗口内篡改了内存中的 KiServiceTable，磁盘数据仍然是微软原版的
-- 所有读取的字节来自经过签名验证的 PE 文件，零内存数据被信任（唯一使用的内存值是 `NtoskrnlBase`，来自 `ZwQuerySystemInformation` 这一可信内核 API）
+- ntoskrnl.exe on disk is protected by Windows File Protection (WFP/WRP) and bears a Microsoft digital signature.
+- Even if a rootkit tampers with the memory-resident KiServiceTable during the short window before PatchGuard activates, disk data remains the original Microsoft version.
+- All read bytes originate from PE files validated via digital signature; zero memory data is trusted (the only memory value used is `NtoskrnlBase` from the trusted kernel API `ZwQuerySystemInformation`).
 
-#### Tier 2: 从内存导出符号解析（回退）
+#### Tier 2: Resolving from Memory-Exported Symbols (Fallback)
 
 ```
 SsdtDiscoverAndResolveFromMemory()
   → MmGetSystemRoutineAddress(L"KeServiceDescriptorTable")
-  → 读取 .Base (已重定位 = 真实 KiServiceTable VA) + .Limit
-  → 直接从内存 KiServiceTable 读取 LONG 条目数组
+  → Read .Base (relocated = real KiServiceTable VA) + .Limit
+  → Directly read LONG entry array from memory KiServiceTable
   → FuncVA = KiServiceTableVa + (entry >> 4)
 ```
 
-`KeServiceDescriptorTable` 是 ntoskrnl 在所有 x64 Windows 版本上导出的符号，`KSERVICE_TABLE_DESCRIPTOR` 结构布局从未变过。在 PatchGuard 保护下，内存中的表同样可靠。
+`KeServiceDescriptorTable` is an exported symbol of ntoskrnl across all x64 Windows versions, and the layout of the `KSERVICE_TABLE_DESCRIPTOR` structure has never changed. Under PatchGuard protection, the memory-resident table is equally reliable.
 
-此方式仅在磁盘方案失败时使用（如虚拟化环境中无法访问宿主文件系统等极端情况）。
+This approach is only used if the disk scheme fails (e.g., extreme situations in virtualized environments where the host file system cannot be accessed).
 
-### SSDT 条目格式 (x64)
+### SSDT Entry Format (x64)
 
 ```c
-// KiServiceTable 是 LONG 数组，每个条目编码为：
+// KiServiceTable is a LONG array, with each entry encoded as:
 LONG entry = KiServiceTable[index];
 
-ULONG64 FunctionVA = KiServiceTableVA + (entry >> 4);   // 高 28 位 = 相对偏移
-ULONG   ArgCount   = entry & 0xF;                       // 低 4 位 = 参数个数
+ULONG64 FunctionVA = KiServiceTableVA + (entry >> 4);   // Upper 28 bits = relative offset
+ULONG   ArgCount   = entry & 0xF;                       // Lower 4 bits = argument count
 ```
 
-### 名称解析
+### Name Resolution
 
-通过遍历内存中 ntoskrnl PE 导出表，匹配 `Nt*` 前缀的导出函数地址到 SSDT 条目地址：
+By traversing the ntoskrnl PE export table in memory, addresses of exported functions with the `Nt*` prefix are matched to SSDT entry addresses:
 
 ```
 SsdtPopulateNames()
-  → 读取 ntoskrnl PE 导出目录
-  → 遍历所有 Nt* 导出 (跳过 Zw* 前缀)
-  → 计算 FuncVA = NtoskrnlBase + FuncRva
-  → 在 ResolvedAddresses[] 数组中匹配
-  → 匹配成功 → 存入 NameCache[index]
+  → Read ntoskrnl PE export directory
+  → Traverse all Nt* exports (skip Zw* prefix)
+  → Calculate FuncVA = NtoskrnlBase + FuncRva
+  → Match within the ResolvedAddresses[] array
+  → Match successful -> store in NameCache[index]
 ```
 
-`SsdtFindIndexByName()` 先查 NameCache，未命中时 fallback 到 `MmGetSystemRoutineAddress` 解析后地址匹配。
+`SsdtFindIndexByName()` queries NameCache first, and falls back to matching the resolved address of `MmGetSystemRoutineAddress` upon a cache miss.
 
-### Hook 操作
+### Hooking Operations
 
-SSDT Hook 完全复用现有 `GenericHookInstall()` 框架：
+SSDT Hooking completely reuses the existing `GenericHookInstall()` framework:
 
 ```
 SsdtHookByIndex(Index, Rule)
-  1. 查重 (spinlock 保护的 SSDT_HOOK_MAPPING 链表)
+  1. Check for duplicates (SSDT_HOOK_MAPPING linked list protected by spinlock)
   2. FuncVa = ResolvedAddresses[Index]
-  3. 调用 GenericHookInstall(FuncVa, 0/*kernel*/, Name, Rule, &HookId)
-     → 分配 Thunk → EPT 页分离 → 安装完成
-  4. 创建 SSDT_HOOK_MAPPING 节点记录 Index ↔ HookId
+  3. Call GenericHookInstall(FuncVa, 0/*kernel*/, Name, Rule, &HookId)
+     → Allocate Thunk -> EPT page isolation -> Installation complete
+  4. Create SSDT_HOOK_MAPPING node to record Index ↔ HookId
 
 SsdtHookByName(Name, Rule)
   → SsdtFindIndexByName(Name) → SsdtHookByIndex(Index)
 ```
 
-Hook 事件通过现有 512 条环形缓冲区自动记录，`--hook-events` 即可查看。
+Hook events are automatically logged via the existing 512-entry ring buffer, viewable with `--hook-events`.
 
-### 监控模式
+### Monitoring Modes
 
-| 模式 | 说明 |
+| Mode | Description |
 |------|------|
-| `SSDT_MONITOR_OFF` | 停止监控，移除所有监控 Hook |
-| `SSDT_MONITOR_ALL` | 对全部 ~460 个 syscall 安装 LOG_ONLY Hook |
-| `SSDT_MONITOR_FILTERED` | 仅对指定的 syscall index 列表安装 Hook |
+| `SSDT_MONITOR_OFF` | Stop monitoring, remove all monitoring hooks |
+| `SSDT_MONITOR_ALL` | Install LOG_ONLY hooks for all ~460 syscalls |
+| `SSDT_MONITOR_FILTERED` | Install hooks only for a specified list of syscall indices |
 
-监控 Hook 被标记为 `IsMonitorHook=TRUE`，`SsdtStopMonitoring()` 只移除监控创建的 Hook，不影响用户手动安装的 SSDT Hook。
+Monitoring hooks are flagged as `IsMonitorHook=TRUE`. `SsdtStopMonitoring()` only removes hooks created for monitoring, not affecting manually-installed SSDT hooks.
 
-### 生命周期
+### Lifecycle
 
 ```
 SsdtInitialize()
-  → 读取 LSTAR (诊断信息)
-  → SsdtGetNtoskrnlBase() (获取加载基址 + 磁盘路径)
+  → Read LSTAR (diagnostic info)
+  → SsdtGetNtoskrnlBase() (Obtain load base + disk path)
   → Tier 1: SsdtMapNtoskrnlFromDisk() + SsdtDiscoverAndResolveFromDisk() + SsdtUnmapFileImage()
-  → 失败 → Tier 2: SsdtDiscoverAndResolveFromMemory()
-  → SsdtPopulateNames() (名称解析，best-effort)
+  → Failure -> Tier 2: SsdtDiscoverAndResolveFromMemory()
+  → SsdtPopulateNames() (Name resolution, best-effort)
   → Initialized = TRUE
 
-SsdtCleanup()       [在 DriverUnload 中，GenericHookCleanup 之前调用]
+SsdtCleanup()       [Called in DriverUnload before GenericHookCleanup]
   → SsdtStopMonitoring()
   → SsdtUnhookAll()
   → SsdtUnmapFileImage()
@@ -1856,68 +1850,68 @@ SsdtCleanup()       [在 DriverUnload 中，GenericHookCleanup 之前调用]
 
 ---
 
-## Shadow SSDT (Win32k) 监控与 Hook 框架
+## Shadow SSDT (Win32k) Monitoring and Hook Framework
 
-**文件**: `shadow_ssdt.h` + `shadow_ssdt.c`
+**File**: `shadow_ssdt.h` + `shadow_ssdt.c`
 
-将 SSDT 模块的架构扩展到 **Win32k Shadow SSDT**（`W32pServiceTable`），覆盖 `NtUser*`/`NtGdi*` 系统调用。Shadow SSDT 条目格式与普通 SSDT 完全一致（`LONG` 数组，`entry >> 4` 得偏移），EPT Hook 机制完全通用。
+Extends the SSDT module architecture to **Win32k Shadow SSDT** (`W32pServiceTable`), covering `NtUser*`/`NtGdi*` system calls. Shadow SSDT entry formats are identical to normal SSDT entries (LONG array, `entry >> 4` yields the offset), and the EPT Hook mechanism is fully compatible.
 
-### 核心挑战与解决方案
+### Core Challenges and Solutions
 
-| 挑战 | 解决方案 |
+| Challenge | Solution |
 |------|---------|
-| `KeServiceDescriptorTableShadow` 未导出 | 从 KTHREAD.ServiceTable 间接获取 |
-| KTHREAD.ServiceTable 偏移随 Windows 版本变化 | QWORD 扫描 System 进程线程动态发现 |
-| win32k.sys 是 per-Session 映射 | 使用 `KeStackAttachProcess` 到 GUI 进程上下文 |
-| Win10+ 将 win32k 拆分为三个模块 | 枚举所有 win32k* 模块，遍历多导出表解析名称 |
+| `KeServiceDescriptorTableShadow` not exported | Obtained indirectly from KTHREAD.ServiceTable |
+| `KTHREAD.ServiceTable` offset changes across Windows versions | Dynamically discovered via QWORD scanning of System process threads |
+| win32k.sys is per-Session mapped | Use `KeStackAttachProcess` to attach to GUI process context |
+| Win10+ splits win32k into three modules | Enumerate all win32k* modules, traverse multiple export tables to resolve names |
 
-### KTHREAD.ServiceTable 偏移动态发现
+### KTHREAD.ServiceTable Offset Dynamic Discovery
 
 ```
 KthreadResolveServiceTableOffset()
-  1. 获取 KeServiceDescriptorTable 地址 (MmGetSystemRoutineAddress)
-  2. 枚举 PID=4 (System) 的线程 → KTHREAD*
-     (System 线程永远不会初始化 win32k, ServiceTable 必定指向 KeServiceDescriptorTable)
-  3. QWORD 扫描 KTHREAD 前 0x400 字节:
+  1. Obtain KeServiceDescriptorTable address (MmGetSystemRoutineAddress)
+  2. Enumerate threads of PID=4 (System) -> KTHREAD*
+     (System threads never initialize win32k; ServiceTable must point to KeServiceDescriptorTable)
+  3. QWORD scan the first 0x400 bytes of KTHREAD:
      for (Offset = 0; Offset < 0x400; Offset += 8)
          if (*(QWORD*)(KTHREAD + Offset) == KeServiceDescriptorTable)
              → Candidate = Offset
-  4. 用第二个 System 线程交叉验证同一偏移
+  4. Cross-validate the same offset with a second System thread
 ```
 
-### KeServiceDescriptorTableShadow 获取
+### KeServiceDescriptorTableShadow Acquisition
 
 ```
 ShadowSsdtDiscover()
-  1. 枚举所有进程所有线程:
+  1. Enumerate all threads of all processes:
      for each Thread:
          Value = *(QWORD*)(Thread + ServiceTableOffset)
          if (Value != KeServiceDescriptorTable && IsKernelAddress(Value)):
-             ShadowCandidate = Value, GuiPid = 该进程 PID
+             ShadowCandidate = Value, GuiPid = this process's PID
              break
-  2. 三重验证:
+  2. Triple validation:
      - Shadow[0].Base == KeServiceDescriptorTable[0].Base
      - Shadow[0].Limit == KeServiceDescriptorTable[0].Limit
      - Shadow[1].Limit ∈ (0, SHADOW_SSDT_MAX_SERVICES)
-  3. PsLookupProcessByProcessId(GuiPid) → 持有引用用于后续 Attach
+  3. PsLookupProcessByProcessId(GuiPid) -> Hold reference for subsequent Attach
 ```
 
-### Win32k 模块发现 + 名称解析
+### Win32k Module Discovery & Name Resolution
 
 ```
 ShadowSsdtGetWin32kModules()
   → ZwQuerySystemInformation(SystemModuleInformation)
-  → 匹配文件名含 "win32k" 的模块 (支持 win32kbase/win32kfull/win32k)
+  → Match module filenames containing "win32k" (supports win32kbase/win32kfull/win32k)
 
 ShadowSsdtPopulateNames()
   → KeStackAttachProcess(GuiProcess)
   → for each win32k module:
-      遍历 PE 导出表, 匹配 NtUser*/NtGdi* 名称
-      与 ResolvedAddresses[] 中的 VA 匹配 → NameCache[index]
+      Traverse PE export tables, match NtUser*/NtGdi* names
+      Match with VA in ResolvedAddresses[] -> NameCache[index]
   → KeUnstackDetachProcess()
 ```
 
-### Shadow SSDT 条目解析
+### Shadow SSDT Entry Resolution
 
 ```
 ShadowSsdtResolveAllAddresses()
@@ -1929,24 +1923,24 @@ ShadowSsdtResolveAllAddresses()
   → KeUnstackDetachProcess()
 ```
 
-### Hook 操作
+### Hooking Operations
 
-Hook 安装时需要在 GUI 进程上下文中执行，确保 win32k VA→PA 映射有效：
+Hooking must be executed in the GUI process context to ensure valid win32k VA->PA mappings:
 
 ```c
 ShadowSsdtHookByIndex(Index, Rule, &HookId)
-  → 查重 (spinlock)
+  → Check duplicates (spinlock)
   → FuncVa = ResolvedAddresses[Index]
   → KeStackAttachProcess(GuiProcess)
   → GenericHookInstall(FuncVa, 0, Name, Rule, &HookId)
   → KeUnstackDetachProcess()
-  → 创建 SSDT_HOOK_MAPPING 节点
+  → Create SSDT_HOOK_MAPPING node
 ```
 
-### 生命周期
+### Lifecycle
 
 ```
-ShadowSsdtInitialize()    [需要 SSDT 模块先初始化]
+ShadowSsdtInitialize()    [Requires SSDT module initialized first]
   → KthreadResolveServiceTableOffset()
   → ShadowSsdtDiscover()
   → ShadowSsdtGetWin32kModules()
@@ -1954,7 +1948,7 @@ ShadowSsdtInitialize()    [需要 SSDT 模块先初始化]
   → ShadowSsdtPopulateNames()
   → Initialized = TRUE
 
-ShadowSsdtCleanup()       [在 DriverUnload 中, SsdtCleanup 之前调用]
+ShadowSsdtCleanup()       [Called in DriverUnload before SsdtCleanup]
   → ShadowSsdtStopMonitoring()
   → ShadowSsdtUnhookAll()
   → ObDereferenceObject(GuiProcess)
@@ -1962,374 +1956,366 @@ ShadowSsdtCleanup()       [在 DriverUnload 中, SsdtCleanup 之前调用]
 
 ---
 
-## 反反调试能力清单
+## Anti-Anti-Debugging Capability Inventory
 
-| 优先级 | 检测手段 | 拦截方式 | 功能标志 |
+| Priority | Detection Method | Interception Method | Feature Flag |
 |--------|---------|---------|---------|
 | **P0** | `IsDebuggerPresent` / PEB.BeingDebugged | EPT Hook NtQueryInformationProcess | `AAD_HIDE_DEBUGGER` |
-| **P0** | `CheckRemoteDebuggerPresent` | 同上 (底层调用 NtQueryInformationProcess) | `AAD_HIDE_DEBUGGER` |
+| **P0** | `CheckRemoteDebuggerPresent` | Same as above (calls NtQueryInformationProcess underneath) | `AAD_HIDE_DEBUGGER` |
 | **P0** | `NtQueryInformationProcess` (DebugPort/DebugObjectHandle/DebugFlags) | EPT Hook | `AAD_HIDE_DEBUGGER` |
-| **P0** | DR0-DR7 硬件断点检测 | MOV-DR Exiting + 返回伪值 | `AAD_HIDE_HWBP` |
-| **P0** | RDTSC/RDTSCP 时间差检测 | RDTSC Exiting + TSC Offset 补偿 | `AAD_HIDE_TIMING` |
-| **P1** | CPUID Hypervisor 检测 (ECX[31]) | CPUID 无条件 Exit + 清除位 | `AAD_HIDE_CPUID` |
+| **P0** | DR0-DR7 hardware breakpoint detection | MOV-DR Exiting + returns spoofed values | `AAD_HIDE_HWBP` |
+| **P0** | RDTSC/RDTSCP timing difference detection | RDTSC Exiting + TSC Offset compensation | `AAD_HIDE_TIMING` |
+| **P1** | CPUID Hypervisor detection (ECX[31]) | CPUID unconditional Exit + clear bit | `AAD_HIDE_CPUID` |
 | **P1** | `NtQuerySystemInformation` (KernelDebugger) | EPT Hook | `AAD_HIDE_SYSINFO` |
-| **P1** | INT 2D / INT 3 异常行为差异 | Exception Bitmap + 标准化注入 | `AAD_HIDE_EXCEPTIONS` |
-| **P2** | `NtClose` 无效句柄异常 | EPT Hook + 异常抑制 | `AAD_HIDE_NTCLOSE` |
-| **P2** | `NtSetInformationThread` (ThreadHideFromDebugger) | EPT Hook + 阻断 | `AAD_HIDE_THREADINFO` |
+| **P1** | INT 2D / INT 3 exception behavior discrepancy | Exception Bitmap + standardized injection | `AAD_HIDE_EXCEPTIONS` |
+| **P2** | `NtClose` invalid handle exception | EPT Hook + exception suppression | `AAD_HIDE_NTCLOSE` |
+| **P2** | `NtSetInformationThread` (ThreadHideFromDebugger) | EPT Hook + blocking | `AAD_HIDE_THREADINFO` |
 
 ---
 
-## 用户态控制程序
+## User-Mode Controller
 
-**文件**: `client/main.c` + `client/driver_comm.c`
+**File**: `client/main.c` + `client/driver_comm.c`
 
-所有功能通过同一个 `VMXToolbox.exe` CLI 工具统一控制。
+All features are controlled through a single `VMXToolbox.exe` CLI tool.
 
-### 反反调试命令
-
-```
-VMXToolbox.exe --pid <PID> [选项]        设置目标进程
-VMXToolbox.exe --pid <PID> --remove      移除目标进程
-VMXToolbox.exe --status                  查询 VMX 状态
-VMXToolbox.exe --stop                    停止 VMX 引擎
-VMXToolbox.exe --log                     显示拦截日志
-```
-
-隐藏选项:
+### Anti-Anti-Debugging Commands
 
 ```
---hide-debugger     隐藏调试器存在 (PEB, NtQuery*)
---hide-hwbp         隐藏硬件断点 (DR0-DR7)
---hide-timing       对抗时间检测 (RDTSC 补偿)
---hide-cpuid        隐藏 Hypervisor (CPUID)
---hide-sysinfo      伪造系统信息 (KernelDebugger)
---hide-exceptions   标准化异常行为 (INT 2D/3)
---hide-ntclose      抑制 NtClose 异常
---hide-threadinfo   阻断 ThreadHideFromDebugger
---hide-all          启用以上全部功能
+VMXToolbox.exe --pid <PID> [options]      Set target process
+VMXToolbox.exe --pid <PID> --remove      Remove target process
+VMXToolbox.exe --status                  Query VMX status
+VMXToolbox.exe --stop                    Stop VMX engine
+VMXToolbox.exe --log                     Display interception log
 ```
 
-### Hook 框架命令
+Hiding options:
 
 ```
-VMXToolbox.exe --install-hook <name>         按导出名 Hook 内核函数
-VMXToolbox.exe --install-hook-addr <hex>     按虚拟地址 Hook 函数
-VMXToolbox.exe --remove-hook <id>            按 ID 移除 Hook
-VMXToolbox.exe --list-hooks                  列出所有活跃 Hook
-VMXToolbox.exe --hook-events                 显示 Hook 事件日志
+--hide-debugger     Hide debugger presence (PEB, NtQuery*)
+--hide-hwbp         Hide hardware breakpoints (DR0-DR7)
+--hide-timing       Counter timing detection (RDTSC compensation)
+--hide-cpuid        Hide Hypervisor (CPUID)
+--hide-sysinfo      Spoof system info (KernelDebugger)
+--hide-exceptions   Standardize exception behavior (INT 2D/3)
+--hide-ntclose      Suppress NtClose exception
+--hide-threadinfo   Block ThreadHideFromDebugger
+--hide-all          Enable all of the above
 ```
 
-Hook 选项 (配合 `--install-hook` / `--install-hook-addr` 使用):
+### Hook Framework Commands
 
 ```
---action <0-3>       Hook 动作: 0=穿透计数 1=日志 2=拦截 3=修改返回值
---hook-pid <PID>     PID 过滤 (0=全局, 默认=0)
---block-retval <hex> 拦截时返回值 (action=2)
---new-retval <hex>   修改后返回值 (action=3)
---hook-log           启用事件日志记录
+VMXToolbox.exe --install-hook <name>         Hook kernel function by export name
+VMXToolbox.exe --install-hook-addr <hex>     Hook function by virtual address
+VMXToolbox.exe --remove-hook <id>            Remove hook by ID
+VMXToolbox.exe --list-hooks                  List all active hooks
+VMXToolbox.exe --hook-events                 Display hook event logs
 ```
 
-### 内存读写命令
+Hook options (used with `--install-hook` / `--install-hook-addr`):
 
 ```
-VMXToolbox.exe --read-mem <PID> <addr> [size]   读取目标进程内存 (默认 64 字节)
-VMXToolbox.exe --write-mem <PID> <addr> <hex>   写入十六进制字节到目标进程
-VMXToolbox.exe --dump-mem <PID> <addr> <size>   Hex+ASCII 大块内存转储
+--action <0-3>       Hook action: 0=passthrough count, 1=log, 2=block, 3=modify return value
+--hook-pid <PID>     PID filter (0=global, default=0)
+--block-retval <hex> Return value when blocked (action=2)
+--new-retval <hex>   Modified return value (action=3)
+--hook-log           Enable event logging
 ```
 
-### SSDT 命令
+### Memory Read/Write Commands
 
 ```
-VMXToolbox.exe --ssdt-init                          初始化 SSDT 发现
-VMXToolbox.exe --ssdt-dump [start] [count]          转储 SSDT 表条目
-VMXToolbox.exe --ssdt-hook <index|NtName>           Hook SSDT 函数 (配合 --action, --hook-pid 等)
-VMXToolbox.exe --ssdt-unhook <index|hookid:N>       按 syscall index 或 hookid:N 移除 Hook
-VMXToolbox.exe --ssdt-unhook-all                    移除全部 SSDT Hook
-VMXToolbox.exe --ssdt-list                          列出活跃 SSDT Hook
-VMXToolbox.exe --ssdt-monitor <off|all|filtered>    设置 SSDT 监控模式
-VMXToolbox.exe --ssdt-filter <idx1,idx2,...>        指定监控的 syscall index 列表
-```
-
-### Shadow SSDT 命令
+VMXToolbox.exe --read-mem <PID> <addr> [size]   Read target process memory (default 64 bytes)
+VMXToolbox.exe --write-mem <PID> <addr> <hex>   Write hex bytes to target process
+VMXToolbox.exe --dump-mem <PID> <addr> <size>   Hex+ASCII large block memory dump
+### SSDT Commands
 
 ```
-VMXToolbox.exe --shadow-ssdt-init                          初始化 Shadow SSDT 发现
-VMXToolbox.exe --shadow-ssdt-dump [start] [count]          转储 Shadow SSDT 表条目
-VMXToolbox.exe --shadow-ssdt-hook <index|NtUserName>       Hook Shadow SSDT 函数 (配合 --action, --hook-pid 等)
-VMXToolbox.exe --shadow-ssdt-unhook <index|hookid:N>       按 index 或 hookid:N 移除 Hook
-VMXToolbox.exe --shadow-ssdt-unhook-all                    移除全部 Shadow SSDT Hook
-VMXToolbox.exe --shadow-ssdt-list                          列出活跃 Shadow SSDT Hook
-VMXToolbox.exe --shadow-ssdt-monitor <off|all|filtered>    设置 Shadow SSDT 监控模式
-VMXToolbox.exe --shadow-ssdt-filter <idx1,idx2,...>        指定监控的 Shadow SSDT index 列表
+VMXToolbox.exe --ssdt-unhook-all                    Remove all SSDT hooks
+VMXToolbox.exe --ssdt-list                          List active SSDT hooks
+VMXToolbox.exe --ssdt-monitor <off|all|filtered>    Set SSDT monitoring mode
+VMXToolbox.exe --ssdt-filter <idx1,idx2,...>        Specify monitored syscall index list
 ```
 
-### 典型使用场景
+### Shadow SSDT Commands
+
+```
+VMXToolbox.exe --shadow-ssdt-init                          Initialize Shadow SSDT discovery
+VMXToolbox.exe --shadow-ssdt-dump [start] [count]          Dump Shadow SSDT table entries
+VMXToolbox.exe --shadow-ssdt-hook <index|NtUserName>       Hook Shadow SSDT function (used with --action, --hook-pid, etc.)
+VMXToolbox.exe --shadow-ssdt-unhook <index|hookid:N>       Remove hook by index or hookid:N
+VMXToolbox.exe --shadow-ssdt-unhook-all                    Remove all Shadow SSDT hooks
+VMXToolbox.exe --shadow-ssdt-list                          List active Shadow SSDT hook
+VMXToolbox.exe --shadow-ssdt-monitor <off|all|filtered>    Set Shadow SSDT monitoring mode
+VMXToolbox.exe --shadow-ssdt-filter <idx1,idx2,...>        Specify monitored Shadow SSDT index list
+```
+
+### Typical Use Cases
 
 ```bash
-# ===================== 反反调试 =====================
+# ===================== Anti-Anti-Debugging =====================
 
-# 1. 对 PID 1234 启用全部反反调试
+# 1. Enable all anti-anti-debugging features for PID 1234
 VMXToolbox.exe --pid 1234 --hide-all
 
-# 2. 仅隐藏调试器和硬件断点
+# 2. Hide debugger and hardware breakpoints only
 VMXToolbox.exe --pid 1234 --hide-debugger --hide-hwbp
 
-# 3. 查看 VMX 状态
+# 3. View VMX status
 VMXToolbox.exe --status
 
-# 4. 查看拦截日志
+# 4. View interception logs
 VMXToolbox.exe --log
 
-# 5. 移除保护
+# 5. Remove protection
 VMXToolbox.exe --pid 1234 --remove
 
-# ===================== 内核 Hook =====================
+# ===================== Kernel Hooking =====================
 
-# 6. 监控 NtOpenProcess 调用 (全局, 记录日志)
+# 6. Monitor NtOpenProcess calls (global, logged)
 VMXToolbox.exe --install-hook NtOpenProcess --action 1 --hook-log
 
-# 7. 拦截 NtQuerySystemInformation, 返回 STATUS_ACCESS_DENIED
+# 7. Block NtQuerySystemInformation, return STATUS_ACCESS_DENIED
 VMXToolbox.exe --install-hook NtQuerySystemInformation --action 2 --block-retval C0000022
 
-# 8. 修改 NtClose 返回值为 STATUS_SUCCESS, 仅对 PID 1234
+# 8. Modify NtClose return value to STATUS_SUCCESS, for PID 1234 only
 VMXToolbox.exe --install-hook NtClose --action 3 --new-retval 0 --hook-pid 1234
 
-# 9. 按地址安装 Hook
+# 9. Install hook by address
 VMXToolbox.exe --install-hook-addr FFFFF80012345678 --action 1 --hook-log
 
-# 10. 查看活跃 Hook 列表 / 事件日志
+
+# 10. View active hook list / event log
 VMXToolbox.exe --list-hooks
 VMXToolbox.exe --hook-events
 
-# 11. 移除 Hook
+# 11. Remove hook
 VMXToolbox.exe --remove-hook 1
 
-# ===================== 内存读写 =====================
+# ===================== Memory Read/Write =====================
 
-# 12. 读取目标进程 PE 头 (默认 64 字节)
+# 12. Read target process PE header (default 64 bytes)
 VMXToolbox.exe --read-mem 1234 7FF600000000
 
-# 13. 读取 128 字节
+# 13. Read 128 bytes
 VMXToolbox.exe --read-mem 1234 7FF600000000 128
 
-# 14. 写入 NOP sled + 自动验证
+# 14. Write NOP sled + automatic verification
 VMXToolbox.exe --write-mem 1234 7FF600001000 90909090
 
-# 15. 写入 INT3 断点
+# 15. Write INT3 breakpoint
 VMXToolbox.exe --write-mem 1234 7FF600001000 CC
 
-# 16. 大块内存转储 (256 字节)
+# 16. Large block memory dump (256 bytes)
 VMXToolbox.exe --dump-mem 1234 7FF600000000 256
 
-# 17. 读取内核内存 (System 进程 PID=4)
+# 17. Read kernel memory (System process PID=4)
 VMXToolbox.exe --read-mem 4 FFFFF78000000000 64
 
-# ===================== 通用 =====================
+# ===================== General =====================
 
-# 18. 停止 VMX 引擎
+# 18. Stop VMX engine
 VMXToolbox.exe --stop
 
-# ===================== SSDT 监控 =====================
+# ===================== SSDT Monitoring =====================
 
-# 19. 初始化 SSDT 发现
+# 19. Initialize SSDT discovery
 VMXToolbox.exe --ssdt-init
 
-# 20. 转储前 20 条 SSDT 条目
+# 20. Dump the first 20 SSDT entries
 VMXToolbox.exe --ssdt-dump 0 20
 
-# 21. 按函数名 Hook SSDT (记录日志)
+# 21. Hook SSDT by function name (logging only)
 VMXToolbox.exe --ssdt-hook NtOpenProcess --action 1 --hook-log
 
-# 22. 按 syscall index Hook SSDT (拦截, 返回 STATUS_ACCESS_DENIED)
+# 22. Hook SSDT by syscall index (block, return STATUS_ACCESS_DENIED)
 VMXToolbox.exe --ssdt-hook 38 --action 2 --block-retval 0xC0000022
 
-# 23. 查看 SSDT Hook 事件 (复用现有 --hook-events)
+# 23. View SSDT Hook events (reuses existing --hook-events)
 VMXToolbox.exe --hook-events
 
-# 24. 列出活跃 SSDT Hook
+# 24. List active SSDT hooks
 VMXToolbox.exe --ssdt-list
 
-# 25. 全量监控所有 syscall (仅对 PID 1234)
+# 25. Monitor all syscalls (only for PID 1234)
 VMXToolbox.exe --ssdt-monitor all --hook-pid 1234
 
-# 26. 过滤监控指定 syscall index
+# 26. Filtered monitoring of specific syscall indices
 VMXToolbox.exe --ssdt-monitor filtered --ssdt-filter 35,38,55 --hook-pid 1234
 
-# 27. 停止监控
+# 27. Stop monitoring
 VMXToolbox.exe --ssdt-monitor off
 
-# 28. 按 syscall index 移除 Hook
+# 28. Remove hook by syscall index
 VMXToolbox.exe --ssdt-unhook 38
 
-# 29. 按 hookId 移除 Hook
+# 29. Remove hook by hookId
 VMXToolbox.exe --ssdt-unhook hookid:5
 
-# 30. 移除全部 SSDT Hook
+# 30. Remove all SSDT hooks
 VMXToolbox.exe --ssdt-unhook-all
 
-# ===================== Shadow SSDT (Win32k) 监控 =====================
+# ===================== Shadow SSDT (Win32k) Monitoring =====================
 
-# 31. 初始化 Shadow SSDT 发现 (需要先 --ssdt-init)
+# 31. Initialize Shadow SSDT discovery (requires --ssdt-init first)
 VMXToolbox.exe --shadow-ssdt-init
 
-# 32. 转储前 20 条 Shadow SSDT 条目
+# 32. Dump the first 20 Shadow SSDT entries
 VMXToolbox.exe --shadow-ssdt-dump 0 20
 
-# 33. 按函数名 Hook NtUserGetForegroundWindow (记录日志)
+# 33. Hook NtUserGetForegroundWindow by function name (logging only)
 VMXToolbox.exe --shadow-ssdt-hook NtUserGetForegroundWindow --action 1 --hook-log
 
-# 34. 按 index 拦截 Shadow SSDT 函数, 返回 NULL
+# 34. Hook Shadow SSDT function by index (block, return NULL)
 VMXToolbox.exe --shadow-ssdt-hook 10 --action 2 --block-retval 0
 
-# 35. 查看 Shadow SSDT Hook 事件 (复用现有 --hook-events)
+# 35. View Shadow SSDT Hook events (reuses existing --hook-events)
 VMXToolbox.exe --hook-events
 
-# 36. 列出活跃 Shadow SSDT Hook
+# 36. List active Shadow SSDT hooks
 VMXToolbox.exe --shadow-ssdt-list
 
-# 37. 全量监控所有 Win32k syscall (仅对 PID 1234)
+# 37. Monitor all Win32k syscalls (only for PID 1234)
 VMXToolbox.exe --shadow-ssdt-monitor all --hook-pid 1234
 
-# 38. 过滤监控指定 Shadow SSDT index
+# 38. Filtered monitoring of specific Shadow SSDT indices
 VMXToolbox.exe --shadow-ssdt-monitor filtered --shadow-ssdt-filter 10,20,30 --hook-pid 1234
 
-# 39. 停止 Shadow SSDT 监控
+# 39. Stop Shadow SSDT monitoring
 VMXToolbox.exe --shadow-ssdt-monitor off
 
-# 40. 移除全部 Shadow SSDT Hook
+# 40. Remove all Shadow SSDT hooks
 VMXToolbox.exe --shadow-ssdt-unhook-all
-```
 
----
+## Driver and User-Mode Communication Protocol
 
-## 驱动与用户态通信协议
+Communication is established via `DeviceIoControl` using custom IOCTL codes:
 
-通过 `DeviceIoControl` 和自定义 IOCTL 码通信:
+| IOCTL | Direction | Input Structure | Output Structure | Functionality |
+|-------|-----------|-----------------|------------------|---------------|
+| `IOCTL_VMX_INIT` (0x800) | -> | None | None | Initialize VMX |
+| `IOCTL_VMX_SET_TARGET` (0x801) | -> | `VMX_TARGET_INFO` (PID+Flags) | None | Add target process |
+| `IOCTL_VMX_REMOVE_TARGET` (0x802) | -> | `VMX_REMOVE_TARGET` (PID) | None | Remove target process |
+| `IOCTL_VMX_SET_CONFIG` (0x803) | -> | `VMX_CONFIG_INFO` (PID+Flags) | None | Update configuration |
+| `IOCTL_VMX_GET_LOG` (0x804) | <- | None | `VMX_LOG_BUFFER` | Read logs |
+| `IOCTL_VMX_STOP` (0x805) | -> | None | None | Stop VMX |
+| `IOCTL_VMX_QUERY_STATUS` (0x806) | <- | None | `VMX_STATUS` | Query status |
+| `IOCTL_VMX_READ_MEMORY` (0x807) | <-> | `VMX_MEMORY_REQUEST` (PID+VA+Size) | Raw bytes | Read target process memory (direct physical access) |
+| `IOCTL_VMX_WRITE_MEMORY` (0x808) | -> | `VMX_MEMORY_REQUEST` + payload | None | Write target process memory (direct physical access) |
+| `IOCTL_VMX_INSTALL_HOOK` (0x809) | <-> | `VMX_HOOK_REQUEST` (Name/Addr+Rule) | `VMX_HOOK_RESPONSE` (HookId) | Install Hook |
+| `IOCTL_VMX_REMOVE_HOOK` (0x80A) | -> | `VMX_UNHOOK_REQUEST` (HookId) | None | Remove Hook |
+| `IOCTL_VMX_LIST_HOOKS` (0x80B) | <- | None | `VMX_HOOK_LIST` | Query all active hooks |
+| `IOCTL_VMX_GET_HOOK_EVENTS` (0x80C) | <- | None | `VMX_HOOK_EVENT_BUFFER` | Read Hook event logs |
+| `IOCTL_VMX_SSDT_INIT` (0x80D) | <- | None | `VMX_SSDT_INIT_RESPONSE` | Initialize SSDT discovery |
+| `IOCTL_VMX_SSDT_DUMP` (0x80E) | <-> | `VMX_SSDT_DUMP_REQUEST` (Start+Count) | `VMX_SSDT_DUMP_RESPONSE` | Dump SSDT entries |
+| `IOCTL_VMX_SSDT_HOOK` (0x80F) | <-> | `VMX_SSDT_HOOK_REQUEST` (Index/Name+Rule) | `VMX_SSDT_HOOK_RESPONSE` | Hook SSDT function |
+| `IOCTL_VMX_SSDT_UNHOOK` (0x810) | -> | `VMX_SSDT_UNHOOK_REQUEST` (HookId/Index) | None | Remove SSDT Hook |
+| `IOCTL_VMX_SSDT_UNHOOK_ALL` (0x811) | -> | None | None | Remove all SSDT Hooks |
+| `IOCTL_VMX_SSDT_LIST_HOOKS` (0x812) | <- | None | `VMX_SSDT_HOOK_LIST` | Query active SSDT Hooks |
+| `IOCTL_VMX_SSDT_MONITOR` (0x813) | -> | `VMX_SSDT_MONITOR_REQUEST` (Mode+PID+Filter) | None | Set SSDT monitoring mode |
+| `IOCTL_VMX_SHADOW_SSDT_INIT` (0x814) | <- | None | `VMX_SHADOW_SSDT_INIT_RESPONSE` | Initialize Shadow SSDT discovery |
+| `IOCTL_VMX_SHADOW_SSDT_DUMP` (0x815) | <-> | `VMX_SHADOW_SSDT_DUMP_REQUEST` (Start+Count) | `VMX_SHADOW_SSDT_DUMP_RESPONSE` | Dump Shadow SSDT entries |
+| `IOCTL_VMX_SHADOW_SSDT_HOOK` (0x816) | <-> | `VMX_SHADOW_SSDT_HOOK_REQUEST` (Index/Name+Rule) | `VMX_SHADOW_SSDT_HOOK_RESPONSE` | Hook Shadow SSDT function |
+| `IOCTL_VMX_SHADOW_SSDT_UNHOOK` (0x817) | -> | `VMX_SHADOW_SSDT_UNHOOK_REQUEST` (HookId/Index) | None | Remove Shadow SSDT Hook |
+| `IOCTL_VMX_SHADOW_SSDT_UNHOOK_ALL` (0x818) | -> | None | None | Remove all Shadow SSDT Hooks |
+| `IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS` (0x819) | <- | None | `VMX_SHADOW_SSDT_HOOK_LIST` | Query active Shadow SSDT Hooks |
+| `IOCTL_VMX_SHADOW_SSDT_MONITOR` (0x81A) | -> | `VMX_SHADOW_SSDT_MONITOR_REQUEST` (Mode+PID+Filter) | None | Set Shadow SSDT monitoring mode |
 
-| IOCTL | 方向 | 输入结构 | 输出结构 | 功能 |
-|-------|------|---------|---------|------|
-| `IOCTL_VMX_INIT` (0x800) | -> | 无 | 无 | 初始化 VMX |
-| `IOCTL_VMX_SET_TARGET` (0x801) | -> | `VMX_TARGET_INFO` (PID+Flags) | 无 | 添加目标进程 |
-| `IOCTL_VMX_REMOVE_TARGET` (0x802) | -> | `VMX_REMOVE_TARGET` (PID) | 无 | 移除目标进程 |
-| `IOCTL_VMX_SET_CONFIG` (0x803) | -> | `VMX_CONFIG_INFO` (PID+Flags) | 无 | 更新配置 |
-| `IOCTL_VMX_GET_LOG` (0x804) | <- | 无 | `VMX_LOG_BUFFER` | 读取日志 |
-| `IOCTL_VMX_STOP` (0x805) | -> | 无 | 无 | 停止 VMX |
-| `IOCTL_VMX_QUERY_STATUS` (0x806) | <- | 无 | `VMX_STATUS` | 查询状态 |
-| `IOCTL_VMX_READ_MEMORY` (0x807) | <-> | `VMX_MEMORY_REQUEST` (PID+VA+Size) | Raw bytes | 读取目标进程内存 (物理内存直接访问) |
-| `IOCTL_VMX_WRITE_MEMORY` (0x808) | -> | `VMX_MEMORY_REQUEST` + payload | 无 | 写入目标进程内存 (物理内存直接访问) |
-| `IOCTL_VMX_INSTALL_HOOK` (0x809) | <-> | `VMX_HOOK_REQUEST` (名称/地址+规则) | `VMX_HOOK_RESPONSE` (HookId) | 安装 Hook |
-| `IOCTL_VMX_REMOVE_HOOK` (0x80A) | -> | `VMX_UNHOOK_REQUEST` (HookId) | 无 | 移除 Hook |
-| `IOCTL_VMX_LIST_HOOKS` (0x80B) | <- | 无 | `VMX_HOOK_LIST` | 查询所有活跃 Hook |
-| `IOCTL_VMX_GET_HOOK_EVENTS` (0x80C) | <- | 无 | `VMX_HOOK_EVENT_BUFFER` | 读取 Hook 事件日志 |
-| `IOCTL_VMX_SSDT_INIT` (0x80D) | <- | 无 | `VMX_SSDT_INIT_RESPONSE` | 初始化 SSDT 发现 |
-| `IOCTL_VMX_SSDT_DUMP` (0x80E) | <-> | `VMX_SSDT_DUMP_REQUEST` (Start+Count) | `VMX_SSDT_DUMP_RESPONSE` | 转储 SSDT 条目 |
-| `IOCTL_VMX_SSDT_HOOK` (0x80F) | <-> | `VMX_SSDT_HOOK_REQUEST` (Index/Name+Rule) | `VMX_SSDT_HOOK_RESPONSE` | Hook SSDT 函数 |
-| `IOCTL_VMX_SSDT_UNHOOK` (0x810) | -> | `VMX_SSDT_UNHOOK_REQUEST` (HookId/Index) | 无 | 移除 SSDT Hook |
-| `IOCTL_VMX_SSDT_UNHOOK_ALL` (0x811) | -> | 无 | 无 | 移除全部 SSDT Hook |
-| `IOCTL_VMX_SSDT_LIST_HOOKS` (0x812) | <- | 无 | `VMX_SSDT_HOOK_LIST` | 查询活跃 SSDT Hook |
-| `IOCTL_VMX_SSDT_MONITOR` (0x813) | -> | `VMX_SSDT_MONITOR_REQUEST` (Mode+PID+Filter) | 无 | 设置 SSDT 监控模式 |
-| `IOCTL_VMX_SHADOW_SSDT_INIT` (0x814) | <- | 无 | `VMX_SHADOW_SSDT_INIT_RESPONSE` | 初始化 Shadow SSDT 发现 |
-| `IOCTL_VMX_SHADOW_SSDT_DUMP` (0x815) | <-> | `VMX_SHADOW_SSDT_DUMP_REQUEST` (Start+Count) | `VMX_SHADOW_SSDT_DUMP_RESPONSE` | 转储 Shadow SSDT 条目 |
-| `IOCTL_VMX_SHADOW_SSDT_HOOK` (0x816) | <-> | `VMX_SHADOW_SSDT_HOOK_REQUEST` (Index/Name+Rule) | `VMX_SHADOW_SSDT_HOOK_RESPONSE` | Hook Shadow SSDT 函数 |
-| `IOCTL_VMX_SHADOW_SSDT_UNHOOK` (0x817) | -> | `VMX_SHADOW_SSDT_UNHOOK_REQUEST` (HookId/Index) | 无 | 移除 Shadow SSDT Hook |
-| `IOCTL_VMX_SHADOW_SSDT_UNHOOK_ALL` (0x818) | -> | 无 | 无 | 移除全部 Shadow SSDT Hook |
-| `IOCTL_VMX_SHADOW_SSDT_LIST_HOOKS` (0x819) | <- | 无 | `VMX_SHADOW_SSDT_HOOK_LIST` | 查询活跃 Shadow SSDT Hook |
-| `IOCTL_VMX_SHADOW_SSDT_MONITOR` (0x81A) | -> | `VMX_SHADOW_SSDT_MONITOR_REQUEST` (Mode+PID+Filter) | 无 | 设置 Shadow SSDT 监控模式 |
-
-### 关键数据结构
+### Key Data Structures
 
 ```c
-// 添加目标进程
+// Add target process
 typedef struct _VMX_TARGET_INFO {
-    ULONG   Pid;     // 进程 ID
-    ULONG   Flags;   // AAD_HIDE_* 位掩码
+    ULONG   Pid;     // Process ID
+    ULONG   Flags;   // AAD_HIDE_* bitmask
 } VMX_TARGET_INFO;
 
-// 查询状态
+// Query status
 typedef struct _VMX_STATUS {
-    BOOLEAN VmxActive;       // VMX 是否运行
-    ULONG   ActiveTargets;   // 受保护进程数
-    ULONG   TotalExits;      // 累计 VM-Exit 次数
-    ULONG   CpuCount;        // 虚拟化的 CPU 数
+    BOOLEAN VmxActive;       // Whether VMX is running
+    ULONG   ActiveTargets;   // Number of protected processes
+    ULONG   TotalExits;      // Cumulative VM-Exit count
+    ULONG   CpuCount;        // Number of virtualized CPUs
 } VMX_STATUS;
 
-// 日志条目
+// Log entry
 typedef struct _VMX_LOG_ENTRY {
     ULONG       Level;       // 0=Error, 1=Warn, 2=Info, 3=Debug
-    ULONG       Pid;         // 源进程 ID
-    LARGE_INTEGER Timestamp; // 内核时间戳
+    ULONG       Pid;         // Source Process ID
+    LARGE_INTEGER Timestamp; // Kernel timestamp
     CHAR        Message[256];
 } VMX_LOG_ENTRY;
 
-// 内存读写请求
+// Memory read/write request
 typedef struct _VMX_MEMORY_REQUEST {
-    ULONG       Pid;             // 目标进程 ID
-    ULONG       Size;            // 字节数 (最大 64KB)
-    ULONG64     VirtualAddress;  // 目标虚拟地址
+    ULONG       Pid;             // Target Process ID
+    ULONG       Size;            // Byte count (max 64KB)
+    ULONG64     VirtualAddress;  // Target virtual address
 } VMX_MEMORY_REQUEST;
 
-// Hook 规则
+// Hook rule
 typedef struct _HOOK_RULE {
-    ULONG       Action;             // 0=穿透 1=日志 2=拦截 3=改返回值
-    ULONG       TargetPid;          // 0=全局, >0=指定PID
-    ULONG64     BlockReturnValue;   // 拦截时返回值
-    ULONG64     NewReturnValue;     // 修改后返回值
-    BOOLEAN     LogEnabled;         // 是否写入事件日志
+    ULONG       Action;             // 0=Passthrough, 1=Log, 2=Block, 3=Modify Return Value
+    ULONG       TargetPid;          // 0=Global, >0=Specific PID
+    ULONG64     BlockReturnValue;   // Return value when blocked
+    ULONG64     NewReturnValue;     // Modified return value
+    BOOLEAN     LogEnabled;         // Whether to write event logs
 } HOOK_RULE;
 
-// 安装 Hook 请求
+// Install Hook request
 typedef struct _VMX_HOOK_REQUEST {
-    BOOLEAN     ByName;             // TRUE=按名称, FALSE=按地址
-    WCHAR       FunctionName[128];  // 内核导出名
-    ULONG64     TargetAddress;      // 直接虚拟地址
-    ULONG       ProcessId;          // 0=内核 Hook
+    BOOLEAN     ByName;             // TRUE=By Name, FALSE=By Address
+    WCHAR       FunctionName[128];  // Kernel export name
+    ULONG64     TargetAddress;      // Direct virtual address
+    ULONG       ProcessId;          // 0=Kernel Hook
     HOOK_RULE   Rule;
 } VMX_HOOK_REQUEST;
 
-// Hook 事件日志
+// Hook event log
 typedef struct _HOOK_EVENT {
-    ULONG       HookId;             // 触发的 Hook ID
-    ULONG       ProcessId;          // 调用者进程 ID
-    ULONG64     Timestamp;          // 内核时间戳
-    ULONG64     ReturnAddress;      // 调用者返回地址
-    ULONG64     FinalRetVal;        // 最终返回值
-    ULONG       ActionTaken;        // 执行的动作
+    ULONG       HookId;             // Triggered Hook ID
+    ULONG       ProcessId;          // Caller Process ID
+    ULONG64     Timestamp;          // Kernel timestamp
+    ULONG64     ReturnAddress;      // Caller return address
+    ULONG64     FinalRetVal;        // Final return value
+    ULONG       ActionTaken;        // Action executed
 } HOOK_EVENT;
 
-// SSDT 条目信息
+// SSDT entry info
 typedef struct _SSDT_ENTRY_INFO {
-    ULONG       SyscallIndex;       // Syscall 编号
-    ULONG       ArgCount;           // 参数个数 (entry & 0xF)
-    LONG        RawOffset;          // SSDT 表原始条目
-    ULONG64     FunctionVa;         // 解析后的函数虚拟地址
-    WCHAR       FunctionName[128];  // Nt* 函数名 (可能为空)
+    ULONG       SyscallIndex;       // Syscall number
+    ULONG       ArgCount;           // Argument count (entry & 0xF)
+    LONG        RawOffset;          // SSDT table raw entry
+    ULONG64     FunctionVa;         // Resolved function virtual address
+    WCHAR       FunctionName[128];  // Nt* function name (can be empty)
 } SSDT_ENTRY_INFO;
 
-// SSDT Hook 请求
+// SSDT Hook request
 typedef struct _VMX_SSDT_HOOK_REQUEST {
-    BOOLEAN     ByName;             // TRUE=按名称, FALSE=按 index
-    ULONG       SyscallIndex;       // ByName=FALSE 时使用
-    WCHAR       FunctionName[128];  // ByName=TRUE 时使用
-    HOOK_RULE   Rule;               // 复用现有 HOOK_RULE
+    BOOLEAN     ByName;             // TRUE=By Name, FALSE=By Index
+    ULONG       SyscallIndex;       // Used when ByName=FALSE
+    WCHAR       FunctionName[128];  // Used when ByName=TRUE
+    HOOK_RULE   Rule;               // Reuses existing HOOK_RULE
 } VMX_SSDT_HOOK_REQUEST;
 
-// SSDT 监控请求
+// SSDT monitor request
 typedef struct _VMX_SSDT_MONITOR_REQUEST {
     ULONG       Mode;               // SSDT_MONITOR_OFF/ALL/FILTERED
-    ULONG       TargetPid;          // 0=全局
-    ULONG       FilterCount;        // FilterIndices 有效个数
-    ULONG       FilterIndices[64];  // FILTERED 模式下的 syscall index 列表
+    ULONG       TargetPid;          // 0=Global
+    ULONG       FilterCount;        // Number of valid FilterIndices
+    ULONG       FilterIndices[64];  // Syscall index list under FILTERED mode
 } VMX_SSDT_MONITOR_REQUEST;
 ```
 
 ---
 
-## 数据流分析
+## Data Flow Analysis
 
-### 初始化流程
+### Initialization Flow
 
 ```
-用户: VMXToolbox.exe --pid 1234 --hide-all
+User: VMXToolbox.exe --pid 1234 --hide-all
   |
   v
 DriverOpen() -> CreateFile("\\\\.\\VmxDbg")
@@ -2338,72 +2324,72 @@ DriverOpen() -> CreateFile("\\\\.\\VmxDbg")
 DriverInitVmx() -> IOCTL_VMX_INIT
   |
   v
-[内核] HandleIoctlInit()
+[Kernel] HandleIoctlInit()
   +-- VmxInitialize()
-       +-- VmxCheckCapabilities()     // 读能力 MSR
-       +-- VmxAllocateCpuContext() x N // 分配内存
-       +-- EptInitialize()            // 构建 EPT 恒等映射
+       +-- VmxCheckCapabilities()     // Read capability MSRs
+       +-- VmxAllocateCpuContext() x N // Allocate memory
+       +-- EptInitialize()            // Construct EPT Identity Mapping
   |
   v
 DriverSetTarget(1234, AAD_HIDE_ALL) -> IOCTL_VMX_SET_TARGET
   |
   v
-[内核] HandleIoctlSetTarget()
+[Kernel] HandleIoctlSetTarget()
   +-- ProcessAddTarget(1234, 0xFFFFFFFF)
        +-- GetProcessCr3(1234)        // PsLookupProcessByProcessId
-       |    +-- 读取 EPROCESS + 动态偏移
-       +-- 存入 TARGET_PROCESS 数组
+       |    +-- Read EPROCESS + dynamic offset
+       +-- Store in TARGET_PROCESS array
 ```
 
-### VM-Exit 处理流程 (以 CPUID 为例)
+### VM-Exit Processing Flow (CPUID as an example)
 
 ```
-[Guest] 目标进程执行 CPUID 指令
+[Guest] Target process executes CPUID instruction
   |
   v
 [CPU] VM-Exit (reason = EXIT_REASON_CPUID)
   |
   v
 [Host] AsmVmxExitHandler
-  +-- 保存 16 个通用寄存器
+  +-- Save 16 general-purpose registers
   +-- call VmxExitHandler(PGUEST_CONTEXT)
        |
        +-- HandleCpuid() -> AadHandleCpuid()
             +-- GuestCr3 = VmxRead(VMCS_GUEST_CR3)
-            +-- __cpuidex(CpuInfo, Leaf, SubLeaf)  // 执行真实 CPUID
+            +-- __cpuidex(CpuInfo, Leaf, SubLeaf)  // Execute real CPUID
             +-- IsFeatureEnabled(GuestCr3, AAD_HIDE_CPUID)?
             |     +-- ProcessFindByCr3(GuestCr3)
-            |     +-- 检查 Flags & AAD_HIDE_CPUID
+            |     +-- Check Flags & AAD_HIDE_CPUID
             +-- if Leaf == 1:
-            |     CpuInfo[ECX] &= ~(1 << 31)  // 清除 Hypervisor Present
+            |     CpuInfo[ECX] &= ~(1 << 31)  // Clear Hypervisor Present bit
             +-- if Leaf == 0x40000000~0x400000FF:
-            |     CpuInfo = {0, 0, 0, 0}       // 返回全零
+            |     CpuInfo = {0, 0, 0, 0}       // Return all zeros
             +-- GuestContext->RAX/RBX/RCX/RDX = CpuInfo
             +-- VmxAdvanceGuestRip()
             +-- return TRUE
   |
-  +-- 恢复通用寄存器
-  +-- VMRESUME -> Guest 继续执行
+  +-- Restore general-purpose registers
+  +-- VMRESUME -> Guest continues execution
 ```
 
-### EPT Hook 数据流 (以 NtQueryInformationProcess 为例)
+### EPT Hook Data Flow (NtQueryInformationProcess as an example)
 
 ```
-[Guest] 目标进程调用 NtQueryInformationProcess
+[Guest] Target process calls NtQueryInformationProcess
   |
   v
-[CPU] 执行到 ntoskrnl!NtQueryInformationProcess 地址
+[CPU] Executes at ntoskrnl!NtQueryInformationProcess address
   |
   v
-[EPT] PTE = Execute-Only, PhysAddr = Hook 页
-  -> 执行 Hook 页上的 JMP 指令
+[EPT] PTE = Execute-Only, PhysAddr = Hook Page
+  -> Execute JMP instruction on Hook Page
   |
   v
 [Host] HookNtQueryInformationProcess()
-  +-- 调用 Trampoline (原函数)
-  |     +-- 执行原始 14 字节
-  |     +-- JMP 到 NtQueryInformationProcess + 14
-  |     +-- 原函数正常执行并返回
+  +-- Call Trampoline (original function)
+  |     +-- Execute original 14 bytes
+  |     +-- JMP to NtQueryInformationProcess + 14
+  |     +-- Original function executes normally and returns
   +-- CurrentCr3 = __readcr3()
   +-- Target = ProcessFindByCr3(CurrentCr3)
   +-- if Target && AAD_HIDE_DEBUGGER:
@@ -2414,154 +2400,154 @@ DriverSetTarget(1234, AAD_HIDE_ALL) -> IOCTL_VMX_SET_TARGET
   +-- return Status
   |
   v
-[Guest] 目标进程收到 "未被调试" 的结果
+[Guest] Target process receives "not debugged" result
 
 ---
 
-如果反调试代码读取 NtQueryInformationProcess 的函数字节做完整性检查:
+If the anti-debugging code reads the NtQueryInformationProcess function bytes for integrity check:
 
-[Guest] MOV RAX, [NtQueryInformationProcess]   // 读取函数字节
+[Guest] MOV RAX, [NtQueryInformationProcess]   // Read function bytes
   |
   v
-[EPT] PTE = Execute-Only, 读取触发 EPT Violation
+[EPT] PTE = Execute-Only, read triggers EPT Violation
   |
   v
 [Host] HandleEptViolation()
-  +-- PTE -> Read=1, Write=1, Execute=0, PhysAddr=原始页
-  +-- 启用 MTF
-  +-- 返回 (不推进 RIP, 重新执行读取指令)
+  +-- PTE -> Read=1, Write=1, Execute=0, PhysAddr=Original Page
+  +-- Enable MTF
+  +-- Return (do not advance RIP, re-execute read instruction)
   |
   v
-[Guest] 读取到原始未修改的函数字节 (完整性检查通过!)
+[Guest] Reads original unmodified function bytes (integrity check passes!)
   |
   v
-[CPU] MTF VM-Exit (单步完成)
+[CPU] MTF VM-Exit (single-step completed)
   |
   v
 [Host] HandleMtf()
-  +-- PTE -> Read=0, Write=0, Execute=1, PhysAddr=Hook页
-  +-- 关闭 MTF
+  +-- PTE -> Read=0, Write=0, Execute=1, PhysAddr=Hook Page
+  +-- Disable MTF
   +-- INVEPT
 ```
 
-### 内存读写数据流 (绕过反作弊)
+### Memory Read/Write Data Flow (Bypassing Anti-Cheat)
 
 ```
-[用户态] DeviceIoControl(IOCTL_VMX_READ_MEMORY, {Pid=1234, VA=0x7FF6xxx, Size=4096})
+[User Mode] DeviceIoControl(IOCTL_VMX_READ_MEMORY, {Pid=1234, VA=0x7FF6xxx, Size=4096})
   |
   v
-[内核驱动] HandleIoctlReadMemory()
+[Kernel Driver] HandleIoctlReadMemory()
   |
   +-- ResolvePidToCr3(1234)
   |     +-- PsLookupProcessByProcessId()
-  |     +-- 读取 EPROCESS[DirectoryTableBase]
-  |     +-- 得到 TargetCr3 = 0x1A3000
+  |     +-- Read EPROCESS[DirectoryTableBase]
+  |     +-- Get TargetCr3 = 0x1A3000
   |
   +-- KernelCopyProcessMemory(TargetCr3, 0x7FF6xxx, buffer, 4096, READ)
        |
-       +-- while (还有字节未处理):
+       +-- while (remaining bytes to process):
             |
             +-- KernelGuestVaToPa(0x1A3000, currentVA)
             |     |
-            |     +-- MmMapIoSpace(CR3基址)  → 读 PML4E
-            |     +-- MmMapIoSpace(PML4E指向) → 读 PDPTE
-            |     +-- MmMapIoSpace(PDPTE指向) → 读 PDE
-            |     +-- MmMapIoSpace(PDE指向)   → 读 PTE
-            |     +-- 得到物理地址 = 0x3F8A5000
+            |     +-- MmMapIoSpace(CR3 Base)  → Read PML4E
+            |     +-- MmMapIoSpace(PML4E points to) → Read PDPTE
+            |     +-- MmMapIoSpace(PDPTE points to) → Read PDE
+            |     +-- MmMapIoSpace(PDE points to)   → Read PTE
+            |     +-- Get physical address = 0x3F8A5000
             |
             +-- MmMapIoSpace(0x3F8A5000, 4096)
-            +-- RtlCopyMemory(buffer, 映射地址 + offset, chunkSize)
+            +-- RtlCopyMemory(buffer, mappedAddress + offset, chunkSize)
             +-- MmUnmapIoSpace()
 
-  *** 全程未调用: OpenProcess / NtReadVirtualMemory / KeStackAttachProcess ***
-  *** 反作弊驱动的 ObCallback / SSDT Hook / 调用栈检查 全部无效 ***
+  *** No calls to: OpenProcess / NtReadVirtualMemory / KeStackAttachProcess ***
+  *** Anti-cheat driver ObCallbacks / SSDT Hook / Call Stack Check are all completely bypassed ***
 ```
 
-写入流程完全对称，只是 `RtlCopyMemory` 方向相反。
+The write flow is completely symmetrical, only the direction of `RtlCopyMemory` is reversed.
 
 ---
 
-## 模块依赖关系
+## Module Dependency Relationship
 
 ```
-vmxdrv.c (驱动入口)
-+-- hv_ops.h (抽象层接口)
-+-- hv_detect.h/c (CPU 厂商检测 + VMX/SVM 能力探测)
-+-- hv_mem.h/c (物理内存读写引擎, Guest 页表遍历)
-+-- hv_hook.h/c (通用 Hook 框架, 动态 Thunk, 规则引擎)
+vmxdrv.c (Driver Entry)
++-- hv_ops.h (Abstraction Layer Interface)
++-- hv_detect.h/c (CPU Vendor Detection + VMX/SVM Capability Probing)
++-- hv_mem.h/c (Physical Memory Read/Write Engine, Guest Page Table Walk)
++-- hv_hook.h/c (General Hook Framework, Dynamic Thunk, Rule Engine)
 |   +-- hv_hook_asm.asm (ASM dispatcher)
-+-- log.h/c (日志)
-+-- process.h/c (进程跟踪)
-+-- vmx.h + vmx_init.c (Intel VMX 后端)
++-- log.h/c (Logging)
++-- process.h/c (Process Tracking)
++-- vmx.h + vmx_init.c (Intel VMX Backend)
 |   +-- ept.h/c (EPT)
 |   +-- vmx_asm.asm (VMLAUNCH)
-+-- svm.h + svm_init.c (AMD SVM 后端)
++-- svm.h + svm_init.c (AMD SVM Backend)
 |   +-- npt.h/c (NPT)
 |   +-- svm_asm.asm (VMRUN)
-+-- vmx_exit.c (Intel Exit 分发)
-+-- svm_exit.c (AMD Exit 分发)
-|   +-- hv_mem.h/c (VMCALL 内存操作处理)
-|   +-- anti_anti_debug.h/c (反反调试, 双平台共用)
-|   |   +-- hv_ops 宏 (HvReadGuestCr3, HvAdvanceGuestRip, ...)
-|   |   +-- process.h/c (进程查找)
-|   +-- msr.c (MSR 处理, 通过 hv_ops)
-+-- shared.h (IOCTL 定义)
++-- vmx_exit.c (Intel Exit Dispatcher)
++-- svm_exit.c (AMD Exit Dispatcher)
+|   +-- hv_mem.h/c (VMCALL Memory Operation Handling)
+|   +-- anti_anti_debug.h/c (Anti-Anti-Debugging, Shared between Dual Platforms)
+|   |   +-- hv_ops macros (HvReadGuestCr3, HvAdvanceGuestRip, ...)
+|   |   +-- process.h/c (Process Lookup)
+|   +-- msr.c (MSR Handling, via hv_ops)
++-- shared.h (IOCTL Definitions)
 
-client/main.c (用户态 CLI)
-+-- driver_comm.h/c (驱动通信)
-+-- shared.h (共享定义)
+client/main.c (User-Mode CLI)
++-- driver_comm.h/c (Driver Communication)
++-- shared.h (Shared Definitions)
 ```
 
 ---
 
-## 编译与部署
+## Compilation and Deployment
 
-### 编译环境
+### Compilation Environment
 
 - **WDK**: GRMWDK_EN_7600_1.ISO (Windows DDK 7600.16385.1)
-- **安装路径**: `C:\WinDDK\7600.16385.1`（默认路径，`do_build.bat` 中硬编码此路径）
-- **目标**: x64 Checked Build, Windows 7 Target
-- **无需额外配置**: `do_build.bat` 脚本内自包含完整的 WDK 环境变量设置，无需手动打开 WDK 命令行
+- **Installation Path**: `C:\WinDDK\7600.16385.1` (Default path, hardcoded in `do_build.bat`)
+- **Target**: x64 Checked Build, Windows 7 Target
+- **No Extra Config Required**: The `do_build.bat` script self-contains complete WDK environment variables setup. No need to run it inside the WDK Build Environment command prompt.
 
-### 编译方法
+### Compilation Method
 
-**方法 1: 使用 do_build.bat 一键编译（推荐）**
+**Method 1: One-Click Build using do_build.bat (Recommended)**
 
-`scripts\do_build.bat` 是一个自包含的编译脚本，内部完整配置了 WDK 7600 的所有环境变量（Include / Lib / PATH / 编译目标等），直接双击或在任意命令行中运行即可：
+`scripts\do_build.bat` is a self-contained build script that fully configures all WDK 7600 environment variables (Include / Lib / PATH / Build Target, etc.). You can run it directly from any command prompt:
 
 ```cmd
-:: 直接运行（无需打开 WDK 命令行环境）
-<项目根目录>\scripts\do_build.bat
+:: Run directly (no need to open WDK Build Environment)
+<Project Root>\scripts\do_build.bat
 ```
 
-脚本会自动完成以下步骤：
+The script automatically performs the following steps:
 
-1. 设置 WDK 7600 编译环境（`BASEDIR=C:\WinDDK\7600.16385.1`）
-2. 配置 AMD64 目标平台、Checked Build、Win7 Target
-3. 设置 Include 路径（`inc\api` + `inc\crt` + `inc\ddk`）
-4. 设置 Lib 路径（`lib\win7\amd64`）
-5. 设置编译器路径（`bin\x86\amd64` 交叉编译工具链）
-6. 切换到项目根目录
-7. 执行 `build.exe -cZg`（-c 全量编译，-Z 不跳过错误，-g 彩色输出）
+1. Configures WDK 7600 build environment (`BASEDIR=C:\WinDDK\7600.16385.1`)
+2. Sets target platform to AMD64, Checked Build, and Win7 Target
+3. Configures Include paths (`inc\api` + `inc\crt` + `inc\ddk`)
+4. Configures Lib paths (`lib\win7\amd64`)
+5. Configures compiler paths (`bin\x86\amd64` cross-compilation toolchain)
+6. Changes directory to the project root
+7. Executes `build.exe -cZg` (-c for clean build, -Z to stop on errors, -g for colorized output)
 
-预期编译输出：
+Expected compilation output:
 
 ```
 BUILD: Compile and Link for AMD64
-BUILD: Examining <项目根目录> directory tree for files to compile.
-    <项目根目录>
-    <项目根目录>\driver
-    <项目根目录>\client
-BUILD: Compiling <项目根目录>\driver directory
+BUILD: Examining <Project Root> directory tree for files to compile.
+    <Project Root>
+    <Project Root>\driver
+    <Project Root>\client
+BUILD: Compiling <Project Root>\driver directory
 Compiling - driver\vmxdrv.c
 Compiling - driver\vmx_init.c
 ...
 Assembling - driver\vmx_asm.asm
 Assembling - driver\svm_asm.asm
 Assembling - driver\hv_hook_asm.asm
-BUILD: Linking for <项目根目录>\driver directory
+BUILD: Linking for <Project Root>\driver directory
 Linking Executable - driver\...\VMXToolboxDrv.sys
-BUILD: Compiling and Linking <项目根目录>\client directory
+BUILD: Compiling and Linking <Project Root>\client directory
 Compiling - client\main.c
 Compiling - client\driver_comm.c
 Linking Executable - client\...\VMXToolbox.exe
@@ -2571,76 +2557,79 @@ BUILD: Done
     2 executables built
 ```
 
-> **注意**: 如果 WDK 安装路径不是默认的 `C:\WinDDK\7600.16385.1`，需修改 `do_build.bat` 第 6 行的 `BASEDIR` 变量。
+> **Note**: If your WDK installation path is not the default `C:\WinDDK\7600.16385.1`, you need to modify the `BASEDIR` variable on line 6 of `do_build.bat`.
 
-**方法 2: 使用 WDK 命令行环境手动编译**
+**Method 2: Manual Build via WDK Build Environment**
 
 ```cmd
-:: 打开 WDK 命令行环境
+:: Open WDK Build Environment
 C:\Windows\System32\cmd.exe /k C:\WinDDK\7600.16385.1\bin\setenv.bat C:\WinDDK\7600.16385.1\ chk x64 WIN7
 
-:: 切换到项目目录
-cd /d <项目根目录>
+:: Switch to project directory
+cd /d <Project Root>
 
-:: 编译
+:: Build
 build -cZg
 ```
 
-### 编译产出
+### Build Outputs
 
-| 文件 | 路径 |
+| File | Path |
 |------|------|
 | VMXToolboxDrv.sys | `driver\objchk_win7_amd64\amd64\VMXToolboxDrv.sys` |
 | VMXToolbox.exe | `client\objchk_win7_amd64\amd64\VMXToolbox.exe` |
 
-### 部署步骤
+### Deployment Steps
 
 ```cmd
-:: 1. 启用测试签名 (需管理员权限, 需重启)
+:: 1. Enable Test Signing (Requires Administrator privilege, requires reboot)
 bcdedit /set testsigning on
 
-:: 2. 加载驱动
-sc create VMXToolboxDrv type=kernel binPath="<项目根目录>\driver\objchk_win7_amd64\amd64\VMXToolboxDrv.sys"
+:: 2. Load Driver
+sc create VMXToolboxDrv type=kernel binPath="<Project Root>\driver\objchk_win7_amd64\amd64\VMXToolboxDrv.sys"
 sc start VMXToolboxDrv
 
-:: 3. 使用控制程序
+:: 3. Use Control Utility
 VMXToolbox.exe --pid <TARGET_PID> --hide-all
 VMXToolbox.exe --install-hook NtOpenProcess --action 1 --hook-log
 VMXToolbox.exe --read-mem <TARGET_PID> 7FF600000000 64
 
-:: 4. 卸载驱动
+:: 4. Unload Driver
 sc stop VMXToolboxDrv
 sc delete VMXToolboxDrv
 ```
 
 ---
 
-## 后续规划
+## Future Roadmap
 
-本项目作为基于 VMX/SVM 的可扩展平台，后续将持续增加更多底层能力：
+As an extensible low-level capabilities platform based on VMX/SVM, this project will continuously add more features:
 
-| 方向 | 功能 | 状态 |
-|------|------|------|
-| 反反调试 | PEB/NtQuery/DR/RDTSC/CPUID 等全套反检测 | ✅ 已完成 |
-| 内核 Hook | EPT/NPT 绕过 PatchGuard 的通用 Hook 框架 | ✅ 已完成 |
-| 内存读写 | 物理内存直接访问，绕过一切内核回调 | ✅ 已完成 |
-| SSDT 监控 | 磁盘映像解析 SSDT + EPT Hook 监控/拦截/过滤 syscall | ✅ 已完成 |
-| Shadow SSDT | Win32k Shadow SSDT 发现 + NtUser*/NtGdi* Hook/监控 | ✅ 已完成 |
-| 裸机运行 | 仅支持裸机环境 | ✅ |
-| 驱动隐藏 | 隐藏自身驱动对象，防止枚举 | 📋 规划中 |
-| 虚拟化保护 | 对目标进程代码段进行 VMX 级别加密保护 | 📋 规划中 |
-| 通信隐藏 | 基于 VMCALL 的隐蔽驱动通信通道 | 📋 规划中 |
+| Direction | Feature | Status |
+|-----------|---------|--------|
+| Anti-Anti-Debugging | Comprehensive anti-detection suite for PEB/NtQuery/DR/RDTSC/CPUID, etc. | ✅ Completed |
+| Kernel Hooking | Generic EPT/NPT hook framework bypassing PatchGuard | ✅ Completed |
+| Memory R/W | Direct physical memory access bypassing all kernel callbacks | ✅ Completed |
+| SSDT Monitoring | SSDT analysis from disk image + EPT Hook monitoring/blocking/filtering syscalls | ✅ Completed |
+| Shadow SSDT | Win32k Shadow SSDT discovery + NtUser*/NtGdi* Hook/monitoring | ✅ Completed |
+| Bare-metal execution | Dedicated bare-metal environment execution | ✅ Completed |
+| Driver Hiding | Hiding the driver object itself to prevent enumeration | 📋 Planned |
+| Virtualization Protection | Encrypting and protecting target process code segments at VMX level | 📋 Planned |
+| Stealthy Communication | VMCALL-based covert driver communication channel | 📋 Planned |
 
 ---
 
-## 关键风险与注意事项
+## Key Risks and Precautions
 
-| 风险 | 说明 | 应对措施 |
-|------|------|---------|
-| **蓝屏 (BSOD)** | VMX 代码中任何错误都可能导致蓝屏 | 在虚拟机中测试, 双机调试 |
-| **PatchGuard** | Windows 内核补丁保护可能检测异常 | EPT Hook 不修改内核代码, 通常不触发 |
-| **HVCI** | Hypervisor-protected Code Integrity 阻止自定义 Hypervisor | 需关闭 HVCI |
-| **驱动签名** | Windows 10+ 要求驱动签名 | 开发阶段使用 testsigning, 生产需 EV 证书 |
-| **EPROCESS 偏移** | 不同 Windows 版本偏移不同 | 已实现动态发现, 覆盖 Win7~Win11 |
-| **多核同步** | VM-Exit handler 在各核心并行运行 | 使用原子操作和 Spin Lock |
-| **进程退出** | 目标进程退出后 CR3 可能被复用 | 需要进程退出通知机制 (TODO) |
+| Risk | Description | Mitigation Measure |
+|------|-------------|--------------------|
+| **Blue Screen (BSOD)** | Any error inside VMX code can cause a BSOD | Test inside virtual machine, use dual-machine debugging |
+| **PatchGuard** | Windows Kernel Patch Protection may detect anomalies | EPT Hooks do not modify kernel code pages physically, usually safe |
+| **HVCI** | Hypervisor-protected Code Integrity blocks custom Hypervisors | HVCI must be disabled |
+| **Driver Signing** | Windows 10+ requires valid signatures | Use testsigning for development; EV certificate required for production |
+| **EPROCESS Offsets** | Offsets differ across Windows versions | Dynamic discovery implemented, covering Win7 to Win11 |
+| **Multi-core Sync** | VM-Exit handlers run concurrently across different cores | Leverage atomic operations and lock-free/spinlock mechanisms |
+| **Process Exit** | CR3 of target process might be reused after exit | Requires a process exit notification callback (TODO) |
+
+
+
